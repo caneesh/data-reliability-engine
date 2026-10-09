@@ -63,6 +63,8 @@ data-reliability-engine/
             landing.py merge.py  # cause checks by hop type
           store/
             ddl.sql          # dq tables and views
+            schema.py        # renders ddl.sql for the configured dq database and applies it
+            runs.py          # dq_run bookkeeping: run id, status, one row per finished run
             writer.py        # append-only writes; the only DataFrame write path
             retention.py     # drops expired run_date partitions; the only DROP PARTITION
             local_setup.py   # creates the dq database for tests and local runs only

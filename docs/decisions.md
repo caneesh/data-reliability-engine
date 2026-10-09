@@ -33,6 +33,14 @@ The engine field names chosen in step 2 are in spec section 3. The other assumpt
 7. **SQL fragments.** `dre validate` only rejects `;` in `feed_filter`, `open_when` and filter conditions. **Step 4 must parse them in `dre dry-run`** (Spark `EXPLAIN` or equivalent) and report failures with file, line and field.
 8. **Sample config.** No raw dataset until its columns are confirmed. The `older_coverage_still_open` grouping and order are placeholders until the rule baselines are run (spec section 11, queries 5 to 7).
 
+## Store assumptions (step 3, 2026-10-09)
+
+1. **One dq_run row per finished run.** `store/runs.py` appends the row when the run ends (start and end time, status, checks expected and written), keeping dq_run append-only. A run that dies first leaves no row, which the watchdog reports. `run_date` is the UTC date the run started. Status: COMPLETED when every expected check was written, PARTIAL when fewer, FAILED when the run says it failed.
+2. **v_latest_result with groups.** The spec says one row per (dataset, check\_id). For a check split by `group_by`, the view returns every group row of the latest evaluation (latest by `evaluated_at`, then `run_id`), so an ungrouped check still gives one row.
+3. **v_open_keys** gives the first flagged time of the key's current open spell (after its last CLEARED). It does not expose `key_value`, which stays restricted in `dq_key_event`.
+4. **v_file_status** gives the earliest `first_seen_at`, and size, `modified_at` and `observed_at` from the latest observation.
+5. **Who applies the DDL on the cluster is open.** `store/schema.py` renders and applies `store/ddl.sql` (`CREATE TABLE IF NOT EXISTS`, `CREATE OR REPLACE VIEW`); tests and local runs call it through `store/local_setup.py`. `dre run` does not apply it. Whether the platform team applies the rendered DDL, or a separate install step does, is still to be decided with them.
+
 ## Guard rules: reasons (decided after step 1, 2026-10-09)
 
 The rules themselves are in spec section 9 (Guard tests). Reasons, by rule:
