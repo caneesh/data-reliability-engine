@@ -5,6 +5,7 @@ dataset: gold_member_coverage_all
 table: gold_db.member_coverage
 layer: GOLD
 owner: membership-gold
+expectation_version: 1        # table-wide datasets carry their own; feed datasets use the feed's
 key: [src_sys_nm, sub_id, mem_nbr, mbr_mbrshp_covrg_eff_dt, covrg_agrmt_id]
 key_normalise: { sub_id: strip_leading_zeros }
 record_time: { column: src_lcts, format: null }

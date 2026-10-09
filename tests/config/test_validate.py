@@ -96,6 +96,12 @@ CASES = [
     ("feed-dataset-no-owner", GOLD, "layer: GOLD\n", "layer: GOLD\nowner: membership-gold\n", "owner", "owner: membership-gold", "feed 'example_realtime' owns", "remove owner"),
     ("rule-owner-recipients", RULE, "owner: membership-gold", "owner: other-team", "owner", "owner: other-team", "no recipients", "recipients in defaults.yaml"),
     ("regex-does-not-compile", FORMAT_RULE, "'^\\d{4}-\\d{2}-\\d{2}$'", "'^([0-9'", "params.pattern", "pattern:", "does not compile", "regular expression"),
+    ("default-timezone-missing", DEFAULTS, "timezone: America/Chicago", "", "timezone", "dq_database: dq", "missing", "add `timezone`"),
+    ("default-timezone-invalid", DEFAULTS, "timezone: America/Chicago", "timezone: Central", "timezone", "timezone: Central", "time zone", "IANA"),
+    ("load-time-timezone-invalid", GOLD, "granularity: minute }", "granularity: minute, timezone: Nowhere/Here }", "load_time.timezone", "load_time:", "time zone", "IANA"),
+    ("negative-settle", DEFAULTS, "settle_minutes: 15", "settle_minutes: -5", "settle_minutes", "settle_minutes", "greater than", ">= 0"),
+    ("table-wide-needs-version", TABLE_WIDE, "expectation_version: 1 ", "# ", "expectation_version", "dataset: gold_member_coverage_all", "needs an expectation_version", "expectation_version: 1"),
+    ("feed-dataset-no-version", GOLD, "layer: GOLD\n", "layer: GOLD\nexpectation_version: 2\n", "expectation_version", "expectation_version: 2", "versions this dataset's checks", "bump the feed's"),
     ("bad-email", DEFAULTS, "dre-alerts@example.com", "dre-alerts", "recipients.membership-gold[0]", "membership-gold:", "email", "name@domain"),
 ]
 

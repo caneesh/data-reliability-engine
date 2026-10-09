@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from hcsc.datalake.dre.checks.base import Check, CheckContext, CheckResult, error_detail, run_check
-from hcsc.datalake.dre.checks.events import Event, evaluation_id, previous_window_end
+from hcsc.datalake.dre.checks.events import Event, evaluation_id, previous_window_end, window_for
 from hcsc.datalake.dre.checks.registry import checks_for
 from hcsc.datalake.dre.config.loader import Config, ConfigError
 from hcsc.datalake.dre.config.validate import validate_conf
@@ -34,9 +34,13 @@ EXIT_COMPLETED, EXIT_PARTIAL, EXIT_CANNOT_START = 0, 2, 3
 
 @dataclass(frozen=True)
 class Planned:
-    feed: Feed
+    feed: Feed | None  # None for a table-wide dataset
     dataset: Dataset
     check: Check
+
+    @property
+    def expectation_version(self) -> int:
+        return self.feed.expectation_version if self.feed else (self.dataset.expectation_version or 1)
 
 
 @dataclass(frozen=True)
@@ -49,33 +53,53 @@ class Evaluation:
 
 
 def plan(config: Config, feed_id: str | None = None) -> list[Planned]:
-    """Every (feed, dataset, check) to evaluate, in config order."""
+    """Every (feed, dataset, check) to evaluate: feed datasets in config order, then, when no
+    feed is named, table-wide datasets (those no feed lists)."""
     feeds = [config.feeds[feed_id]] if feed_id else list(config.feeds.values())
-    return [
+    work = [
         Planned(feed, config.datasets[ds_id], check)
         for feed in feeds
         for ds_id in feed.datasets
         for check in checks_for(config.datasets[ds_id], feed.pattern)
     ]
+    if feed_id is None:
+        listed = {ds for feed in config.feeds.values() for ds in feed.datasets}
+        work += [
+            Planned(None, ds, check)
+            for ds_id, ds in config.datasets.items() if ds_id not in listed
+            for check in checks_for(ds, None)
+        ]
+    return work
 
 
-def evaluate(spark: SparkSession, config: Config, planned: Planned, window_end: datetime,
-             window_start: datetime | None) -> Evaluation:
-    event = Event(planned.dataset.dataset, window_start, window_end)
-    ctx = CheckContext(spark, planned.dataset, planned.feed, config.dataset_settings(planned.dataset.dataset))
+def evaluate(spark: SparkSession, config: Config, planned: Planned, run_start: datetime,
+             read_store: bool = True) -> Evaluation:
+    """read_store=False (dry-run): if the store cannot be read, window as on a first run."""
+    settings = config.dataset_settings(planned.dataset.dataset)
+    try:
+        previous = previous_window_end(spark, config.defaults.dq_database, planned.dataset.dataset)
+    except Exception:
+        if read_store:
+            raise
+        previous = None
+    event = window_for(planned.dataset, run_start, previous, settings, config.defaults.timezone)
+    ctx = CheckContext(spark, planned.dataset, planned.feed, settings, config.defaults.timezone)
     results, duration_ms = run_check(planned.check, ctx, event)
     return Evaluation(planned, event, results, datetime.now(timezone.utc), duration_ms)
 
 
 def result_rows(evaluation: Evaluation, run: runs.Run, execution_type: str) -> list[dict[str, Any]]:
     p = evaluation.planned
-    eval_id = evaluation_id(evaluation.event.event_id, p.check.check_id, p.feed.expectation_version,
-                            run.engine_version)
+    event = evaluation.event
     return [
         {
-            "evaluation_id": eval_id, "run_id": run.run_id, "event_id": evaluation.event.event_id,
-            "execution_type": execution_type, "feed": p.feed.feed, "dataset": p.dataset.dataset,
-            "check_id": p.check.check_id, "expectation_version": p.feed.expectation_version,
+            "evaluation_id": evaluation_id(event.event_id, p.check.check_id, p.expectation_version,
+                                           run.engine_version, r.group_values),
+            "run_id": run.run_id, "event_id": event.event_id,
+            "window_start": event.window_start, "window_end": event.window_end,
+            "execution_type": execution_type, "feed": p.feed.feed if p.feed else None,
+            "dataset": p.dataset.dataset,
+            "check_id": p.check.check_id, "expectation_version": p.expectation_version,
             "state": r.state, "reason_category": r.reason_category, "reason_code": r.reason_code,
             "population": r.population, "violations": r.violations, "observed": r.observed,
             "expected": r.expected, "group_values": r.group_values, "severity": None,
@@ -128,8 +152,7 @@ def run(spark: SparkSession, conf: str, feed_id: str | None = None, execution_ty
     written = 0
     try:
         for planned in work:
-            window_start = previous_window_end(spark, db, planned.dataset.dataset)
-            evaluation = evaluate(spark, config, planned, run_record.started_at, window_start)
+            evaluation = evaluate(spark, config, planned, run_record.started_at)
             try:
                 append_check_results(spark, db, result_rows(evaluation, run_record, execution_type))
                 written += 1
@@ -157,18 +180,13 @@ def dry_run(spark: SparkSession, conf: str, feed_id: str) -> int:
     if feed_id not in config.feeds:
         print(f"dre dry-run: unknown feed {feed_id!r}")
         return EXIT_CANNOT_START
-    db = config.defaults.dq_database
     problems: list[ConfigError] = check_fragments(spark, config, feed_id)
     for problem in problems:
         print(problem)
     now = datetime.now(timezone.utc)
     work = plan(config, feed_id)
     for planned in work:
-        try:
-            window_start = previous_window_end(spark, db, planned.dataset.dataset)
-        except Exception:
-            window_start = None
-        for line in describe(evaluate(spark, config, planned, now, window_start)):
+        for line in describe(evaluate(spark, config, planned, now, read_store=False)):
             print(line)
     print(f"dre dry-run: {len(work)} checks evaluated, {len(problems)} SQL fragment problem(s), nothing written")
     return 0

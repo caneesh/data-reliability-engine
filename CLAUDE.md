@@ -17,6 +17,7 @@ A read-only engine that watches the membership data lake, finds data issues befo
 ## How to work
 
 - **Build in the order in spec section 10, one step at a time.** Start each step by stating the plan: files to add or change, and tests to write. A step is done only when its "done when" condition passes. Then stop and summarise what was built, anything in the spec that was unclear, and any assumption made.
+- **Every step summary starts with the CI result and the test that proves the step's "done when":** the CI run number and commit, and the test file and test name.
 - **Do not build ahead.** Anything listed under "Not in release 1" (spec section 1) is out of scope, as is anything else not in the spec.
 - **Tests first where practical.** Every check and cause check needs a test that shows it can FAIL and a test that shows it can PASS, plus the DID_NOT_RUN path.
 - **Never weaken a test to make it pass.** If a replay scenario (R01 to R12) fails, fix the engine or raise the spec question.

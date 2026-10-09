@@ -8,12 +8,11 @@ from hcsc.datalake.dre.checks.base import CheckContext, run_check
 from hcsc.datalake.dre.checks.events import Event
 from hcsc.datalake.dre.checks.registry import CHECKS, checks_for, pattern_check_ids
 from hcsc.datalake.dre.checks.tier1.key_duplicates import KeyDuplicates
-from hcsc.datalake.dre.config.models import Dataset, Settings
+from hcsc.datalake.dre.config.models import Dataset
+from tests.fixtures.settings import SETTINGS
 from tests.fixtures.layers import GOLD_COLUMNS, create_table, gold_row
 
-SETTINGS = Settings(sla_hours=8, email_sample_keys=False, min_rows_per_load=1, volume_tolerance_pct=50,
-                    compute_budget_minutes=8, full_sweep_day="SUNDAY")
-EVENT = Event("gold", None, datetime(2026, 1, 1, tzinfo=timezone.utc))
+EVENT = Event("gold", datetime(2025, 12, 31, tzinfo=timezone.utc), datetime(2026, 1, 1, tzinfo=timezone.utc))
 KEY = ["sub_id", "mem_nbr", "mbr_mbrshp_covrg_eff_dt", "covrg_agrmt_id"]
 
 
@@ -76,9 +75,9 @@ def test_did_not_run_on_missing_group_column(spark) -> None:
 def test_applies_only_to_key_unique_datasets() -> None:
     assert checks_for(gold("x.y"), "FILE_CYCLIC") == [CHECKS["T1_KEY_DUPLICATES"]]
     assert checks_for(gold("x.y", key_unique=False), "FILE_CYCLIC") == []
-    assert checks_for(gold("x.y"), None) == []  # table-wide datasets get rules, not Tier 1 checks
+    assert checks_for(gold("x.y"), None) == [CHECKS["T1_KEY_DUPLICATES"]]  # table-wide: patterns/table_wide.yaml
 
 
 def test_every_pattern_lists_known_checks() -> None:
-    for pattern in ("FILE_CYCLIC", "FILE_PERIODIC", "TABLE_MERGE"):
+    for pattern in ("FILE_CYCLIC", "FILE_PERIODIC", "TABLE_MERGE", "TABLE_WIDE"):
         assert "T1_KEY_DUPLICATES" in pattern_check_ids(pattern)

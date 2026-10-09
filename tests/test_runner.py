@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import timedelta, timezone
+
 from hcsc.datalake.dre.checks.events import Event, previous_window_end
 from hcsc.datalake.dre.cli import main
 from tests.fixtures.layers import CURATED_COLUMNS, GOLD_COLUMNS, create_table, curated_row, gold_row
@@ -22,18 +24,36 @@ def test_run_writes_results_and_windows_follow_on(spark, tmp_path, capsys) -> No
     assert main(["run", "--conf", str(replay.conf)]) == 0  # FAILED checks still exit 0
     out = capsys.readouterr().out
     assert "gold_member_coverage T1_KEY_DUPLICATES [src_sys_nm=SRC_A]: FAILED (population 1, violations 1)" in out
-    [first] = spark.table(f"{replay.dq}.dq_check_result").collect()
+    rows = {r.dataset: r for r in spark.table(f"{replay.dq}.dq_check_result").collect()}
+    first = rows["gold_member_coverage"]
     assert (first.feed, first.expectation_version, first.execution_type) == ("example_realtime", 1, "NORMAL")
     assert first.group_values == {"src_sys_nm": "SRC_A"}
-    [run1] = [r for r in spark.table(f"{replay.dq}.v_latest_run").collect()]
-    assert first.event_id == Event("gold_member_coverage", None, run1.started_at).event_id
+    table_wide = rows["gold_member_coverage_all"]
+    assert (table_wide.feed, table_wide.expectation_version) == (None, 1)
+
+    # First window: ends settle_minutes (15) before the run, truncated to gold's minute
+    # granularity, and starts initial_lookback_hours (24) earlier.
+    [run1] = spark.table(f"{replay.dq}.v_latest_run").collect()
+    end = (run1.started_at - timedelta(minutes=15)).replace(second=0, microsecond=0)
+    assert (first.window_start, first.window_end) == (end - timedelta(hours=24), end)
+    assert first.event_id == Event("gold_member_coverage", first.window_start, first.window_end).event_id
 
     # The next run's window starts where the first one ended.
-    assert previous_window_end(spark, replay.dq, "gold_member_coverage") == run1.started_at
-    assert main(["run", "--conf", str(replay.conf), "--execution-type", "REPLAY"]) == 0
-    second = [r for r in spark.table(f"{replay.dq}.dq_check_result").collect() if r.run_id != run1.run_id]
-    assert [r.execution_type for r in second] == ["REPLAY"]
+    assert previous_window_end(spark, replay.dq, "gold_member_coverage") == end.replace(tzinfo=timezone.utc)
+    assert main(["run", "--conf", str(replay.conf)]) == 0
+    second = [r for r in spark.table(f"{replay.dq}.dq_check_result").collect()
+              if r.run_id != run1.run_id and r.dataset == "gold_member_coverage"]
+    assert [r.window_start for r in second] == [end]
     assert second[0].event_id != first.event_id
+
+
+def test_replay_runs_do_not_move_the_window(spark, tmp_path) -> None:
+    replay = replay_conf(spark, tmp_path, "runner_f")
+    create_table(spark, replay.gold, GOLD_COLUMNS, [gold_row()])
+    assert main(["run", "--conf", str(replay.conf), "--execution-type", "REPLAY"]) == 0
+    rows = spark.table(f"{replay.dq}.dq_check_result").collect()
+    assert {r.execution_type for r in rows} == {"REPLAY"}
+    assert previous_window_end(spark, replay.dq, "gold_member_coverage") is None
 
 
 def test_run_one_feed_and_unknown_feed(spark, tmp_path, capsys) -> None:

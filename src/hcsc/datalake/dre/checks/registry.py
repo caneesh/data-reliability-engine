@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 
 CHECKS: dict[str, Check] = {check.check_id: check for check in (KeyDuplicates(),)}
 PATTERNS = ("FILE_CYCLIC", "FILE_PERIODIC", "TABLE_MERGE")
+TABLE_WIDE = "TABLE_WIDE"  # pseudo-pattern for datasets that no feed lists
 
 
 @cache
@@ -30,7 +31,7 @@ def pattern_check_ids(pattern: str) -> tuple[str, ...]:
 
 
 def checks_for(dataset: Dataset, pattern: str | None) -> list[Check]:
-    """The pattern's checks that apply to this dataset. Table-wide datasets (no pattern) get none."""
-    if pattern is None:
-        return []
+    """The pattern's checks that apply to this dataset. Table-wide datasets (pattern None)
+    get the patterns/table_wide.yaml list."""
+    pattern = pattern or TABLE_WIDE
     return [CHECKS[i] for i in pattern_check_ids(pattern) if CHECKS[i].applies_to(dataset, pattern)]

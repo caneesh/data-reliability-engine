@@ -1,0 +1,6 @@
+# Checks for table-wide datasets (no feed, so no ingestion pattern), in run order.
+# Only checks that do not depend on how data arrives: T1_SCHEMA_DRIFT, T1_KEY_NULLS
+# and T1_KEY_DUPLICATES (decided in the step 4 review). Build step 5 adds the first two.
+pattern: TABLE_WIDE
+checks:
+  - T1_KEY_DUPLICATES

@@ -56,6 +56,7 @@ data-reliability-engine/
             file_cyclic.yaml # checks and cause checks per pattern
             file_periodic.yaml
             table_merge.yaml
+            table_wide.yaml  # checks for table-wide datasets (no feed)
           checks/
             base.py          # Check interface, result building, denominator rule, preconditions, run_check
             keys.py          # key expressions with key_normalise applied
@@ -134,7 +135,8 @@ feed_filter: "src_sys_nm = 'RMS'" # rows belonging to this feed, when a table ho
 key: [sub_id, mem_nbr, mbr_mbrshp_covrg_eff_dt, covrg_agrmt_id]
 key_normalise: { sub_id: strip_leading_zeros }
 record_time: { column: src_lcts, format: null }  # same shape as load_time; format null when the column is DATE or TIMESTAMP
-load_time: { column: gld_lcts, format: "yyyy-MM-dd HH:mm:ss:SSSSSS", granularity: minute }
+load_time: { column: gld_lcts, format: "yyyy-MM-dd HH:mm:ss:SSSSSS", granularity: minute, timezone: America/Chicago }
+                                  # timezone: IANA zone the values are written in; null uses defaults.yaml `timezone`
 partition_column: null
 file_name_column: null            # column holding the landed file name, if any
 min_rows_per_load: 1
@@ -152,7 +154,9 @@ winner_rule:                      # optional; how the merge chooses among versio
 compute_budget_minutes: 8
 ```
 
-**Table-wide datasets.** A dataset that no feed lists covers a whole table, for example to run gold rules across every source system. It must set `owner` (whose recipients get its results), has no `feed_filter`, and takes its settings from `defaults.yaml`. A dataset that a feed lists takes its owner from the feed and must not set `owner`. Each dataset is listed by at most one feed.
+**Table-wide datasets.** A dataset that no feed lists covers a whole table, for example to run gold rules across every source system. It must set `owner` (whose recipients get its results) and `expectation_version` (it has no feed to take one from), has no `feed_filter`, and takes its settings from `defaults.yaml`. It gets the checks in `patterns/table_wide.yaml`: T1\_SCHEMA\_DRIFT, T1\_KEY\_NULLS and T1\_KEY\_DUPLICATES only, plus gold rules. A dataset that a feed lists takes its owner and expectation version from the feed and must set neither. Each dataset is listed by at most one feed.
+
+**Defaults for time and windows** (in `defaults.yaml`, overridable per feed or dataset where noted): `timezone` (IANA name for time columns that do not set their own; not overridable), `settle_minutes` (default 15) and `initial_lookback_hours` (default 24), both used by event windows (section 4).
 
 **Rule** (a gold rule from a template):
 
@@ -180,9 +184,13 @@ Rule `params` shapes, where section 6 does not spell them out: `superseded_still
 
 **Run.** One execution of `dre run`. Gets a `run_id` (UUID), records start and end time, the engine version and the git commit of the configuration.
 
-**Evaluation event.** The thing a check evaluates. In release 1 there is one kind, a batch load event: one dataset, one load window (from the previous run's watermark to this run's), identified by `event_id = sha256(dataset + window_start + window_end)`. Streaming windows come later and must fit the same interface.
+**Evaluation event.** The thing a check evaluates. In release 1 there is one kind, a batch load event: one dataset, one load window, identified by `event_id = sha256(dataset + window_start + window_end)`. Streaming windows come later and must fit the same interface. Windows are UTC and half-open: they include `window_start` and exclude `window_end`. Each result row records its event's `window_start` and `window_end`.
 
-**Evaluation identity.** `evaluation_id = sha256(event_id + check_id + expectation_version + engine_version)`. A rerun of the same evaluation writes a new row with the same `evaluation_id` and `execution_type = RERUN`; it never overwrites. Values: NORMAL, RERUN, REPLAY.
+- `window_end` = the run's start minus `settle_minutes` (default 15), so rows still being written are left for the next run.
+- `window_start` = the latest `window_end` among the dataset's NORMAL events, skipping any event in which a check was DID\_NOT\_RUN for a PLATFORM, BUDGET or CONFIGURATION reason (that window is evaluated again). On a dataset's first run, `window_end` minus `initial_lookback_hours` (default 24).
+- Both bounds are truncated to `load_time.granularity`, counted in the load time's zone. A window never runs backwards: if the previous end is later than this end, the window is empty.
+
+**Evaluation identity.** `evaluation_id = sha256(event_id + check_id + expectation_version + engine_version + group_values)`, with `group_values` written as `key=value` pairs sorted by key (empty for an ungrouped check), so each group row of a grouped check has its own id. A rerun of the same evaluation writes a new row with the same `evaluation_id` and `execution_type = RERUN`; it never overwrites. Values: NORMAL, RERUN, REPLAY.
 
 **Result states.** Exactly one per check per event:
 
@@ -207,7 +215,7 @@ Rule `params` shapes, where section 6 does not spell them out: `superseded_still
 
 **Cause result states**, for cause checks only: CONFIRMED, RULED\_OUT, NOT\_READY (a required config input is empty), ERROR. The cause of a failure is the first CONFIRMED in the pattern's order; if none, "cause not proven".
 
-**Times.** Three kinds, never compared with each other: record time (the source's version of a row), load time (when a layer wrote it), first-seen time (when DRE first saw a file or record). Every check declares which one it uses. Parse every time column with its configured format before comparing; never compare times as strings.
+**Times.** Three kinds, never compared with each other: record time (the source's version of a row), load time (when a layer wrote it), first-seen time (when DRE first saw a file or record). Every check declares which one it uses. Parse every time column with its configured format and convert it from its configured `timezone` (or the default in `defaults.yaml`) to UTC before comparing; never assume a source column is UTC, and never compare times as strings.
 
 ## 5. Data model
 
@@ -223,7 +231,9 @@ CREATE TABLE dq.dq_run (
 ) PARTITIONED BY (run_date DATE) STORED AS ORC;
 
 CREATE TABLE dq.dq_check_result (
-  evaluation_id STRING, run_id STRING, event_id STRING, execution_type STRING,
+  evaluation_id STRING, run_id STRING, event_id STRING,
+  window_start TIMESTAMP, window_end TIMESTAMP,          -- the event's window, UTC: [start, end)
+  execution_type STRING,
   feed STRING, dataset STRING, check_id STRING, expectation_version INT,
   state STRING,                         -- PASSED | FAILED | DID_NOT_RUN
   reason_category STRING, reason_code STRING,
@@ -263,7 +273,7 @@ Views derive current state:
 
 ## 6. Check catalogue
 
-Each check is a class implementing `applies_to(dataset, pattern)`, `required_columns(dataset)` (the configured columns its preconditions verify) and `evaluate(ctx, event) -> list[CheckResult]` (one result per `group_by` group, one in total for an ungrouped check). Logic lives in a Jinja2 SQL template; the class only renders, runs and builds the result. `run_check` wraps every check: preconditions first (table and columns exist), then `evaluate`; any exception becomes DID\_NOT\_RUN with a reason, and `detail` keeps only the exception type and Spark error class, never the message. The checks for each pattern are listed in `patterns/*.yaml`; table-wide datasets (no feed, so no pattern) get gold rules only.
+Each check is a class implementing `applies_to(dataset, pattern)`, `required_columns(dataset)` (the configured columns its preconditions verify) and `evaluate(ctx, event) -> list[CheckResult]` (one result per `group_by` group, one in total for an ungrouped check). Logic lives in a Jinja2 SQL template; the class only renders, runs and builds the result. `run_check` wraps every check: preconditions first (table and columns exist), then `evaluate`; any exception becomes DID\_NOT\_RUN with a reason, and `detail` keeps only the exception type and Spark error class, never the message. The checks for each pattern are listed in `patterns/*.yaml`; table-wide datasets (no feed, so no pattern) get the checks in `patterns/table_wide.yaml`. T1\_SCHEMA\_DRIFT runs once per physical table, not once per dataset, even when several datasets share a table.
 
 **Tier 1 checks** (applied automatically by pattern):
 

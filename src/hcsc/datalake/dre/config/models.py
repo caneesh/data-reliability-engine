@@ -144,6 +144,8 @@ class SettingsOverride(Model):
     volume_tolerance_pct: float | None = Field(default=None, gt=0)
     compute_budget_minutes: float | None = Field(default=None, gt=0)
     full_sweep_day: Weekday | None = None
+    settle_minutes: int | None = Field(default=None, ge=0)
+    initial_lookback_hours: float | None = Field(default=None, gt=0)
 
 
 SETTING_FIELDS: tuple[str, ...] = tuple(SettingsOverride.model_fields)
@@ -158,6 +160,8 @@ class Settings(Model):
     volume_tolerance_pct: float = Field(gt=0)
     compute_budget_minutes: float = Field(gt=0)
     full_sweep_day: Weekday
+    settle_minutes: int = Field(ge=0)
+    initial_lookback_hours: float = Field(gt=0)
 
 
 # --- defaults.yaml ---
@@ -166,6 +170,7 @@ class Settings(Model):
 class Defaults(SettingsOverride):
     dq_database: Annotated[str, AfterValidator(_dq_database)]
     environment: NonEmptyStr
+    timezone: TimeZone  # for time columns that do not set their own
     hmac_secret_file: str | None = None
     retention_months: dict[str, Annotated[int, Field(ge=1)]]
     recipients: dict[NonEmptyStr, Annotated[list[Email], Field(min_length=1)]] = {}
@@ -173,6 +178,9 @@ class Defaults(SettingsOverride):
     email_sample_keys: bool | None = False
     volume_tolerance_pct: float | None = Field(default=50, gt=0)
     full_sweep_day: Weekday | None = "SUNDAY"
+    # Event windows (spec section 4).
+    settle_minutes: int | None = Field(default=15, ge=0)
+    initial_lookback_hours: float | None = Field(default=24, gt=0)
 
     @model_validator(mode="after")
     def _check(self) -> Defaults:
@@ -260,11 +268,17 @@ class Feed(SettingsOverride):
 
 
 class TimeColumn(Model):
-    """A time column and how to parse it. format null: the column is already DATE or TIMESTAMP."""
+    """A time column and how to read it.
+
+    format null: the column is already DATE or TIMESTAMP. timezone: the IANA zone
+    the values are written in (null: defaults.yaml `timezone`); values are
+    converted to UTC before any comparison.
+    """
 
     column: Identifier
     format: NonEmptyStr | None = None
     granularity: Granularity | None = None
+    timezone: TimeZone | None = None
 
 
 class WinnerRule(Model):
@@ -280,6 +294,7 @@ class Dataset(SettingsOverride):
     key: Annotated[list[Identifier], Field(min_length=1)]
     key_normalise: dict[Identifier, Normaliser] = {}
     owner: NonEmptyStr | None = None  # only for table-wide datasets that no feed lists
+    expectation_version: int | None = Field(default=None, ge=1)  # only for table-wide datasets
     record_time: TimeColumn | None = None
     load_time: TimeColumn | None = None
     partition_column: Identifier | None = None

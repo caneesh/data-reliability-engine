@@ -4,6 +4,7 @@
 
 dq_database: dq
 environment: dev
+timezone: America/Chicago    # time columns are read in this zone unless they set their own
 hmac_secret_file: null        # absolute path to a protected file; never commit the secret
 
 retention_months:             # spec section 5: results and events 7 years, file registry 13 months
@@ -23,3 +24,5 @@ min_rows_per_load: 1
 volume_tolerance_pct: 50
 compute_budget_minutes: 8
 full_sweep_day: SUNDAY
+settle_minutes: 15            # a window ends this long before the run starts
+initial_lookback_hours: 24    # a dataset's first window covers this many hours

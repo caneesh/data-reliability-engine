@@ -13,12 +13,11 @@ from hcsc.datalake.dre.checks.base import (
 )
 from hcsc.datalake.dre.checks.events import Event, evaluation_id
 from hcsc.datalake.dre.checks.keys import key_exprs
-from hcsc.datalake.dre.config.models import Dataset, Settings
+from hcsc.datalake.dre.config.models import Dataset
+from tests.fixtures.settings import SETTINGS
 from tests.fixtures.layers import GOLD_COLUMNS, create_table, gold_row
 
-SETTINGS = Settings(sla_hours=8, email_sample_keys=False, min_rows_per_load=1, volume_tolerance_pct=50,
-                    compute_budget_minutes=8, full_sweep_day="SUNDAY")
-EVENT = Event("ds", None, datetime(2026, 1, 1, tzinfo=timezone.utc))
+EVENT = Event("ds", datetime(2025, 12, 31, tzinfo=timezone.utc), datetime(2026, 1, 1, tzinfo=timezone.utc))
 
 
 def dataset(table: str, **extra) -> Dataset:
@@ -140,8 +139,8 @@ def test_key_exprs_apply_key_normalise() -> None:
 
 
 def test_event_and_evaluation_ids() -> None:
-    first = Event("ds", None, datetime(2026, 1, 1, tzinfo=timezone.utc))
-    naive = Event("ds", None, datetime(2026, 1, 1))  # naive means UTC
+    first = Event("ds", datetime(2025, 12, 31, tzinfo=timezone.utc), datetime(2026, 1, 1, tzinfo=timezone.utc))
+    naive = Event("ds", datetime(2025, 12, 31), datetime(2026, 1, 1))  # naive means UTC
     second = Event("ds", first.window_end, datetime(2026, 1, 2, tzinfo=timezone.utc))
     assert first.event_id == naive.event_id
     assert first.event_id != second.event_id

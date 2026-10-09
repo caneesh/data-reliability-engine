@@ -93,12 +93,19 @@ def cross_check(config: Config, feeds_complete: bool = True) -> list[ConfigError
             if ds.owner is not None:
                 err("dataset", ds_id, ("owner",), f"owner is set, but feed {member_of[ds_id]!r} owns this dataset",
                     "remove owner; the feed's owner receives its results")
+            if ds.expectation_version is not None:
+                err("dataset", ds_id, ("expectation_version",),
+                    f"expectation_version is set, but feed {member_of[ds_id]!r} versions this dataset's checks",
+                    "remove expectation_version; bump the feed's instead")
         elif feeds_complete:
             if ds.owner is None:
                 err("dataset", ds_id, ("owner",), "a dataset that no feed lists needs an owner",
                     "add owner: (a table-wide dataset), or list the dataset in its feed")
             else:
                 check_owner("dataset", ds_id, ds.owner)
+            if ds.expectation_version is None:
+                err("dataset", ds_id, ("expectation_version",), "a dataset that no feed lists needs an expectation_version",
+                    "add expectation_version: 1, and bump it when this dataset's checks change")
             if ds.feed_filter is not None:
                 err("dataset", ds_id, ("feed_filter",), "a dataset that no feed lists cannot have a feed_filter",
                     "remove feed_filter (table-wide datasets cover the whole table), or list the dataset in its feed")

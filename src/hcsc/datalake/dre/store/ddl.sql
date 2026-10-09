@@ -10,7 +10,9 @@ CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_run (
 ) PARTITIONED BY (run_date DATE) STORED AS ORC;
 
 CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_check_result (
-  evaluation_id STRING, run_id STRING, event_id STRING, execution_type STRING,
+  evaluation_id STRING, run_id STRING, event_id STRING,
+  window_start TIMESTAMP, window_end TIMESTAMP,
+  execution_type STRING,
   feed STRING, dataset STRING, check_id STRING, expectation_version INT,
   state STRING,
   reason_category STRING, reason_code STRING,
@@ -56,7 +58,7 @@ WHERE latest_rank = 1;
 -- Every row of the latest evaluation per (dataset, check_id): one row for an
 -- ungrouped check, one row per group for a grouped one.
 CREATE VIEW IF NOT EXISTS {{ dq_database }}.v_latest_result AS
-SELECT evaluation_id, run_id, event_id, execution_type, feed, dataset, check_id,
+SELECT evaluation_id, run_id, event_id, window_start, window_end, execution_type, feed, dataset, check_id,
        expectation_version, state, reason_category, reason_code, population,
        violations, observed, expected, group_values, severity, evaluated_at,
        duration_ms, detail, run_date

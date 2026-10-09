@@ -93,6 +93,7 @@ class CheckContext:
     dataset: Dataset
     feed: Feed | None
     settings: Settings
+    default_timezone: str = "UTC"  # defaults.yaml timezone, for time columns without their own
 
 
 class Check(ABC):

@@ -26,9 +26,13 @@ def test_r09_renamed_column_is_column_missing_and_run_continues(spark, tmp_path,
     assert "mem_nbr" in gold.detail
     assert gold.population is None
 
+    # The table-wide dataset over the same gold table reads the same column.
+    [table_wide] = results[("gold_member_coverage_all", "T1_KEY_DUPLICATES")]
+    assert (table_wide.state, table_wide.reason_code) == ("DID_NOT_RUN", "column_missing")
+
     [curated] = results[("example_curated_enrollment", "T1_KEY_DUPLICATES")]
     assert (curated.state, curated.population, curated.violations) == ("PASSED", 2, 0)
 
     [run] = spark.table(f"{replay.dq}.v_latest_run").collect()
-    assert (run.status, run.checks_expected, run.checks_written) == ("COMPLETED", 2, 2)
+    assert (run.status, run.checks_expected, run.checks_written) == ("COMPLETED", 3, 3)
     assert "dre run: COMPLETED" in capsys.readouterr().out

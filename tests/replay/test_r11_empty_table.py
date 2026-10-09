@@ -18,7 +18,8 @@ def test_r11_empty_tables_are_empty_population(spark, tmp_path) -> None:
     results = latest(spark, replay)
     rows = [row for group in results.values() for row in group]
     assert {(r.dataset, r.check_id) for r in rows} == {
-        ("gold_member_coverage", "T1_KEY_DUPLICATES"), ("example_curated_enrollment", "T1_KEY_DUPLICATES")}
+        ("gold_member_coverage", "T1_KEY_DUPLICATES"), ("example_curated_enrollment", "T1_KEY_DUPLICATES"),
+        ("gold_member_coverage_all", "T1_KEY_DUPLICATES")}
     for row in rows:
         assert (row.state, row.reason_category, row.reason_code) == (
             "DID_NOT_RUN", "DATA_UNAVAILABLE", "empty_population"), row
