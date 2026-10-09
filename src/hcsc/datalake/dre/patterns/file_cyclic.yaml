@@ -1,11 +1,11 @@
 # Checks for pattern FILE_CYCLIC, in run order (spec sections 6 and 7).
-# T1_FILES_NOT_LOADED joins the file patterns in build step 6, with the dq_file
-# registry it needs; step 8 adds the cause checks.
+# Step 8 adds the cause checks.
 pattern: FILE_CYCLIC
 checks:
   - T1_ON_TIME
   - T1_ZERO_ROWS
   - T1_VOLUME
+  - T1_FILES_NOT_LOADED
   - T1_SCHEMA_DRIFT
   - T1_KEY_NULLS
   - T1_KEY_DUPLICATES

@@ -64,11 +64,19 @@ The engine field names chosen in step 2 are in spec section 3. The other assumpt
 7. **No load_time.** Checks that need it are DID\_NOT\_RUN / invalid\_config. That is a CONFIGURATION reason, so the dataset's window does not move until `load_time` is set; only checks that cannot run anyway depend on it.
 8. **One window per dataset per run.** The runner fixes every dataset's event before writing any result. Otherwise a dataset's later checks saw its earlier checks' rows from the same run and got an empty window (found and fixed in step 5).
 
+## Landing (step 6, 2026-10-09)
+
+1. **Listing** goes through the Hadoop FileSystem API from the Spark session (`listFiles`, recursive), which also reads local `file://` paths in tests. Only listing calls are used. Hidden files (`.` or `_` prefix, such as `_SUCCESS` and `.crc`) are skipped. A root that does not exist or cannot be read gives DID\_NOT\_RUN / landing\_unreadable; any other filesystem error gives hdfs\_unavailable.
+2. **Registry rows.** A row is appended only for a new path, or a known path whose size or modified time changed since its latest row, not for every file on every run. `first_seen_at` is kept from the first row, so `v_file_status` shows both when the file was first seen and its latest size, which INCOMPLETE\_AT\_LOAD needs in step 8.
+3. **Matching raw rows.** Files are matched to raw rows on the base file name: the last path component on both sides. This assumes the raw `file_name_column` holds the landed file's name (with or without a path). **To confirm with the developer.**
+4. **Which files are judged.** Every file in the feed's registry first seen more than `sla_hours` before the window end, so a file that never loads keeps failing until it does. That assumes raw keeps rows for at least as long as the registry keeps files (13 months by default); otherwise files whose raw rows were purged would show as not loaded. **To confirm with the developer.**
+5. **Validation.** `dre validate` warns (does not fail) when a file-pattern feed has no RAW dataset with a `file_name_column`, since T1\_FILES\_NOT\_LOADED cannot run for it. The sample config gets this warning until the raw dataset's columns are confirmed. Tests use a synthetic raw dataset.
+
 ## Notes for later steps
 
 - **Step 4:** done: `dre dry-run` parses SQL fragments (`config/fragments.py`).
 - **Step 5:** done: `LOAD_TIME_CHECKS` matches the Tier 1 checks that need `load_time`. No fallback to `partition_column` yet.
-- **Step 6:** add T1\_FILES\_NOT\_LOADED to `patterns/file_cyclic.yaml` and `patterns/file_periodic.yaml` with the `dq_file` registry.
+- **Step 6:** done: T1\_FILES\_NOT\_LOADED is in `patterns/file_cyclic.yaml` and `patterns/file_periodic.yaml`.
 - **Step 6 (open):** a dataset with `partition_column` but no `load_time` may use the partition value as its load time, at the partition's granularity. Waiting on the developer to confirm whether the raw table has a load-time column; until then such a dataset's load-time checks stay DID\_NOT\_RUN / invalid\_config.
 - **Step 7:** during the full sweep (`full_sweep_day`), append CLEARED with `state_detail` "no longer upstream" for open keys (`v_open_keys`) that are no longer found upstream, so they do not stay open forever.
 - **Step 9:** when T1\_ON\_TIME and T1\_ZERO\_ROWS both fail for the same slot, the digest shows one alert, not two.

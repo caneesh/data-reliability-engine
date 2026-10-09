@@ -95,6 +95,7 @@ class CheckContext:
     settings: Settings
     default_timezone: str = "UTC"  # defaults.yaml timezone, for time columns without their own
     dq_database: str | None = None  # for checks that read their own history (T1_VOLUME, T1_SCHEMA_DRIFT)
+    landing_problem: CheckResult | None = None  # the feed's landing roots could not be listed this run
 
 
 class Check(ABC):

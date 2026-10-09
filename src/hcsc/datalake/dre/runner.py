@@ -13,7 +13,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from hcsc.datalake.dre.checks.base import Check, CheckContext, CheckResult, error_detail, run_check
+from hcsc.datalake.dre.checks.base import (
+    Check, CheckContext, CheckResult, did_not_run, error_detail, from_exception, run_check,
+)
 from hcsc.datalake.dre.checks.events import Event, evaluation_id, previous_window_end, window_for
 from hcsc.datalake.dre.checks.registry import checks_for
 from hcsc.datalake.dre.config.loader import Config, ConfigError
@@ -105,10 +107,40 @@ def events_for(spark: SparkSession, config: Config, work: list[Planned], run_sta
     return events
 
 
-def evaluate(spark: SparkSession, config: Config, planned: Planned, event: Event) -> Evaluation:
+def refresh_landing(spark: SparkSession, config: Config, work: list[Planned], run: runs.Run | None,
+                    now: datetime) -> dict[str, CheckResult]:
+    """List the landing roots of every file-pattern feed in the plan and, on a real run (run given),
+    register new and changed files in dq_file. Returns feed id -> DID_NOT_RUN result for feeds whose
+    landing could not be listed or registered."""
+    from hcsc.datalake.dre.sources.hdfs import LandingError, list_landing
+    from hcsc.datalake.dre.store.files import register_files
+
+    feeds = {p.feed.feed: p.feed for p in work if p.feed is not None and p.feed.landing is not None}
+    problems: dict[str, CheckResult] = {}
+    for feed_id, feed in feeds.items():
+        try:
+            files = list_landing(spark, feed.landing.roots, feed.landing.file_name_pattern)
+        except LandingError as exc:
+            problems[feed_id] = did_not_run(exc.code, detail=exc.detail)
+            continue
+        if run is None:
+            print(f"{feed_id}: {len(files)} landed files listed (dry-run: not registered)")
+            continue
+        try:
+            added = register_files(spark, config.defaults.dq_database, feed_id, files, run, now)
+            print(f"{feed_id}: {len(files)} landed files listed, {added} new or changed")
+        except Exception as exc:
+            log.error("could not register landed files for %s: %s", feed_id, error_detail(exc))
+            problems[feed_id] = from_exception(exc)
+    return problems
+
+
+def evaluate(spark: SparkSession, config: Config, planned: Planned, event: Event,
+             landing_problems: dict[str, CheckResult] | None = None) -> Evaluation:
     settings = config.dataset_settings(planned.dataset.dataset)
+    landing_problem = (landing_problems or {}).get(planned.feed.feed) if planned.feed else None
     ctx = CheckContext(spark, planned.dataset, planned.feed, settings, config.defaults.timezone,
-                       config.defaults.dq_database)
+                       config.defaults.dq_database, landing_problem)
     results, duration_ms = run_check(planned.check, ctx, event)
     return Evaluation(planned, event, results, datetime.now(timezone.utc), duration_ms)
 
@@ -177,8 +209,9 @@ def run(spark: SparkSession, conf: str, feed_id: str | None = None, execution_ty
     written = 0
     try:
         events = events_for(spark, config, work, run_record.started_at)
+        landing = refresh_landing(spark, config, work, run_record, run_record.started_at)
         for planned in work:
-            evaluation = evaluate(spark, config, planned, events[planned.dataset.dataset])
+            evaluation = evaluate(spark, config, planned, events[planned.dataset.dataset], landing)
             try:
                 append_check_results(spark, db, result_rows(evaluation, run_record, execution_type))
                 written += 1
@@ -212,8 +245,9 @@ def dry_run(spark: SparkSession, conf: str, feed_id: str) -> int:
     now = datetime.now(timezone.utc)
     work = plan(config, feed_id)
     events = events_for(spark, config, work, now, read_store=False)
+    landing = refresh_landing(spark, config, work, None, now)
     for planned in work:
-        for line in describe(evaluate(spark, config, planned, events[planned.dataset.dataset])):
+        for line in describe(evaluate(spark, config, planned, events[planned.dataset.dataset], landing)):
             print(line)
     print(f"dre dry-run: {len(work)} checks evaluated, {len(problems)} SQL fragment problem(s), nothing written")
     return 0

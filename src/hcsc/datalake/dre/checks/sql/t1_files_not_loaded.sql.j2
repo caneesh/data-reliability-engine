@@ -1,0 +1,28 @@
+{# T1_FILES_NOT_LOADED: the feed's files first seen before the cutoff (window end - sla_hours),
+   each with its count of raw rows, matched on base file name. With summary=true: population
+   (files) and violations (files with no raw rows); otherwise the files with no raw rows. #}
+WITH files AS (
+  SELECT path, MIN(first_seen_at) AS first_seen_at
+  FROM {{ dq_database }}.dq_file
+  WHERE feed = '{{ feed }}'
+  GROUP BY path
+),
+raw_files AS (
+  SELECT regexp_extract({{ file_name_column }}, '([^/]+)$', 1) AS file_name, COUNT(*) AS raw_rows
+  FROM {{ table }}
+{% if feed_filter %}
+  WHERE {{ feed_filter }}
+{% endif %}
+  GROUP BY regexp_extract({{ file_name_column }}, '([^/]+)$', 1)
+),
+judged AS (
+  SELECT f.path, COALESCE(r.raw_rows, 0) AS raw_rows
+  FROM files f
+  LEFT JOIN raw_files r ON r.file_name = regexp_extract(f.path, '([^/]+)$', 1)
+  WHERE f.first_seen_at < {{ cutoff }}
+)
+{% if summary %}
+SELECT COUNT(*) AS population, SUM(CASE WHEN raw_rows = 0 THEN 1 ELSE 0 END) AS violations FROM judged
+{% else %}
+SELECT path FROM judged WHERE raw_rows = 0 ORDER BY path LIMIT {{ limit }}
+{% endif %}

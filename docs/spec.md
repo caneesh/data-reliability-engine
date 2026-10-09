@@ -77,11 +77,12 @@ data-reliability-engine/
             runs.py          # dq_run bookkeeping: STARTED row at start, final row at end
             writer.py        # append-only writes; the only DataFrame write path
             results.py       # appends check results through the writer
+            files.py         # dq_file registry: appends new and changed landed files
             retention.py     # drops expired run_date partitions; the only DROP PARTITION
             local_setup.py   # creates the dq database for tests and local runs only
             names.py         # identifier validation for dq names
           sources/
-            hdfs.py          # listing landing folders (subprocess or Hadoop FS API)
+            hdfs.py          # listing landing folders, read-only, through the Hadoop FS API
             scheduler.py     # optional: scheduler history adapter (stub in release 1)
           notify/
             email.py         # digest builder and sender
@@ -284,12 +285,14 @@ Each check is a class implementing `applies_to(dataset, pattern)`, `required_col
 | T1\_ON\_TIME | all | For each cadence slot due in the window, look for a load time later than the slot within `sla_hours` | Loads due: cadence slots whose deadline (slot + `sla_hours`) falls in the window | A due slot has no load within SLA |
 | T1\_ZERO\_ROWS | all | For each cadence slot due in the window, count rows loaded within `sla_hours` of the slot | Loads due: cadence slots whose deadline (slot + `sla_hours`) falls in the window, the same slots as T1\_ON\_TIME | A due load wrote fewer than `min_rows_per_load` rows |
 | T1\_VOLUME | all | For each slot whose load period (slot to next slot) ends in the window, compare its row count with the median of the last 14 loads for the same slot; one result per slot (group `slot` = local HH:MM, `slot_time`) | The slot's rows | Outside median ± `volume_tolerance_pct` (default 50). Fewer than 7 prior loads for the slot: DID\_NOT\_RUN / insufficient\_history |
-| T1\_FILES\_NOT\_LOADED | FILE\_CYCLIC, FILE\_PERIODIC | Files in `dq_file` first seen more than `sla_hours` ago with zero rows in the raw dataset matching on `file_name_column` | Files first seen in `dq_file` (built in step 6) | Any such file |
+| T1\_FILES\_NOT\_LOADED | FILE\_CYCLIC, FILE\_PERIODIC; RAW datasets with `file_name_column` | Files in `dq_file` first seen more than `sla_hours` ago with zero rows in the raw dataset (after `feed_filter`) matching on `file_name_column`, compared by base file name | The feed's files in `dq_file` first seen more than `sla_hours` before the window end | Any such file; `detail` lists the files (up to 100). Landing roots not listable this run: DID\_NOT\_RUN / landing\_unreadable or hdfs\_unavailable |
 | T1\_SCHEMA\_DRIFT | all, table-wide | Hash the table's column names and types; compare with the previous run's hash, stored in `observed` | The table's columns | Hash changed; `detail` lists added, removed and retyped columns. No earlier hash: DID\_NOT\_RUN / insufficient\_history |
 | T1\_KEY\_NULLS | all, table-wide | Rows in the event window with a null or empty key column, grouped by `group_by` | Rows loaded in the window (per group) | Any |
 | T1\_KEY\_DUPLICATES | datasets with `key_unique: true`, table-wide | Keys with more than one row, after `key_normalise` | Distinct keys in the table (per group) | Any |
 
 T1\_ON\_TIME and T1\_ZERO\_ROWS count expected loads, not rows: with a load due and nothing loaded they are FAILED, also on an empty table; with no load due they are DID\_NOT\_RUN / empty\_population. Neither can PASS on an empty table. Both judge a slot once, in the window where its deadline (slot + `sla_hours`) falls, never when the slot first appears: a load due at 08:00 with an 8-hour SLA is not judged by a run at 09:00. T1\_VOLUME likewise judges each slot once, in the window where its load period ends, so a load is never split across windows; slots with no rows give no T1\_VOLUME result (T1\_ZERO\_ROWS reports them). Checks that need `load_time` are DID\_NOT\_RUN / invalid\_config when it is not set.
+
+**Landing registry.** At the start of `dre run`, the landing roots of every file-pattern feed being run are listed (recursively, matching `file_name_pattern`, skipping hidden files whose names start with `.` or `_`). A `dq_file` row is appended for each new file, and for each known file whose size or modified time changed; `first_seen_at` stays the time DRE first saw the path. `dre dry-run` lists but does not register.
 
 **Hop checks** (datasets with `key_map` to an upstream dataset):
 

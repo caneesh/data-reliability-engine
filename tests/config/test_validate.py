@@ -35,7 +35,9 @@ def test_sample_config_is_valid() -> None:
     assert set(config.datasets) == {"example_curated_enrollment", "gold_member_coverage", "gold_member_coverage_all"}
     assert len(config.rules) == 5
     # The curated load time column is not confirmed yet: reported, not an error.
-    assert [(Path(w.file).name, w.field) for w in warnings] == [("example_curated_enrollment.yaml", "load_time")]
+    # Not confirmed yet, so reported, not errors: the curated load time column, and the raw dataset.
+    assert [(Path(w.file).name, w.field) for w in warnings] == [
+        ("example_curated_enrollment.yaml", "load_time"), ("example_realtime.yaml", "datasets")]
 
 
 def test_cli_validate_exit_codes(conf: Path, capsys: pytest.CaptureFixture[str]) -> None:

@@ -83,6 +83,13 @@ def cross_check(config: Config, feeds_complete: bool = True) -> list[ConfigError
             else:
                 member_of[ds] = feed_id
         check_owner("feed", feed_id, feed.owner)
+        if feed.pattern in ("FILE_CYCLIC", "FILE_PERIODIC") and not any(
+            datasets[d].layer == "RAW" and datasets[d].file_name_column for d in feed.datasets if d in datasets
+        ):
+            err("feed", feed_id, ("datasets",),
+                "no RAW dataset with a file_name_column: T1_FILES_NOT_LOADED will not run for this feed",
+                "add the feed's raw dataset with file_name_column once its columns are confirmed",
+                level="warning")
 
     # Datasets.
     for ds_id, ds in datasets.items():

@@ -34,6 +34,30 @@ CURATED_COLUMNS = [
     ("qualifiedhealthplanid", "STRING"), ("enddate", "STRING"), ("sourcelastupdatets", "TIMESTAMP"),
 ]
 
+# Synthetic raw layer (test-only columns): one raw table holds two feeds, told apart by file name.
+RAW_COLUMNS = [
+    ("subscriberidnumber", "STRING"), ("membernumber", "STRING"), ("effectivedate", "STRING"),
+    ("src_file_nm", "STRING"), ("file_date", "STRING"),
+]
+
+
+def raw_row(file_name: str, sub_id: str = "123401", eff: str = "01/01/2026") -> dict[str, Any]:
+    """Raw dates are MM/DD/YYYY."""
+    return {"subscriberidnumber": sub_id, "membernumber": "01", "effectivedate": eff,
+            "src_file_nm": file_name, "file_date": "01/15/2026"}
+
+
+def raw_dataset_yaml(table: str) -> str:
+    """A synthetic raw dataset for tests (the sample config has none until its columns are confirmed)."""
+    return (
+        "dataset: example_raw_enrollment\n"
+        f"table: {table}\n"
+        "layer: RAW\n"
+        "key: [subscriberidnumber, membernumber, effectivedate]\n"
+        "file_name_column: src_file_nm\n"
+        "feed_filter: \"src_file_nm LIKE 'rt_%'\"   # real-time files; batch files share the table\n"
+    )
+
 
 def gold_row(sub_id: str = "000123401", mem_nbr: str = "01", eff: str = "2026-01-01", agreement: str = "AGR-A",
              end: str = "9999-12-31", source: str = "SRC_A", loaded: str = "2026-01-02 10:15:00:000000") -> dict[str, Any]:
