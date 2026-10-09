@@ -9,7 +9,7 @@ Answers to the open decisions in spec section 11. Fill in **Answer** before buil
 | Where it runs and is scheduled | Control-M for the main run; a separate folder or cron for the watchdog | | |
 | Database name and service account | `dq`; a read-only account with write access only to `dq` | | |
 | Use of AI coding tools on HCSC code | Only through HCSC-approved access | | |
-| Code repository location | (not in spec) | Approved by HCSC: the repo is hosted on Aneesh Chan's GitHub (`caneesh/data-reliability-engine`) | HCSC; recorded 2026-10-09 |
+| Code repository location | (not in spec) | Approved by HCSC: the repo is hosted on Aneesh Chan's GitHub (`caneesh/data-reliability-engine`) | HCSC, 2026-10-09 |
 
 ## Defaults taken during the build
 
