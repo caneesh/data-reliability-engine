@@ -8,11 +8,12 @@ from __future__ import annotations
 import pytest
 
 from tests.conftest import SRC_ROOT
-from tests.guard.scan import LOCAL_SETUP_MODULE, RETENTION_MODULE, WRITER_MODULE, scan_text, scan_tree
+from tests.guard.scan import DDL_FILE, LOCAL_SETUP_MODULE, RETENTION_MODULE, WRITER_MODULE, scan_text, scan_tree
 
 RETENTION = f"src/{RETENTION_MODULE}"
 WRITER = f"src/{WRITER_MODULE}"
 LOCAL_SETUP = f"src/{LOCAL_SETUP_MODULE}"
+DDL = f"src/{DDL_FILE}"
 OTHER = "src/hcsc/datalake/dre/checks/base.py"
 
 
@@ -43,8 +44,10 @@ CAUGHT = [
     ("overwrite-kwarg", 'df.write.insertInto("dq.dq_run", overwrite=True)', WRITER),
     ("saveAsTable-dq", 'df.write.saveAsTable("dq.dq_run")', WRITER),
     # DDL on dq only
-    ("create-table-outside", "CREATE TABLE gold_db.copy AS SELECT 1", WRITER),
-    ("create-view-outside", "CREATE OR REPLACE VIEW gold_db.v AS SELECT 1", WRITER),
+    ("create-table-outside", "CREATE TABLE gold_db.copy AS SELECT 1", DDL),
+    ("create-view-outside", "CREATE OR REPLACE VIEW gold_db.v AS SELECT 1", DDL),
+    ("create-table-dq-outside-install", "CREATE TABLE IF NOT EXISTS dq.dq_run (run_id STRING) STORED AS ORC", WRITER),
+    ("create-view-dq-outside-install", "CREATE VIEW IF NOT EXISTS {{ dq_database }}.v_latest_run AS SELECT 1", OTHER),
     ("create-database-outside", "CREATE DATABASE other_db", LOCAL_SETUP),
     ("create-database-dq-not-setup", "CREATE DATABASE IF NOT EXISTS dq", WRITER),
     # DataFrame write APIs only in store/writer.py
@@ -89,8 +92,8 @@ ALLOWED = [
     ("insert-dq-jinja", "INSERT INTO {{ dq_database }}.dq_check_result SELECT 1", WRITER),
     ("insert-dq-fstring", 'spark.sql(f"INSERT INTO {dq_database}.dq_run SELECT 1")', WRITER),
     ("insertInto-dq-append", 'df.write.mode("append").insertInto("dq.dq_key_event")', WRITER),
-    ("create-table-dq", "CREATE TABLE IF NOT EXISTS dq.dq_run (run_id STRING) STORED AS ORC", WRITER),
-    ("create-view-dq", "CREATE OR REPLACE VIEW {{ dq_database }}.v_latest_result AS SELECT 1", WRITER),
+    ("create-table-dq-install", "CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_run (run_id STRING) STORED AS ORC", DDL),
+    ("create-view-dq-install", "CREATE VIEW IF NOT EXISTS {{ dq_database }}.v_latest_result AS SELECT 1", DDL),
     ("create-database-dq-setup", 'spark.sql(f"CREATE DATABASE IF NOT EXISTS {dq_database}")', LOCAL_SETUP),
     ("write-api-in-writer", 'df.select(*cols).write.insertInto(f"{dq_database}.{table}")', WRITER),
     ("writeTo-append-in-writer", 'df.writeTo("dq.dq_run").append()', WRITER),

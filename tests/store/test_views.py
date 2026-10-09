@@ -91,8 +91,10 @@ def test_views_empty_after_a_run_with_no_checks(spark) -> None:
     from hcsc.datalake.dre.store.runs import finish_run, start_run
 
     create_store(spark, "dq_empty_run")
-    run = start_run(now=ts(9))
+    run = start_run(spark, "dq_empty_run", now=ts(9))
     assert finish_run(spark, "dq_empty_run", run, 0, 0, now=ts(9, 1)) == "COMPLETED"
-    assert spark.table("dq_empty_run.dq_run").count() == 1
+    assert spark.table("dq_empty_run.dq_run").count() == 2  # STARTED, then COMPLETED
+    assert [(r.run_id, r.status) for r in spark.table("dq_empty_run.v_latest_run").collect()] == [
+        (run.run_id, "COMPLETED")]
     for view in ("v_latest_result", "v_open_keys", "v_file_status"):
         assert spark.table(f"dq_empty_run.{view}").count() == 0

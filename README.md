@@ -16,4 +16,4 @@ pytest                 # all tests, local-mode Spark
 pytest tests/guard     # guard tests only
 ```
 
-Status: build step 3 (store) of spec section 10. `dre validate --conf conf/` checks the sample configuration in `conf/`; the dq store DDL, append-only writer, views and run bookkeeping are in `store/`. The other `dre` subcommands are placeholders until their build steps land.
+Status: build step 3 (store) of spec section 10. `dre validate --conf conf/` checks the sample configuration in `conf/`. `dre install --print|--apply|--check` manages the dq store tables and views (the platform team creates the empty database first). The other `dre` subcommands are placeholders until their build steps land.

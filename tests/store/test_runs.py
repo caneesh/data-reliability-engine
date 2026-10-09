@@ -1,4 +1,7 @@
-"""dq_run bookkeeping. Step 3 "done when": a run with no checks writes a dq_run row."""
+"""dq_run bookkeeping: a STARTED row at the start, a final row at the end.
+
+Step 3 "done when": a run with no checks writes its dq_run rows.
+"""
 
 from __future__ import annotations
 
@@ -9,33 +12,52 @@ from pathlib import Path
 import pytest
 
 from hcsc.datalake.dre import __version__
-from hcsc.datalake.dre.store.runs import config_commit, finish_run, run_status, start_run
+from hcsc.datalake.dre.store.runs import config_commit, finish_run, new_run, run_status, start_run
 from tests.store.conftest import ts
 
 
-def test_run_with_no_checks_writes_one_dq_run_row(spark, store) -> None:
-    run = start_run(now=datetime(2026, 1, 5, 23, 50, tzinfo=timezone.utc))
+def run_rows(spark, store, run_id):
+    return sorted(spark.table(f"{store}.dq_run").where(f"run_id = '{run_id}'").collect(),
+                  key=lambda r: r.status != "STARTED")
+
+
+def test_run_with_no_checks_writes_started_then_final_row(spark, store) -> None:
+    run = start_run(spark, store, now=datetime(2026, 1, 5, 23, 50, tzinfo=timezone.utc))
+    started = run_rows(spark, store, run.run_id)
+    assert [(r.status, r.ended_at, r.checks_expected, r.checks_written) for r in started] == [
+        ("STARTED", None, None, None)]
+
     status = finish_run(spark, store, run, checks_expected=0, checks_written=0,
                         now=datetime(2026, 1, 6, 0, 5, tzinfo=timezone.utc))
     assert status == "COMPLETED"
-    rows = spark.table(f"{store}.dq_run").where(f"run_id = '{run.run_id}'").collect()
-    assert len(rows) == 1
-    row = rows[0]
-    assert (row.status, row.checks_expected, row.checks_written) == ("COMPLETED", 0, 0)
-    assert row.engine_version == __version__
-    assert row.started_at < row.ended_at
-    assert row.run_date == date(2026, 1, 5)  # UTC date the run started
+    first, final = run_rows(spark, store, run.run_id)
+    assert (first.status, final.status) == ("STARTED", "COMPLETED")
+    assert (final.checks_expected, final.checks_written) == (0, 0)
+    assert final.engine_version == __version__
+    assert final.started_at < final.ended_at
+    # Both rows sit in the partition of the UTC date the run started, though it ended the next day.
+    assert first.run_date == final.run_date == date(2026, 1, 5)
+
+
+def test_latest_run_view_gives_each_runs_state(spark, store) -> None:
+    finished = start_run(spark, store, now=ts(7))
+    unfinished = start_run(spark, store, now=ts(7, 4))
+    partial = start_run(spark, store, now=ts(7, 6))
+    finish_run(spark, store, finished, 3, 3, now=ts(7, 1))
+    finish_run(spark, store, partial, 3, 2, now=ts(7, 7))
+    latest = {r.run_id: r.status for r in spark.table(f"{store}.v_latest_run").collect()}
+    assert latest[finished.run_id] == "COMPLETED"
+    assert latest[unfinished.run_id] == "STARTED"  # the watchdog reports runs left here
+    assert latest[partial.run_id] == "PARTIAL"
+    assert spark.table(f"{store}.v_latest_run").where(f"run_id = '{finished.run_id}'").count() == 1
 
 
 def test_each_run_appends(spark, store) -> None:
     before = spark.table(f"{store}.dq_run").count()
-    first, second = start_run(now=ts(7)), start_run(now=ts(7, 4))
-    finish_run(spark, store, first, 3, 3, now=ts(7, 1))
-    finish_run(spark, store, second, 3, 2, now=ts(7, 5))
-    rows = {r.run_id: r.status for r in spark.table(f"{store}.dq_run").collect()}
+    run = start_run(spark, store, now=ts(8))
+    finish_run(spark, store, run, 1, 1, failed=True, now=ts(8, 1))
     assert spark.table(f"{store}.dq_run").count() == before + 2
-    assert (rows[first.run_id], rows[second.run_id]) == ("COMPLETED", "PARTIAL")
-    assert first.run_id != second.run_id
+    assert [r.status for r in run_rows(spark, store, run.run_id)] == ["STARTED", "FAILED"]
 
 
 @pytest.mark.parametrize(
@@ -54,7 +76,7 @@ def test_config_commit_from_git(tmp_path: Path) -> None:
     subprocess.run([*git, "commit", "-qm", "conf"], check=True)
     head = subprocess.run([*git, "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
     assert config_commit(tmp_path) == head
-    assert start_run(conf_dir=tmp_path).config_commit == head
+    assert new_run(conf_dir=tmp_path).config_commit == head
 
 
 def test_config_commit_outside_git_is_none(tmp_path: Path) -> None:

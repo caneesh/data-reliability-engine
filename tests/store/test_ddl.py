@@ -7,7 +7,8 @@ import re
 import pytest
 
 from hcsc.datalake.dre.store.names import DQ_TABLES
-from hcsc.datalake.dre.store.schema import VIEWS, apply_ddl, render_ddl
+from hcsc.datalake.dre.store.install import apply_ddl
+from hcsc.datalake.dre.store.schema import VIEWS, render_ddl
 from tests.conftest import REPO_ROOT
 
 
@@ -65,5 +66,5 @@ def test_render_rejects_non_identifier() -> None:
 
 def test_rendered_ddl_targets_only_the_dq_database() -> None:
     for statement in render_ddl("dq_custom"):
-        target = re.search(r"(?:TABLE IF NOT EXISTS|VIEW) (\S+)", statement).group(1)
+        target = re.search(r"(?:TABLE|VIEW) IF NOT EXISTS (\S+)", statement).group(1)
         assert target.startswith("dq_custom."), statement

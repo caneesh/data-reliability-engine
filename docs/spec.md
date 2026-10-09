@@ -44,7 +44,8 @@ data-reliability-engine/
       datalake/              # namespace package: no __init__.py
         dre/
           __init__.py
-          cli.py             # validate, dry-run, run, trace, watchdog
+          cli.py             # validate, install, dry-run, run, trace, watchdog
+          session.py         # the Spark session (active one, or a new one with Hive support)
           config/
             models.py        # Pydantic models for feeds, datasets, rules, defaults
             loader.py        # load YAML, apply defaults and overrides
@@ -63,8 +64,9 @@ data-reliability-engine/
             landing.py merge.py  # cause checks by hop type
           store/
             ddl.sql          # dq tables and views
-            schema.py        # renders ddl.sql for the configured dq database and applies it
-            runs.py          # dq_run bookkeeping: run id, status, one row per finished run
+            schema.py        # renders ddl.sql for the configured dq database; parses the objects it creates
+            install.py       # dre install: print, apply or check the DDL; the only path that applies it
+            runs.py          # dq_run bookkeeping: STARTED row at start, final row at end
             writer.py        # append-only writes; the only DataFrame write path
             retention.py     # drops expired run_date partitions; the only DROP PARTITION
             local_setup.py   # creates the dq database for tests and local runs only
@@ -203,12 +205,14 @@ Rule `params` shapes, where section 6 does not spell them out: `superseded_still
 
 ## 5. Data model
 
-All tables in the `dq` database, ORC, partitioned by `run_date`. Append-only: the writer module exposes only `append`, which selects the frame's columns in the table's column order before `insertInto`. Retention is set per table in `defaults.yaml` (results and events default to 7 years, file registry to 13 months) and applied only by `store/retention.py`. `dre run` never creates the `dq` database; `store/local_setup.py` does that for tests and local runs.
+All tables in the `dq` database, ORC, partitioned by `run_date`. Append-only: the writer module exposes only `append`, which selects the frame's columns in the table's column order before `insertInto`. Retention is set per table in `defaults.yaml` (results and events default to 7 years, file registry to 13 months) and applied only by `store/retention.py`. The platform team creates the empty `dq` database and grants the service account access; `dre install --apply` creates the tables and views in it (every statement is IF NOT EXISTS, so it is safe to rerun), and `dre install --check` compares an existing store with the DDL. `dre run` never creates the database or the store: it checks the store tables and views exist and, if not, exits 3 naming `dre install`. `store/local_setup.py` creates the database and store for tests and local runs.
+
+`dq_run` gets two rows per run: STARTED when the run starts (`ended_at` and the check counts null) and a final row (COMPLETED, PARTIAL or FAILED) when it ends. A run's state is its latest row. Both rows carry `run_date` = the UTC date the run started, so a run that ends after midnight UTC stays in one partition.
 
 ```sql
 CREATE TABLE dq.dq_run (
   run_id STRING, started_at TIMESTAMP, ended_at TIMESTAMP,
-  engine_version STRING, config_commit STRING, status STRING,  -- COMPLETED | PARTIAL | FAILED
+  engine_version STRING, config_commit STRING, status STRING,  -- STARTED | COMPLETED | PARTIAL | FAILED
   checks_expected INT, checks_written INT
 ) PARTITIONED BY (run_date DATE) STORED AS ORC;
 
@@ -244,7 +248,8 @@ CREATE TABLE dq.dq_file (
 
 Views derive current state:
 
-- `dq.v_latest_result`: latest row per (dataset, check\_id) by `evaluated_at`
+- `dq.v_latest_run`: each run's latest `dq_run` row (its final row once written, otherwise STARTED)
+- `dq.v_latest_result`: the latest evaluation per (dataset, check\_id) by `evaluated_at`: one row for an ungrouped check, one row per group for a grouped one
 - `dq.v_open_keys`: keys whose latest `dq_key_event` is FLAGGED or STILL\_FLAGGED, with first flagged date
 - `dq.v_file_status`: one row per file path with first-seen time and latest size
 
@@ -363,7 +368,8 @@ A filter rule in `cause_inputs.filter_rules` has `id`, `condition` (SQL), `code_
 | --- | --- | --- |
 | `dre validate [--conf DIR]` | Static validation of all config | 0 valid, 1 errors |
 | `dre dry-run --feed F` | Runs preconditions and checks for one feed, prints results, writes nothing | 0 always, unless the command itself fails |
-| `dre run [--feed F] [--execution-type NORMAL\|RERUN\|REPLAY]` | Full run: preconditions, checks, causes, append results, send email | 0 run completed (even with FAILED checks), 2 partial, 3 could not start |
+| `dre install --print\|--apply\|--check [--conf DIR]` | `--print` renders the store DDL for the configured dq database; `--apply` creates missing tables and views (all IF NOT EXISTS, safe to rerun); `--check` compares the existing tables and views with the DDL | 0 done or matching, 1 differences found or apply failed, 3 the database does not exist |
+| `dre run [--feed F] [--execution-type NORMAL\|RERUN\|REPLAY]` | Full run: preconditions, checks, causes, append results, send email | 0 run completed (even with FAILED checks), 2 partial, 3 could not start (including: the store is not installed; the message names `dre install`) |
 | `dre trace --dataset D --key "k1,k2,..."` | Prints one line per layer along the `upstream` chain: present or not, record time, load time, file; ends with the first layer where the key is absent or older, then that hop's cause line | 0 |
 | `dre watchdog` | Checks the last expected run exists and wrote every expected check; emails if not | 0 healthy, 1 alert sent |
 
@@ -377,7 +383,7 @@ A filter rule in `cause_inputs.filter_rules` has `id`, `condition` (SQL), `code_
 
 Recipients come from each owner (a feed's, a table-wide dataset's or a rule's): `recipients` in `defaults.yaml` maps each owner to its addresses.
 
-**Watchdog.** A separate entry point with no dependency on the main run's code beyond the store schema. It alerts when no `dq_run` row exists for an expected run time plus grace, or when `checks_written < checks_expected`. Schedule it separately from the main run (a different scheduler folder or host), so one scheduling failure doesn't stop both.
+**Watchdog.** A separate entry point with no dependency on the main run's code beyond the store schema. It alerts when no `dq_run` row exists for an expected run time plus grace, when a run's latest row is still STARTED after the grace, or when `checks_written < checks_expected`. Schedule it separately from the main run (a different scheduler folder or host), so one scheduling failure doesn't stop both.
 
 **Compute budget.** Each dataset has `compute_budget_minutes`. Before running, estimate the scan size from partition statistics; if a check exceeds its budget, cancel it and record DID\_NOT\_RUN / budget\_exceeded. Hop checks read only keys changed in the window, plus a full sweep on the day set by `full_sweep_day` (default Sunday).
 
@@ -412,12 +418,13 @@ All tests run on local-mode Spark against synthetic tables built by fixtures in 
 **Guard tests.** Tests in `tests/guard/` scan every file under `src/` (scanner: `tests/guard/scan.py`) and fail on any breach of these rules. Each rule has a snippet test that is caught and one that is allowed. The reasons are in `docs/decisions.md`.
 
 1. **Naming the dq store.** SQL names the store as the literal `dq`, or as `{{ dq_database }}` (Jinja) or `{dq_database}` (Python f-string), because the real name comes from config. A write target the scanner cannot read (for example one built by string concatenation) fails. The configured dq database name must be a plain identifier (`store/names.py`, `validate_dq_database`).
-2. **Read-only outside dq.** Flagged unless the target is the dq store: INSERT INTO; CREATE TABLE and CREATE [OR REPLACE] VIEW; `insertInto` and `writeTo`; DataFrameWriter path writes (`.save`, `.orc`, `.parquet`, `.csv`, `.json`, `.text` on a `.write` chain); Hadoop FileSystem `delete`, `rename`, `mkdirs`; `os.remove`, `unlink`, `rmdir`, `removedirs`, `rename`, `replace`; `shutil.rmtree`, `shutil.move`. The dq store is addressed by table name, so a path target never qualifies. `hdfs dfs` / `hadoop fs` `-rm`, `-rmr`, `-rmdir`, `-mv` and `-mkdir` are always flagged.
+2. **Read-only outside dq.** Flagged unless the target is the dq store: INSERT INTO; `insertInto` and `writeTo`; DataFrameWriter path writes (`.save`, `.orc`, `.parquet`, `.csv`, `.json`, `.text` on a `.write` chain); Hadoop FileSystem `delete`, `rename`, `mkdirs`; `os.remove`, `unlink`, `rmdir`, `removedirs`, `rename`, `replace`; `shutil.rmtree`, `shutil.move`. The dq store is addressed by table name, so a path target never qualifies. `hdfs dfs` / `hadoop fs` `-rm`, `-rmr`, `-rmdir`, `-mv` and `-mkdir` are always flagged.
 3. **Append-only.** The only DML allowed on dq is INSERT INTO (or `insertInto` in append mode). Banned everywhere, dq included: UPDATE, DELETE, MERGE, TRUNCATE, INSERT OVERWRITE, `mode("overwrite")`, `overwrite=True`, `saveAsTable`, `writeTo(...)` followed by `overwrite`, `overwritePartitions`, `create`, `replace` or `createOrReplace`, DROP TABLE/VIEW/DATABASE, and every ALTER except rule 5.
 4. **One write path.** The DataFrame write APIs (`.write`, `.writeTo`, `.writeStream`, `insertInto`) are allowed only in `store/writer.py`. Any `.write` elsewhere is flagged, including `w = df.write` split across statements and plain file `.write(...)` calls. `append` selects columns in the table's order before `insertInto`; a test fails if a column lands out of order.
 5. **Retention.** ALTER TABLE `<dq>.<table>` DROP [IF EXISTS] PARTITION is allowed only in `store/retention.py`. That module refuses to drop any `run_date` partition on or after today minus the configured retention in months, and refuses a retention below one month; a test proves it.
 6. **Database creation.** CREATE DATABASE is allowed only for the dq database and only in `store/local_setup.py`. No other module under `src/` may reference `local_setup`, so `dre run` never creates the database.
 7. **Email.** Email text contains no `key_value`. Until the digest exists (step 9) the guard is static: nothing in `notify/` references `key_value`. Step 9 adds a test on the rendered email text.
+8. **Store DDL only through `dre install`.** CREATE TABLE and CREATE [OR REPLACE] VIEW are allowed only on the dq store and only in `store/ddl.sql`. Only `store/install.py` (behind `dre install --apply`) and `store/local_setup.py` may reference `apply_ddl`, so `dre run` never creates the store.
 
 ## 10. Build order
 

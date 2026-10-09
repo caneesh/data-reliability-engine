@@ -35,11 +35,19 @@ The engine field names chosen in step 2 are in spec section 3. The other assumpt
 
 ## Store assumptions (step 3, 2026-10-09)
 
-1. **One dq_run row per finished run.** `store/runs.py` appends the row when the run ends (start and end time, status, checks expected and written), keeping dq_run append-only. A run that dies first leaves no row, which the watchdog reports. `run_date` is the UTC date the run started. Status: COMPLETED when every expected check was written, PARTIAL when fewer, FAILED when the run says it failed.
+1. **Two dq_run rows per run** (changed in the step 3 review). A STARTED row when the run starts and a final row (COMPLETED, PARTIAL or FAILED) when it ends; the run's state is its latest row (`v_latest_run`). A run that dies stays STARTED, which the watchdog reports. Both rows carry `run_date` = the UTC date the run started. Status of the final row: COMPLETED when every expected check was written, PARTIAL when fewer, FAILED when the run says it failed.
 2. **v_latest_result with groups.** The spec says one row per (dataset, check\_id). For a check split by `group_by`, the view returns every group row of the latest evaluation (latest by `evaluated_at`, then `run_id`), so an ungrouped check still gives one row.
 3. **v_open_keys** gives the first flagged time of the key's current open spell (after its last CLEARED). It does not expose `key_value`, which stays restricted in `dq_key_event`.
 4. **v_file_status** gives the earliest `first_seen_at`, and size, `modified_at` and `observed_at` from the latest observation.
-5. **Who applies the DDL on the cluster is open.** `store/schema.py` renders and applies `store/ddl.sql` (`CREATE TABLE IF NOT EXISTS`, `CREATE OR REPLACE VIEW`); tests and local runs call it through `store/local_setup.py`. `dre run` does not apply it. Whether the platform team applies the rendered DDL, or a separate install step does, is still to be decided with them.
+5. **`dre install` applies the DDL** (decided in the step 3 review, 2026-10-09). The platform team only creates the empty dq database and grants the service account access. `dre install --print` renders the DDL for the configured database, `--apply` runs it, `--check` compares the existing tables and views with it. Every statement is IF NOT EXISTS, so `--apply` is safe to rerun and never replaces an existing table or view: a changed definition shows up as DIFFERS in `--check` and needs a person to migrate it. `dre run` checks the store tables and views exist and exits 3 naming `dre install` if not. Reason: the engine owns its schema, while creating databases and granting access stays with the platform team. Enforced by guard rule 8 (spec section 9).
+
+## Notes for later steps
+
+- **Step 4:** parse SQL fragments in `dre dry-run` (see configuration assumption 7).
+- **Step 5:** keep `LOAD_TIME_CHECKS` in `config/validate.py` in line with the Tier 1 checks (configuration assumption 5).
+- **Step 7:** during the full sweep (`full_sweep_day`), append CLEARED with `state_detail` "no longer upstream" for open keys (`v_open_keys`) that are no longer found upstream, so they do not stay open forever.
+- **Step 9:** the digest reports groups (`group_values`) that were present in the previous run and are missing now, since `v_latest_result` shows only the latest evaluation's groups.
+- **Step 10:** `dre retention` is a separate command, scheduled weekly. By default it lists the partitions it would drop under each table's `retention_months`; `--apply` drops them through `store/retention.py`.
 
 ## Guard rules: reasons (decided after step 1, 2026-10-09)
 
@@ -52,5 +60,6 @@ The rules themselves are in spec section 9 (Guard tests). Reasons, by rule:
 5. **Retention.** Retention needs old partitions dropped, which append-only otherwise bans; keeping it in one module, with a refusal for anything inside retention, limits the exception.
 6. **Database creation** (added before step 2). On the cluster the platform team owns the database and the service account; the engine must not create it. Tests and local runs still need it.
 7. **Email.** Hard rule 6. The digest does not exist yet, so the guard is static until step 9, which must add a test on the rendered email text.
+8. **Store DDL only through `dre install`** (added in the step 3 review). The platform team creates the database and grants access; the engine creates its own tables and views, but only through one deliberate command, never as a side effect of `dre run`.
 
 CI runs on Python 3.10 with Java 17 (`.github/workflows/ci.yml`). Nothing may depend on Java 21.

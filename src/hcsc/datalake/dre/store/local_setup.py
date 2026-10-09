@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from hcsc.datalake.dre.store.install import apply_ddl
 from hcsc.datalake.dre.store.names import validate_dq_database
-from hcsc.datalake.dre.store.schema import apply_ddl
 
 if TYPE_CHECKING:
     from pyspark.sql import SparkSession

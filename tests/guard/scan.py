@@ -5,9 +5,10 @@ Rules (hard rules 1 and 5, spec section 9, docs/decisions.md "Guard rules"):
 - INSERT INTO is the only DML allowed, and only into the dq store.
 - UPDATE, DELETE, MERGE, TRUNCATE and INSERT OVERWRITE are banned everywhere,
   dq included, as are DataFrame overwrite modes.
-- CREATE TABLE and CREATE [OR REPLACE] VIEW are allowed on dq only. CREATE
-  DATABASE is allowed only for dq and only in store/local_setup.py. DROP
-  TABLE/VIEW/DATABASE and every other ALTER are banned.
+- CREATE TABLE and CREATE [OR REPLACE] VIEW are allowed on dq only, and only
+  in store/ddl.sql (applied by `dre install`). CREATE DATABASE is allowed
+  only for dq and only in store/local_setup.py. DROP TABLE/VIEW/DATABASE and
+  every other ALTER are banned.
 - ALTER TABLE <dq>.<t> DROP PARTITION is allowed only in store/retention.py.
 - The DataFrame write APIs (.write, .writeTo, .writeStream, insertInto) are
   allowed only in store/writer.py; writeTo overwrite/create/replace is banned.
@@ -35,6 +36,7 @@ DQ_PLACEHOLDERS = ("{{dq_database}}", "{dq_database}")
 RETENTION_MODULE = "hcsc/datalake/dre/store/retention.py"
 WRITER_MODULE = "hcsc/datalake/dre/store/writer.py"
 LOCAL_SETUP_MODULE = "hcsc/datalake/dre/store/local_setup.py"
+DDL_FILE = "hcsc/datalake/dre/store/ddl.sql"
 
 # A target is either a Jinja expression (which may contain spaces) followed by
 # the rest of a dotted name, or a plain run of non-space characters.
@@ -69,9 +71,6 @@ _DQ_ONLY: list[tuple[str, re.Pattern[str], bool]] = [
     ("INSERT INTO", re.compile(rf"\bINSERT\s+INTO\s+(?:TABLE\s+)?{_TARGET}", _I), False),
     ("insertInto", re.compile(rf"\.insertInto{_ARG}"), False),
     ("writeTo", re.compile(rf"\.writeTo{_ARG}"), False),
-    ("CREATE", re.compile(
-        rf"\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:EXTERNAL\s+)?(?:TABLE|VIEW)\s+(?:IF\s+NOT\s+EXISTS\s+)?{_TARGET}", _I
-    ), False),
     # DataFrameWriter path writes: df.write[.option(..)...].save/orc/parquet/csv/json/text(path)
     ("path write", re.compile(
         r"\.write(?:Stream)?(?:[\s\\]*\.\s*\w+\((?:[^()]|\([^()]*\))*\))*[\s\\]*\.\s*"
@@ -81,6 +80,9 @@ _DQ_ONLY: list[tuple[str, re.Pattern[str], bool]] = [
     ("os/shutil", re.compile(rf"\b(?:os\.(?:remove|unlink|rmdir|removedirs|rename|replace)|shutil\.(?:rmtree|move)){_ARG}"), False),
 ]
 
+_CREATE_OBJECT = re.compile(
+    rf"\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:EXTERNAL\s+)?(?:TABLE|VIEW)\s+(?:IF\s+NOT\s+EXISTS\s+)?{_TARGET}", _I
+)
 _CREATE_DATABASE = re.compile(rf"\bCREATE\s+(?:DATABASE|SCHEMA)\s+(?:IF\s+NOT\s+EXISTS\s+)?{_TARGET}", _I)
 _WRITE_API = re.compile(r"(?P<target>\.(?:write|writeTo|writeStream|insertInto)\b)")
 _ALTER_TABLE = re.compile(rf"\bALTER\s+TABLE\s+{_TARGET}", _I)
@@ -136,6 +138,13 @@ def scan_text(text: str, path: str = "<text>") -> list[Violation]:
     if not norm.endswith(WRITER_MODULE):
         for m in _WRITE_API.finditer(text):
             add(m.start(), "write API", m.group("target"), f"allowed only in {WRITER_MODULE}")
+
+    for m in _CREATE_OBJECT.finditer(text):
+        target = m.group("target")
+        if not _is_dq(target, False):
+            add(m.start(), "CREATE", target, "allowed only on the dq store")
+        elif not norm.endswith(DDL_FILE):
+            add(m.start(), "CREATE", target, f"allowed only in {DDL_FILE} (applied by dre install)")
 
     for m in _CREATE_DATABASE.finditer(text):
         target = m.group("target")

@@ -1,8 +1,9 @@
 """dq_run bookkeeping (spec sections 4 and 5).
 
-A run's single dq_run row is appended when the run ends, so the table stays
-append-only. A run that dies before finishing leaves no row, which is what the
-watchdog alerts on (spec section 8).
+A run appends a STARTED row when it starts and a final row (COMPLETED,
+PARTIAL or FAILED) when it ends; its state is its latest row (view
+v_latest_run). A run that dies before finishing stays STARTED, which the
+watchdog reports. Both rows carry run_date = the UTC date the run started.
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ from __future__ import annotations
 import subprocess
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -21,7 +22,12 @@ from hcsc.datalake.dre.store.names import validate_dq_database
 if TYPE_CHECKING:
     from pyspark.sql import SparkSession
 
-COMPLETED, PARTIAL, FAILED = "COMPLETED", "PARTIAL", "FAILED"
+STARTED, COMPLETED, PARTIAL, FAILED = "STARTED", "COMPLETED", "PARTIAL", "FAILED"
+
+_SCHEMA = (
+    "run_id STRING, started_at TIMESTAMP, ended_at TIMESTAMP, engine_version STRING, "
+    "config_commit STRING, status STRING, checks_expected INT, checks_written INT, run_date DATE"
+)
 
 
 @dataclass(frozen=True)
@@ -31,8 +37,12 @@ class Run:
     engine_version: str
     config_commit: str | None
 
+    @property
+    def run_date(self) -> date:
+        return self.started_at.astimezone(timezone.utc).date()
 
-def start_run(conf_dir: Path | str | None = None, now: datetime | None = None) -> Run:
+
+def new_run(conf_dir: Path | str | None = None, now: datetime | None = None) -> Run:
     """A new run: UUID, UTC start time, engine version and the config's git commit."""
     return Run(
         run_id=str(uuid.uuid4()),
@@ -60,6 +70,15 @@ def run_status(checks_expected: int, checks_written: int, failed: bool = False) 
     return COMPLETED if checks_written >= checks_expected else PARTIAL
 
 
+def start_run(
+    spark: SparkSession, dq_database: str, conf_dir: Path | str | None = None, now: datetime | None = None
+) -> Run:
+    """Create a run and append its STARTED row."""
+    run = new_run(conf_dir, now)
+    _append(spark, dq_database, run, None, STARTED, None, None)
+    return run
+
+
 def finish_run(
     spark: SparkSession,
     dq_database: str,
@@ -69,24 +88,17 @@ def finish_run(
     failed: bool = False,
     now: datetime | None = None,
 ) -> str:
-    """Append the run's dq_run row; return its status. run_date is the UTC date it started."""
-    validate_dq_database(dq_database)
-    ended_at = now or datetime.now(timezone.utc)
+    """Append the run's final row; return its status."""
     status = run_status(checks_expected, checks_written, failed)
-    row = (
-        run.run_id,
-        run.started_at,
-        ended_at,
-        run.engine_version,
-        run.config_commit,
-        status,
-        checks_expected,
-        checks_written,
-        run.started_at.astimezone(timezone.utc).date(),
-    )
-    schema = (
-        "run_id STRING, started_at TIMESTAMP, ended_at TIMESTAMP, engine_version STRING, "
-        "config_commit STRING, status STRING, checks_expected INT, checks_written INT, run_date DATE"
-    )
-    writer.append(spark.createDataFrame([row], schema), dq_database, "dq_run")
+    _append(spark, dq_database, run, now or datetime.now(timezone.utc), status, checks_expected, checks_written)
     return status
+
+
+def _append(
+    spark: SparkSession, dq_database: str, run: Run, ended_at: datetime | None, status: str,
+    checks_expected: int | None, checks_written: int | None,
+) -> None:
+    validate_dq_database(dq_database)
+    row = (run.run_id, run.started_at, ended_at, run.engine_version, run.config_commit, status,
+           checks_expected, checks_written, run.run_date)
+    writer.append(spark.createDataFrame([row], _SCHEMA), dq_database, "dq_run")
