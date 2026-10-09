@@ -12,4 +12,8 @@ Answers to the open decisions in spec section 11. Fill in **Answer** before buil
 
 ## Defaults taken during the build
 
-(none yet)
+- 2026-10-09, step 1: Language: no answer recorded; took the spec default, PySpark 3.5.1.
+- 2026-10-09, step 1: Python version and packages on the cluster: no answer recorded; took the spec default, Python 3.10+ with dependencies shipped in a zip. CI runs on Python 3.10.
+- 2026-10-09, step 1: Where it runs and is scheduled: no answer recorded; took the spec default (Control-M for the main run, a separate folder or cron for the watchdog). Nothing built in step 1 depends on it.
+- 2026-10-09, step 1: Database name and service account: no answer recorded; took the spec default, `dq`. The guard test accepts `dq` or the placeholder `dq_database` (see tests/guard/scan.py), since the real name comes from config.
+- 2026-10-09, step 1: Use of AI coding tools on HCSC code: no answer recorded; took the spec default (only through HCSC-approved access). This is a policy question that only HCSC can answer; please confirm.
