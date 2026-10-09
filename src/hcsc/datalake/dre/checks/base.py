@@ -94,6 +94,7 @@ class CheckContext:
     feed: Feed | None
     settings: Settings
     default_timezone: str = "UTC"  # defaults.yaml timezone, for time columns without their own
+    dq_database: str | None = None  # for checks that read their own history (T1_VOLUME, T1_SCHEMA_DRIFT)
 
 
 class Check(ABC):
@@ -111,6 +112,20 @@ class Check(ABC):
     @abstractmethod
     def evaluate(self, ctx: CheckContext, event: Event) -> list[CheckResult]:
         """One result per group (one in total for an ungrouped check)."""
+
+
+def needs_load_time(ctx: CheckContext) -> CheckResult | None:
+    """DID_NOT_RUN / invalid_config when the dataset has no load_time (dre validate warns about this)."""
+    if ctx.dataset.load_time is None:
+        return did_not_run("invalid_config", detail=f"load_time is not set for dataset {ctx.dataset.dataset}")
+    return None
+
+
+def utc_literal(value) -> str:
+    """A UTC TIMESTAMP literal for a window bound or slot (the session runs in UTC)."""
+    from hcsc.datalake.dre.checks.times import as_utc
+
+    return "TIMESTAMP '" + as_utc(value).strftime("%Y-%m-%d %H:%M:%S.%f") + "'"
 
 
 _SQL = Environment(undefined=StrictUndefined, autoescape=False, trim_blocks=True, lstrip_blocks=True)

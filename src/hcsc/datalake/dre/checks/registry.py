@@ -10,11 +10,19 @@ import yaml
 
 from hcsc.datalake.dre.checks.base import Check
 from hcsc.datalake.dre.checks.tier1.key_duplicates import KeyDuplicates
+from hcsc.datalake.dre.checks.tier1.key_nulls import KeyNulls
+from hcsc.datalake.dre.checks.tier1.on_time import OnTime
+from hcsc.datalake.dre.checks.tier1.schema_drift import SchemaDrift
+from hcsc.datalake.dre.checks.tier1.volume import Volume
+from hcsc.datalake.dre.checks.tier1.zero_rows import ZeroRows
 
 if TYPE_CHECKING:
     from hcsc.datalake.dre.config.models import Dataset
 
-CHECKS: dict[str, Check] = {check.check_id: check for check in (KeyDuplicates(),)}
+CHECKS: dict[str, Check] = {
+    check.check_id: check
+    for check in (OnTime(), ZeroRows(), Volume(), SchemaDrift(), KeyNulls(), KeyDuplicates())
+}
 PATTERNS = ("FILE_CYCLIC", "FILE_PERIODIC", "TABLE_MERGE")
 TABLE_WIDE = "TABLE_WIDE"  # pseudo-pattern for datasets that no feed lists
 

@@ -1,0 +1,14 @@
+{# T1_KEY_NULLS: rows in the event window with a null or empty key column, per group.
+   population = rows in the window; violations = rows with any key column null or blank. #}
+SELECT {% for g in group_by %}{{ g }} AS g_{{ loop.index }}, {% endfor %}
+       COUNT(*) AS population,
+       SUM(CASE WHEN {% for c in key %}({{ c }} IS NULL OR trim(CAST({{ c }} AS STRING)) = ''){% if not loop.last %} OR {% endif %}{% endfor %} THEN 1 ELSE 0 END) AS violations
+FROM {{ table }}
+WHERE {{ load_expr }} >= {{ window_start }}
+  AND {{ load_expr }} < {{ window_end }}
+{% if feed_filter %}
+  AND ({{ feed_filter }})
+{% endif %}
+{% if group_by %}
+GROUP BY {% for g in group_by %}{{ g }}{% if not loop.last %}, {% endif %}{% endfor %}
+{% endif %}

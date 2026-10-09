@@ -1,5 +1,11 @@
 # Checks for pattern TABLE_MERGE, in run order (spec sections 6 and 7).
-# Build step 5 adds the other Tier 1 checks; step 8 adds the cause checks.
+# T1_FILES_NOT_LOADED joins the file patterns in build step 6, with the dq_file
+# registry it needs; step 8 adds the cause checks.
 pattern: TABLE_MERGE
 checks:
+  - T1_ON_TIME
+  - T1_ZERO_ROWS
+  - T1_VOLUME
+  - T1_SCHEMA_DRIFT
+  - T1_KEY_NULLS
   - T1_KEY_DUPLICATES

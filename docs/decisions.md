@@ -53,10 +53,22 @@ The engine field names chosen in step 2 are in spec section 3. The other assumpt
 9. **Table-wide datasets** (step 4 review) get T1\_SCHEMA\_DRIFT, T1\_KEY\_NULLS and T1\_KEY\_DUPLICATES (`patterns/table_wide.yaml`), carry their own `expectation_version`, and run only in a full `dre run` (not with `--feed`). T1\_SCHEMA\_DRIFT runs once per physical table (step 5).
 7. **dry-run** exits 0 even when SQL fragments do not resolve (spec section 8: "0 always, unless the command itself fails"); it exits 3 only when the config is invalid or the feed unknown. It reads the window from the store when there is one and writes nothing.
 
+## Tier 1 checks (step 5, 2026-10-09)
+
+1. **T1\_FILES\_NOT\_LOADED is built in step 6** (decided by Aneesh Chan, 2026-10-09), with the `dq_file` registry it needs. Spec section 10 now gives step 5 as the six table-based checks. Until step 6 the check is not in any pattern file, and there is no stub that could PASS.
+2. **Presence checks count expected loads** (decided by Aneesh Chan, 2026-10-09). T1\_ON\_TIME and T1\_ZERO\_ROWS take loads due as their population: a load due with nothing loaded is FAILED, no load due is DID\_NOT\_RUN / empty\_population, and neither can PASS on an empty table. R11 is split into R11a (no load due: everything DID\_NOT\_RUN) and R11b (a load due: those two FAILED, row-based checks DID\_NOT\_RUN). Each check's population is in spec section 6.
+3. **Which slots.** T1\_ON\_TIME judges slots whose deadline (slot + `sla_hours`) falls in the window, so each slot is judged once. T1\_ZERO\_ROWS counts slots in the window. Named calendar files have no specified format yet: a feed using one gets DID\_NOT\_RUN / invalid\_config from these checks.
+4. **T1\_VOLUME history.** The event's slot is the latest cadence slot before the window end, written to `detail` as `slot=HH:MM` (local time). History is the row counts of earlier NORMAL events with the same slot, including the DID\_NOT\_RUN / insufficient\_history ones, which record their count so the baseline builds up.
+5. **T1\_SCHEMA\_DRIFT** compares column names and types in order. The first evaluation of a table is DID\_NOT\_RUN / insufficient\_history and records the baseline. `observed` holds the hash, `expected` the previous hash, and `detail` a JSON object with the table and columns (and the added, removed and retyped columns when FAILED). History is looked up by table, so it survives the dataset that records it changing. It reads columns with `DESCRIBE TABLE`; the comparison is in Python.
+6. **Grouping.** T1\_ON\_TIME, T1\_ZERO\_ROWS and T1\_VOLUME are per dataset (after `feed_filter`), not per `group_by` group; T1\_KEY\_NULLS and T1\_KEY\_DUPLICATES are per group. T1\_KEY\_NULLS looks at raw key values (before `key_normalise`).
+7. **No load_time.** Checks that need it are DID\_NOT\_RUN / invalid\_config. That is a CONFIGURATION reason, so the dataset's window does not move until `load_time` is set; only checks that cannot run anyway depend on it.
+8. **One window per dataset per run.** The runner fixes every dataset's event before writing any result. Otherwise a dataset's later checks saw its earlier checks' rows from the same run and got an empty window (found and fixed in step 5).
+
 ## Notes for later steps
 
 - **Step 4:** done: `dre dry-run` parses SQL fragments (`config/fragments.py`).
-- **Step 5:** keep `LOAD_TIME_CHECKS` in `config/validate.py` in line with the Tier 1 checks (configuration assumption 5).
+- **Step 5:** done: `LOAD_TIME_CHECKS` matches the Tier 1 checks that need `load_time`. No fallback to `partition_column` yet.
+- **Step 6:** add T1\_FILES\_NOT\_LOADED to `patterns/file_cyclic.yaml` and `patterns/file_periodic.yaml` with the `dq_file` registry.
 - **Step 7:** during the full sweep (`full_sweep_day`), append CLEARED with `state_detail` "no longer upstream" for open keys (`v_open_keys`) that are no longer found upstream, so they do not stay open forever.
 - **Step 9:** the digest reports groups (`group_values`) that were present in the previous run and are missing now, since `v_latest_result` shows only the latest evaluation's groups.
 - **Step 10:** `dre retention` is a separate command, scheduled weekly. By default it lists the partitions it would drop under each table's `retention_months`; `--apply` drops them through `store/retention.py`.

@@ -60,6 +60,8 @@ data-reliability-engine/
           checks/
             base.py          # Check interface, result building, denominator rule, preconditions, run_check
             keys.py          # key expressions with key_normalise applied
+            times.py         # time columns to UTC; window bounds truncated to granularity
+            cadence.py       # cadence slots (expected loads) in UTC
             events.py        # batch load events, event_id and evaluation_id
             registry.py      # which checks run, from patterns/*.yaml
             tier1/           # one module per Tier 1 check
@@ -277,15 +279,17 @@ Each check is a class implementing `applies_to(dataset, pattern)`, `required_col
 
 **Tier 1 checks** (applied automatically by pattern):
 
-| Check id | Patterns | Logic | FAILED when |
-| --- | --- | --- | --- |
-| T1\_ON\_TIME | all | For each cadence slot due in the window, look for a load time later than the slot within `sla_hours` | A due slot has no load within SLA |
-| T1\_ZERO\_ROWS | all | Count rows whose load time falls in the event window (or rows in the new partition) | Count below `min_rows_per_load` |
-| T1\_VOLUME | all | Compare the event's row count with the median of the last 14 events for the same cadence slot | Outside median ± `volume_tolerance_pct` (default 50). Fewer than 7 prior events: DID\_NOT\_RUN / insufficient\_history |
-| T1\_FILES\_NOT\_LOADED | FILE\_CYCLIC, FILE\_PERIODIC | Files in `dq_file` first seen more than `sla_hours` ago with zero rows in the raw dataset matching on `file_name_column` | Any such file |
-| T1\_SCHEMA\_DRIFT | all | Hash the table's column names and types; compare with the previous run's hash, stored in `observed` | Hash changed; `detail` lists added, removed and retyped columns |
-| T1\_KEY\_NULLS | all | Rows in the event window with a null or empty key column, grouped by `group_by` | Any |
-| T1\_KEY\_DUPLICATES | datasets with `key_unique: true` | Keys with more than one row, after `key_normalise` | Any |
+| Check id | Patterns | Logic | Population | FAILED when |
+| --- | --- | --- | --- | --- |
+| T1\_ON\_TIME | all | For each cadence slot due in the window, look for a load time later than the slot within `sla_hours` | Loads due: cadence slots whose deadline (slot + `sla_hours`) falls in the window | A due slot has no load within SLA |
+| T1\_ZERO\_ROWS | all | Count rows whose load time falls in the event window | Loads due: cadence slots in the window | Count below `min_rows_per_load` |
+| T1\_VOLUME | all | Compare the event's row count with the median of the last 14 events for the same cadence slot | Rows loaded in the window | Outside median ± `volume_tolerance_pct` (default 50). Fewer than 7 prior events: DID\_NOT\_RUN / insufficient\_history |
+| T1\_FILES\_NOT\_LOADED | FILE\_CYCLIC, FILE\_PERIODIC | Files in `dq_file` first seen more than `sla_hours` ago with zero rows in the raw dataset matching on `file_name_column` | Files first seen in `dq_file` (built in step 6) | Any such file |
+| T1\_SCHEMA\_DRIFT | all, table-wide | Hash the table's column names and types; compare with the previous run's hash, stored in `observed` | The table's columns | Hash changed; `detail` lists added, removed and retyped columns. No earlier hash: DID\_NOT\_RUN / insufficient\_history |
+| T1\_KEY\_NULLS | all, table-wide | Rows in the event window with a null or empty key column, grouped by `group_by` | Rows loaded in the window (per group) | Any |
+| T1\_KEY\_DUPLICATES | datasets with `key_unique: true`, table-wide | Keys with more than one row, after `key_normalise` | Distinct keys in the table (per group) | Any |
+
+T1\_ON\_TIME and T1\_ZERO\_ROWS count expected loads, not rows: with a load due and nothing loaded they are FAILED, also on an empty table; with no load due they are DID\_NOT\_RUN / empty\_population. Neither can PASS on an empty table. Checks that need `load_time` are DID\_NOT\_RUN / invalid\_config when it is not set.
 
 **Hop checks** (datasets with `key_map` to an upstream dataset):
 
@@ -428,7 +432,8 @@ All tests run on local-mode Spark against synthetic tables built by fixtures in 
 | R08 | Duplicate rows per key in gold | T1\_KEY\_DUPLICATES FAILED | none required |
 | R09 | A configured column is renamed in the table | Checks using it are DID\_NOT\_RUN / column\_missing; run continues | n/a |
 | R10 | An older coverage stays open while a newer one exists | Rule superseded\_still\_open FAILED, grouped by source | n/a |
-| R11 | Empty table | Checks DID\_NOT\_RUN / empty\_population, never PASSED | n/a |
+| R11a | Empty tables, no load due in the window | Every check DID\_NOT\_RUN: empty\_population (T1\_SCHEMA\_DRIFT: insufficient\_history on its first run); never PASSED | n/a |
+| R11b | Empty tables, a load due in the window | T1\_ON\_TIME and T1\_ZERO\_ROWS FAILED; row-based checks DID\_NOT\_RUN / empty\_population; never PASSED | n/a |
 | R12 | Main run never happens | Watchdog alerts | n/a |
 
 **Guard tests.** Tests in `tests/guard/` scan every file under `src/` (scanner: `tests/guard/scan.py`) and fail on any breach of these rules. Each rule has a snippet test that is caught and one that is allowed. The reasons are in `docs/decisions.md`.
@@ -450,7 +455,7 @@ Build in this order. Each step ends with its tests passing and is usable before 
 2. **Configuration.** Pydantic models, loader with defaults and overrides, `dre validate`. Done when valid sample config passes and each error type gives a file, line and fix.
 3. **Store.** DDL, append-only writer, views, `dq_run` bookkeeping. Done when a run with no checks writes a `dq_run` row and the views read back correctly.
 4. **Check framework.** Base class, preconditions, denominator rule, result building, Jinja2 rendering. Done when R09 and R11 pass.
-5. **Tier 1 checks.** All seven. Done when R02, R03 and R08 pass (checks only; causes come in step 8).
+5. **Tier 1 checks.** The six table-based Tier 1 checks: T1\_ON\_TIME, T1\_ZERO\_ROWS, T1\_VOLUME, T1\_SCHEMA\_DRIFT, T1\_KEY\_NULLS, T1\_KEY\_DUPLICATES. T1\_FILES\_NOT\_LOADED comes in step 6 with the `dq_file` registry it needs. Done when R02, R03 and R08 pass at check level (causes come in step 8).
 6. **Landing.** HDFS listing adapter (local filesystem in tests), `dq_file` registry, T1\_FILES\_NOT\_LOADED. Done when R01 passes at check level.
 7. **Hop checks and gold rules.** HOP\_FILE\_COMPLETENESS, HOP\_KEY\_CURRENCY, HOP\_VALUE\_AGREEMENT, all seven rule templates. Done when R04 to R07 and R10 pass at check level.
 8. **Cause engine.** Ordered cause checks per pattern from YAML, NOT\_READY handling. Done when every replay scenario passes with its expected cause.

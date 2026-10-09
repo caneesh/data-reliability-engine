@@ -73,9 +73,10 @@ def test_did_not_run_on_missing_group_column(spark) -> None:
 
 
 def test_applies_only_to_key_unique_datasets() -> None:
-    assert checks_for(gold("x.y"), "FILE_CYCLIC") == [CHECKS["T1_KEY_DUPLICATES"]]
-    assert checks_for(gold("x.y", key_unique=False), "FILE_CYCLIC") == []
-    assert checks_for(gold("x.y"), None) == [CHECKS["T1_KEY_DUPLICATES"]]  # table-wide: patterns/table_wide.yaml
+    assert CHECKS["T1_KEY_DUPLICATES"] in checks_for(gold("x.y"), "FILE_CYCLIC")
+    assert CHECKS["T1_KEY_DUPLICATES"] not in checks_for(gold("x.y", key_unique=False), "FILE_CYCLIC")
+    assert [c.check_id for c in checks_for(gold("x.y"), None)] == [  # table-wide: patterns/table_wide.yaml
+        "T1_SCHEMA_DRIFT", "T1_KEY_NULLS", "T1_KEY_DUPLICATES"]
 
 
 def test_every_pattern_lists_known_checks() -> None:

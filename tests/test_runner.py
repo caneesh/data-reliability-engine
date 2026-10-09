@@ -24,7 +24,8 @@ def test_run_writes_results_and_windows_follow_on(spark, tmp_path, capsys) -> No
     assert main(["run", "--conf", str(replay.conf)]) == 0  # FAILED checks still exit 0
     out = capsys.readouterr().out
     assert "gold_member_coverage T1_KEY_DUPLICATES [src_sys_nm=SRC_A]: FAILED (population 1, violations 1)" in out
-    rows = {r.dataset: r for r in spark.table(f"{replay.dq}.dq_check_result").collect()}
+    rows = {r.dataset: r for r in spark.table(f"{replay.dq}.dq_check_result").collect()
+            if r.check_id == "T1_KEY_DUPLICATES"}
     first = rows["gold_member_coverage"]
     assert (first.feed, first.expectation_version, first.execution_type) == ("example_realtime", 1, "NORMAL")
     assert first.group_values == {"src_sys_nm": "SRC_A"}
@@ -38,11 +39,17 @@ def test_run_writes_results_and_windows_follow_on(spark, tmp_path, capsys) -> No
     assert (first.window_start, first.window_end) == (end - timedelta(hours=24), end)
     assert first.event_id == Event("gold_member_coverage", first.window_start, first.window_end).event_id
 
+    # Every check on a dataset in one run shares the same event (the window is fixed before any write).
+    gold_run1 = [r for r in spark.table(f"{replay.dq}.dq_check_result").collect() if r.dataset == "gold_member_coverage"]
+    assert len(gold_run1) == 5  # six checks; schema drift for this table runs under the table-wide dataset
+    assert {(r.event_id, r.window_start, r.window_end) for r in gold_run1} == {
+        (first.event_id, first.window_start, first.window_end)}
+
     # The next run's window starts where the first one ended.
     assert previous_window_end(spark, replay.dq, "gold_member_coverage") == end.replace(tzinfo=timezone.utc)
     assert main(["run", "--conf", str(replay.conf)]) == 0
     second = [r for r in spark.table(f"{replay.dq}.dq_check_result").collect()
-              if r.run_id != run1.run_id and r.dataset == "gold_member_coverage"]
+              if r.run_id != run1.run_id and r.dataset == "gold_member_coverage" and r.check_id == "T1_KEY_DUPLICATES"]
     assert [r.window_start for r in second] == [end]
     assert second[0].event_id != first.event_id
 
@@ -105,3 +112,18 @@ def test_fragment_checks_cover_open_when_and_filter_rule_syntax(spark, tmp_path)
     assert set(problems) == {"params.open_when", "cause_inputs.filter_rules[0].condition"}
     assert problems["params.open_when"].file.endswith("one_open_row_per_coverage.yaml")
     assert "ParseException" in problems["cause_inputs.filter_rules[0].condition"].problem
+
+
+def test_schema_drift_runs_once_per_physical_table(spark, tmp_path) -> None:
+    from hcsc.datalake.dre.config.validate import validate_conf
+    from hcsc.datalake.dre.runner import plan
+
+    replay = replay_conf(spark, tmp_path, "runner_g")
+    config, errors, _ = validate_conf(replay.conf)
+    assert errors == []
+    drift = [(p.dataset.dataset, p.dataset.table) for p in plan(config) if p.check.check_id == "T1_SCHEMA_DRIFT"]
+    # Two physical tables; gold's drift runs under the table-wide dataset, not gold_member_coverage.
+    assert sorted(drift) == [("example_curated_enrollment", replay.curated), ("gold_member_coverage_all", replay.gold)]
+    # With one feed named, the table-wide dataset is not planned, so the feed's dataset runs it.
+    one_feed = [p.dataset.dataset for p in plan(config, "example_realtime") if p.check.check_id == "T1_SCHEMA_DRIFT"]
+    assert sorted(one_feed) == ["example_curated_enrollment", "gold_member_coverage"]

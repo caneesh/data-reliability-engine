@@ -26,6 +26,13 @@ def test_r09_renamed_column_is_column_missing_and_run_continues(spark, tmp_path,
     assert "mem_nbr" in gold.detail
     assert gold.population is None
 
+    # Every check that reads the renamed key column is column_missing ...
+    [gold_nulls] = results[("gold_member_coverage", "T1_KEY_NULLS")]
+    assert (gold_nulls.state, gold_nulls.reason_code) == ("DID_NOT_RUN", "column_missing")
+    # ... while gold's checks that do not read it still evaluate.
+    [on_time] = results[("gold_member_coverage", "T1_ON_TIME")]
+    assert on_time.reason_code != "column_missing"
+
     # The table-wide dataset over the same gold table reads the same column.
     [table_wide] = results[("gold_member_coverage_all", "T1_KEY_DUPLICATES")]
     assert (table_wide.state, table_wide.reason_code) == ("DID_NOT_RUN", "column_missing")
@@ -34,5 +41,6 @@ def test_r09_renamed_column_is_column_missing_and_run_continues(spark, tmp_path,
     assert (curated.state, curated.population, curated.violations) == ("PASSED", 2, 0)
 
     [run] = spark.table(f"{replay.dq}.v_latest_run").collect()
-    assert (run.status, run.checks_expected, run.checks_written) == ("COMPLETED", 3, 3)
+    # gold 6 + curated 6 + table-wide 3, less one: schema drift runs once per physical table.
+    assert (run.status, run.checks_expected, run.checks_written) == ("COMPLETED", 14, 14)
     assert "dre run: COMPLETED" in capsys.readouterr().out

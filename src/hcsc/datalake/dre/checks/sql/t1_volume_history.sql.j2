@@ -1,0 +1,14 @@
+{# Row counts of this dataset's earlier NORMAL T1_VOLUME events for the same cadence slot,
+   newest first, one per event. Events counted: evaluated ones and baseline ones. #}
+SELECT event_id, MAX(population) AS row_count, MAX(window_end) AS window_end
+FROM {{ dq_database }}.dq_check_result
+WHERE dataset = '{{ dataset }}'
+  AND check_id = 'T1_VOLUME'
+  AND execution_type = 'NORMAL'
+  AND detail = '{{ slot_detail }}'
+  AND population > 0
+  AND (state IN ('PASSED', 'FAILED') OR reason_code = 'insufficient_history')
+  AND window_end <= {{ before }}
+GROUP BY event_id
+ORDER BY window_end DESC
+LIMIT {{ limit }}

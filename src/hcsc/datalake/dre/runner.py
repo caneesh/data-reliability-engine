@@ -69,21 +69,46 @@ def plan(config: Config, feed_id: str | None = None) -> list[Planned]:
             for ds_id, ds in config.datasets.items() if ds_id not in listed
             for check in checks_for(ds, None)
         ]
-    return work
+    return once_per_table(work, "T1_SCHEMA_DRIFT")
 
 
-def evaluate(spark: SparkSession, config: Config, planned: Planned, run_start: datetime,
-             read_store: bool = True) -> Evaluation:
-    """read_store=False (dry-run): if the store cannot be read, window as on a first run."""
+def once_per_table(work: list[Planned], check_id: str) -> list[Planned]:
+    """Keep one evaluation of check_id per physical table: the table-wide dataset's if there is
+    one, otherwise the first planned."""
+    keep: dict[str, Planned] = {}
+    for p in work:
+        if p.check.check_id == check_id:
+            current = keep.get(p.dataset.table)
+            if current is None or (p.feed is None and current.feed is not None):
+                keep[p.dataset.table] = p
+    return [p for p in work if p.check.check_id != check_id or keep[p.dataset.table] is p]
+
+
+def events_for(spark: SparkSession, config: Config, work: list[Planned], run_start: datetime,
+               read_store: bool = True) -> dict[str, Event]:
+    """One event per dataset, fixed before any result of this run is written (otherwise a
+    dataset's later checks would see its earlier checks' window as the previous one).
+    read_store=False (dry-run): if the store cannot be read, window as on a first run."""
+    events: dict[str, Event] = {}
+    for planned in work:
+        ds = planned.dataset
+        if ds.dataset in events:
+            continue
+        try:
+            previous = previous_window_end(spark, config.defaults.dq_database, ds.dataset)
+        except Exception:
+            if read_store:
+                raise
+            previous = None
+        events[ds.dataset] = window_for(ds, run_start, previous, config.dataset_settings(ds.dataset),
+                                        config.defaults.timezone)
+    return events
+
+
+def evaluate(spark: SparkSession, config: Config, planned: Planned, event: Event) -> Evaluation:
     settings = config.dataset_settings(planned.dataset.dataset)
-    try:
-        previous = previous_window_end(spark, config.defaults.dq_database, planned.dataset.dataset)
-    except Exception:
-        if read_store:
-            raise
-        previous = None
-    event = window_for(planned.dataset, run_start, previous, settings, config.defaults.timezone)
-    ctx = CheckContext(spark, planned.dataset, planned.feed, settings, config.defaults.timezone)
+    ctx = CheckContext(spark, planned.dataset, planned.feed, settings, config.defaults.timezone,
+                       config.defaults.dq_database)
     results, duration_ms = run_check(planned.check, ctx, event)
     return Evaluation(planned, event, results, datetime.now(timezone.utc), duration_ms)
 
@@ -151,8 +176,9 @@ def run(spark: SparkSession, conf: str, feed_id: str | None = None, execution_ty
     work = plan(config, feed_id)
     written = 0
     try:
+        events = events_for(spark, config, work, run_record.started_at)
         for planned in work:
-            evaluation = evaluate(spark, config, planned, run_record.started_at)
+            evaluation = evaluate(spark, config, planned, events[planned.dataset.dataset])
             try:
                 append_check_results(spark, db, result_rows(evaluation, run_record, execution_type))
                 written += 1
@@ -185,8 +211,9 @@ def dry_run(spark: SparkSession, conf: str, feed_id: str) -> int:
         print(problem)
     now = datetime.now(timezone.utc)
     work = plan(config, feed_id)
+    events = events_for(spark, config, work, now, read_store=False)
     for planned in work:
-        for line in describe(evaluate(spark, config, planned, now, read_store=False)):
+        for line in describe(evaluate(spark, config, planned, events[planned.dataset.dataset])):
             print(line)
     print(f"dre dry-run: {len(work)} checks evaluated, {len(problems)} SQL fragment problem(s), nothing written")
     return 0
