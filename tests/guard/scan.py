@@ -5,10 +5,12 @@ Rules (hard rules 1 and 5, spec section 9, docs/decisions.md "Guard rules"):
 - INSERT INTO is the only DML allowed, and only into the dq store.
 - UPDATE, DELETE, MERGE, TRUNCATE and INSERT OVERWRITE are banned everywhere,
   dq included, as are DataFrame overwrite modes.
-- CREATE TABLE and CREATE [OR REPLACE] VIEW are allowed on dq only; CREATE
-  DATABASE only for dq itself. DROP TABLE/VIEW/DATABASE and every other ALTER
-  are banned.
+- CREATE TABLE and CREATE [OR REPLACE] VIEW are allowed on dq only. CREATE
+  DATABASE is allowed only for dq and only in store/local_setup.py. DROP
+  TABLE/VIEW/DATABASE and every other ALTER are banned.
 - ALTER TABLE <dq>.<t> DROP PARTITION is allowed only in store/retention.py.
+- The DataFrame write APIs (.write, .writeTo, .writeStream, insertInto) are
+  allowed only in store/writer.py; writeTo overwrite/create/replace is banned.
 - DataFrame path writes, Hadoop FileSystem delete/rename/mkdirs, os/shutil
   file removal and moves, and `hdfs dfs` deletes, moves and mkdirs are flagged
   unless the target is the dq store. The dq store is a database addressed by
@@ -29,8 +31,10 @@ from pathlib import Path
 DQ_DATABASE = "dq"
 # Ways engine code may name the dq database when the real name comes from config.
 DQ_PLACEHOLDERS = ("{{dq_database}}", "{dq_database}")
-# The only module allowed to drop dq partitions (retention).
+# Modules with a path-based allowance (see the rules above).
 RETENTION_MODULE = "hcsc/datalake/dre/store/retention.py"
+WRITER_MODULE = "hcsc/datalake/dre/store/writer.py"
+LOCAL_SETUP_MODULE = "hcsc/datalake/dre/store/local_setup.py"
 
 # A target is either a Jinja expression (which may contain spaces) followed by
 # the rest of a dotted name, or a plain run of non-space characters.
@@ -48,6 +52,10 @@ _BANNED: list[tuple[str, re.Pattern[str]]] = [
     ("DROP", re.compile(rf"\bDROP\s+(?:TABLE|VIEW|DATABASE|SCHEMA)\s+(?:IF\s+EXISTS\s+)?{_TARGET}", _I)),
     ("ALTER", re.compile(rf"\bALTER\s+(?:VIEW|DATABASE|SCHEMA)\s+{_TARGET}", _I)),
     ("saveAsTable", re.compile(rf"\.saveAsTable{_ARG}")),
+    ("writeTo overwrite/create", re.compile(
+        r"(?P<target>\.writeTo\((?:[^()]|\([^()]*\))*\)(?:[\s\\]*\.\s*\w+\((?:[^()]|\([^()]*\))*\))*[\s\\]*\.\s*"
+        r"(?:overwrite|overwritePartitions|create|replace|createOrReplace)\()"
+    )),
     ("overwrite mode", re.compile(r"(?P<target>\.mode\(\s*[\"']overwrite[\"']\s*\)|\bmode\s*=\s*[\"']overwrite[\"'])", _I)),
     ("overwrite=True", re.compile(r"(?P<target>\boverwrite\s*=\s*True\b)")),
     ("HDFS", re.compile(
@@ -60,10 +68,10 @@ _BANNED: list[tuple[str, re.Pattern[str]]] = [
 _DQ_ONLY: list[tuple[str, re.Pattern[str], bool]] = [
     ("INSERT INTO", re.compile(rf"\bINSERT\s+INTO\s+(?:TABLE\s+)?{_TARGET}", _I), False),
     ("insertInto", re.compile(rf"\.insertInto{_ARG}"), False),
+    ("writeTo", re.compile(rf"\.writeTo{_ARG}"), False),
     ("CREATE", re.compile(
         rf"\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:EXTERNAL\s+)?(?:TABLE|VIEW)\s+(?:IF\s+NOT\s+EXISTS\s+)?{_TARGET}", _I
     ), False),
-    ("CREATE DATABASE", re.compile(rf"\bCREATE\s+(?:DATABASE|SCHEMA)\s+(?:IF\s+NOT\s+EXISTS\s+)?{_TARGET}", _I), True),
     # DataFrameWriter path writes: df.write[.option(..)...].save/orc/parquet/csv/json/text(path)
     ("path write", re.compile(
         r"\.write(?:Stream)?(?:[\s\\]*\.\s*\w+\((?:[^()]|\([^()]*\))*\))*[\s\\]*\.\s*"
@@ -73,6 +81,8 @@ _DQ_ONLY: list[tuple[str, re.Pattern[str], bool]] = [
     ("os/shutil", re.compile(rf"\b(?:os\.(?:remove|unlink|rmdir|removedirs|rename|replace)|shutil\.(?:rmtree|move)){_ARG}"), False),
 ]
 
+_CREATE_DATABASE = re.compile(rf"\bCREATE\s+(?:DATABASE|SCHEMA)\s+(?:IF\s+NOT\s+EXISTS\s+)?{_TARGET}", _I)
+_WRITE_API = re.compile(r"(?P<target>\.(?:write|writeTo|writeStream|insertInto)\b)")
 _ALTER_TABLE = re.compile(rf"\bALTER\s+TABLE\s+{_TARGET}", _I)
 _DROP_PARTITION_TAIL = re.compile(r"\s+DROP\s+(?:IF\s+EXISTS\s+)?PARTITION\b", _I)
 
@@ -93,7 +103,7 @@ class Violation:
 
 def _clean(target: str) -> str:
     t = re.sub(r"^[rbfu]{0,2}[\"']", "", target.strip(), flags=re.I)  # opening quote and prefix
-    t = t.rstrip("\"'")
+    t = t.rstrip("\"')")  # closing quote, and the call's closing paren
     return re.sub(r"[\s`]+", "", t)  # whitespace and identifier backticks
 
 
@@ -120,7 +130,20 @@ def scan_text(text: str, path: str = "<text>") -> list[Violation]:
             if not _is_dq(m.group("target"), is_database):
                 add(m.start(), label, m.group("target"), "allowed only on the dq store")
 
-    in_retention = path.replace("\\", "/").endswith(RETENTION_MODULE)
+    norm = path.replace("\\", "/")
+    in_retention = norm.endswith(RETENTION_MODULE)
+
+    if not norm.endswith(WRITER_MODULE):
+        for m in _WRITE_API.finditer(text):
+            add(m.start(), "write API", m.group("target"), f"allowed only in {WRITER_MODULE}")
+
+    for m in _CREATE_DATABASE.finditer(text):
+        target = m.group("target")
+        if not _is_dq(target, True):
+            add(m.start(), "CREATE DATABASE", target, "allowed only for the dq database")
+        elif not norm.endswith(LOCAL_SETUP_MODULE):
+            add(m.start(), "CREATE DATABASE", target, f"allowed only in {LOCAL_SETUP_MODULE}")
+
     for m in _ALTER_TABLE.finditer(text):
         target = m.group("target")
         if _DROP_PARTITION_TAIL.match(text, m.end()):

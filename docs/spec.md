@@ -63,7 +63,10 @@ data-reliability-engine/
             landing.py merge.py  # cause checks by hop type
           store/
             ddl.sql          # dq tables and views
-            writer.py        # append-only writes
+            writer.py        # append-only writes; the only DataFrame write path
+            retention.py     # drops expired run_date partitions; the only DROP PARTITION
+            local_setup.py   # creates the dq database for tests and local runs only
+            names.py         # identifier validation for dq names
           sources/
             hdfs.py          # listing landing folders (subprocess or Hadoop FS API)
             scheduler.py     # optional: scheduler history adapter (stub in release 1)
@@ -192,7 +195,7 @@ severity: high                    # high | medium | low
 
 ## 5. Data model
 
-All tables in the `dq` database, ORC, partitioned by `run_date`. Append-only: the writer module exposes only `append`. Retention is set per table in `defaults.yaml` (results and events default to 7 years, file registry to 13 months).
+All tables in the `dq` database, ORC, partitioned by `run_date`. Append-only: the writer module exposes only `append`, which selects the frame's columns in the table's column order before `insertInto`. Retention is set per table in `defaults.yaml` (results and events default to 7 years, file registry to 13 months) and applied only by `store/retention.py`. `dre run` never creates the `dq` database; `store/local_setup.py` does that for tests and local runs.
 
 ```sql
 CREATE TABLE dq.dq_run (
@@ -398,7 +401,15 @@ All tests run on local-mode Spark against synthetic tables built by fixtures in 
 | R11 | Empty table | Checks DID\_NOT\_RUN / empty\_population, never PASSED | n/a |
 | R12 | Main run never happens | Watchdog alerts | n/a |
 
-**Guard tests.** A test scans the code for write statements (INSERT, MERGE, UPDATE, DELETE, DROP, ALTER, TRUNCATE, `hdfs dfs -rm`, `-mv`) and fails unless the target is the `dq` database. A second test asserts that email text contains no `key_value`.
+**Guard tests.** Tests in `tests/guard/` scan every file under `src/` (scanner: `tests/guard/scan.py`) and fail on any breach of these rules. Each rule has a snippet test that is caught and one that is allowed. The reasons are in `docs/decisions.md`.
+
+1. **Naming the dq store.** SQL names the store as the literal `dq`, or as `{{ dq_database }}` (Jinja) or `{dq_database}` (Python f-string), because the real name comes from config. A write target the scanner cannot read (for example one built by string concatenation) fails. The configured dq database name must be a plain identifier (`store/names.py`, `validate_dq_database`).
+2. **Read-only outside dq.** Flagged unless the target is the dq store: INSERT INTO; CREATE TABLE and CREATE [OR REPLACE] VIEW; `insertInto` and `writeTo`; DataFrameWriter path writes (`.save`, `.orc`, `.parquet`, `.csv`, `.json`, `.text` on a `.write` chain); Hadoop FileSystem `delete`, `rename`, `mkdirs`; `os.remove`, `unlink`, `rmdir`, `removedirs`, `rename`, `replace`; `shutil.rmtree`, `shutil.move`. The dq store is addressed by table name, so a path target never qualifies. `hdfs dfs` / `hadoop fs` `-rm`, `-rmr`, `-rmdir`, `-mv` and `-mkdir` are always flagged.
+3. **Append-only.** The only DML allowed on dq is INSERT INTO (or `insertInto` in append mode). Banned everywhere, dq included: UPDATE, DELETE, MERGE, TRUNCATE, INSERT OVERWRITE, `mode("overwrite")`, `overwrite=True`, `saveAsTable`, `writeTo(...)` followed by `overwrite`, `overwritePartitions`, `create`, `replace` or `createOrReplace`, DROP TABLE/VIEW/DATABASE, and every ALTER except rule 5.
+4. **One write path.** The DataFrame write APIs (`.write`, `.writeTo`, `.writeStream`, `insertInto`) are allowed only in `store/writer.py`. Any `.write` elsewhere is flagged, including `w = df.write` split across statements and plain file `.write(...)` calls. `append` selects columns in the table's order before `insertInto`; a test fails if a column lands out of order.
+5. **Retention.** ALTER TABLE `<dq>.<table>` DROP [IF EXISTS] PARTITION is allowed only in `store/retention.py`. That module refuses to drop any `run_date` partition on or after today minus the configured retention in months, and refuses a retention below one month; a test proves it.
+6. **Database creation.** CREATE DATABASE is allowed only for the dq database and only in `store/local_setup.py`. No other module under `src/` may reference `local_setup`, so `dre run` never creates the database.
+7. **Email.** Email text contains no `key_value`. Until the digest exists (step 9) the guard is static: nothing in `notify/` references `key_value`. Step 9 adds a test on the rendered email text.
 
 ## 10. Build order
 

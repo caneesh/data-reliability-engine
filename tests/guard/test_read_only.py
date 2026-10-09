@@ -8,10 +8,12 @@ from __future__ import annotations
 import pytest
 
 from tests.conftest import SRC_ROOT
-from tests.guard.scan import RETENTION_MODULE, scan_text, scan_tree
+from tests.guard.scan import LOCAL_SETUP_MODULE, RETENTION_MODULE, WRITER_MODULE, scan_text, scan_tree
 
 RETENTION = f"src/{RETENTION_MODULE}"
-WRITER = "src/hcsc/datalake/dre/store/writer.py"
+WRITER = f"src/{WRITER_MODULE}"
+LOCAL_SETUP = f"src/{LOCAL_SETUP_MODULE}"
+OTHER = "src/hcsc/datalake/dre/checks/base.py"
 
 
 def test_src_is_read_only_and_append_only() -> None:
@@ -43,7 +45,17 @@ CAUGHT = [
     # DDL on dq only
     ("create-table-outside", "CREATE TABLE gold_db.copy AS SELECT 1", WRITER),
     ("create-view-outside", "CREATE OR REPLACE VIEW gold_db.v AS SELECT 1", WRITER),
-    ("create-database-outside", "CREATE DATABASE other_db", WRITER),
+    ("create-database-outside", "CREATE DATABASE other_db", LOCAL_SETUP),
+    ("create-database-dq-not-setup", "CREATE DATABASE IF NOT EXISTS dq", WRITER),
+    # DataFrame write APIs only in store/writer.py
+    ("write-api-outside-writer", 'df.write.mode("append").insertInto("dq.dq_run")', OTHER),
+    ("write-split-chain-outside-writer", "w = df.write\nw.save(p)", OTHER),
+    ("writeTo-outside-writer", 'df.writeTo("dq.dq_run").append()', OTHER),
+    ("insertInto-outside-writer", 'frame_writer.insertInto("dq.dq_run")', OTHER),
+    ("file-write-outside-writer", "handle.write(text)", OTHER),
+    ("writeTo-outside-dq", 'df.writeTo("gold_db.member_coverage").append()', WRITER),
+    ("writeTo-overwrite-dq", 'df.writeTo("dq.dq_run").overwritePartitions()', WRITER),
+    ("writeTo-createOrReplace-dq", 'df.writeTo("dq.dq_run").using("orc").createOrReplace()', WRITER),
     ("alter-add-columns-dq", "ALTER TABLE dq.dq_run ADD COLUMNS (x INT)", WRITER),
     ("alter-outside", "ALTER TABLE gold_db.member_coverage SET TBLPROPERTIES ('a'='b')", WRITER),
     # DROP PARTITION only in retention, only on dq
@@ -79,7 +91,10 @@ ALLOWED = [
     ("insertInto-dq-append", 'df.write.mode("append").insertInto("dq.dq_key_event")', WRITER),
     ("create-table-dq", "CREATE TABLE IF NOT EXISTS dq.dq_run (run_id STRING) STORED AS ORC", WRITER),
     ("create-view-dq", "CREATE OR REPLACE VIEW {{ dq_database }}.v_latest_result AS SELECT 1", WRITER),
-    ("create-database-dq", "CREATE DATABASE IF NOT EXISTS dq", WRITER),
+    ("create-database-dq-setup", 'spark.sql(f"CREATE DATABASE IF NOT EXISTS {dq_database}")', LOCAL_SETUP),
+    ("write-api-in-writer", 'df.select(*cols).write.insertInto(f"{dq_database}.{table}")', WRITER),
+    ("writeTo-append-in-writer", 'df.writeTo("dq.dq_run").append()', WRITER),
+    ("write-text-not-write-api", "path.write_text(body)", OTHER),
     ("drop-partition-retention", "ALTER TABLE dq.dq_file DROP IF EXISTS PARTITION (run_date = DATE'2019-01-01')", RETENTION),
     ("drop-partition-retention-fstring", 'f"ALTER TABLE {dq_database}.{table} DROP IF EXISTS PARTITION "', RETENTION),
     ("read-select", "SELECT * FROM gold_db.member_coverage WHERE updated_flag = 1", WRITER),

@@ -45,8 +45,7 @@ dre validate --conf conf/    # static config validation
 
 ## Guard tests (keep them passing)
 
-- A test scans `src/` for write statements (INSERT, MERGE, UPDATE, DELETE, DROP, ALTER, TRUNCATE, `hdfs dfs -rm`, `-mv`) and fails unless the target is the `dq` database.
-- A test asserts that email text contains no `key_value`.
+`tests/guard/` enforces read-only outside `dq`, append-only inside it, one write path (`store/writer.py`) and no `key_value` in email. The full rules are in spec section 9; never weaken a guard to make code pass.
 
 ## Repo map
 

@@ -6,6 +6,8 @@ never touch a real cluster and leave nothing behind in the repository.
 
 from __future__ import annotations
 
+import os
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -20,6 +22,9 @@ PACKAGE_ROOT = SRC_ROOT / "hcsc" / "datalake" / "dre"
 def spark(tmp_path_factory: pytest.TempPathFactory) -> Iterator["SparkSession"]:
     from pyspark.sql import SparkSession
 
+    # Python workers must run the same interpreter as the driver (the test runner).
+    os.environ["PYSPARK_PYTHON"] = sys.executable
+    os.environ["PYSPARK_DRIVER_PYTHON"] = sys.executable
     base = tmp_path_factory.mktemp("spark")
     session = (
         SparkSession.builder.master("local[2]")
