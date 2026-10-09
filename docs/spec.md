@@ -115,7 +115,7 @@ cadence:
   # kind interval:       interval_minutes: 60
   # kind calendar_dates: dates: [2026-01-05, 2026-02-02]
   timezone: America/Chicago
-  calendar: EVERYDAY              # EVERYDAY | WEEKDAYS | named calendar file
+  calendar: EVERYDAY              # EVERYDAY | WEEKDAYS (named calendar files: not in release 1; dre validate rejects them)
 sla_hours: 8
 datasets: [rms_raw_enrollment, rms_curated_enrollment, gold_member_coverage]
 cause_inputs:                     # optional; empty means NOT_READY for checks that need it
@@ -282,14 +282,14 @@ Each check is a class implementing `applies_to(dataset, pattern)`, `required_col
 | Check id | Patterns | Logic | Population | FAILED when |
 | --- | --- | --- | --- | --- |
 | T1\_ON\_TIME | all | For each cadence slot due in the window, look for a load time later than the slot within `sla_hours` | Loads due: cadence slots whose deadline (slot + `sla_hours`) falls in the window | A due slot has no load within SLA |
-| T1\_ZERO\_ROWS | all | Count rows whose load time falls in the event window | Loads due: cadence slots in the window | Count below `min_rows_per_load` |
-| T1\_VOLUME | all | Compare the event's row count with the median of the last 14 events for the same cadence slot | Rows loaded in the window | Outside median ± `volume_tolerance_pct` (default 50). Fewer than 7 prior events: DID\_NOT\_RUN / insufficient\_history |
+| T1\_ZERO\_ROWS | all | For each cadence slot due in the window, count rows loaded within `sla_hours` of the slot | Loads due: cadence slots whose deadline (slot + `sla_hours`) falls in the window, the same slots as T1\_ON\_TIME | A due load wrote fewer than `min_rows_per_load` rows |
+| T1\_VOLUME | all | For each slot whose load period (slot to next slot) ends in the window, compare its row count with the median of the last 14 loads for the same slot; one result per slot (group `slot` = local HH:MM, `slot_time`) | The slot's rows | Outside median ± `volume_tolerance_pct` (default 50). Fewer than 7 prior loads for the slot: DID\_NOT\_RUN / insufficient\_history |
 | T1\_FILES\_NOT\_LOADED | FILE\_CYCLIC, FILE\_PERIODIC | Files in `dq_file` first seen more than `sla_hours` ago with zero rows in the raw dataset matching on `file_name_column` | Files first seen in `dq_file` (built in step 6) | Any such file |
 | T1\_SCHEMA\_DRIFT | all, table-wide | Hash the table's column names and types; compare with the previous run's hash, stored in `observed` | The table's columns | Hash changed; `detail` lists added, removed and retyped columns. No earlier hash: DID\_NOT\_RUN / insufficient\_history |
 | T1\_KEY\_NULLS | all, table-wide | Rows in the event window with a null or empty key column, grouped by `group_by` | Rows loaded in the window (per group) | Any |
 | T1\_KEY\_DUPLICATES | datasets with `key_unique: true`, table-wide | Keys with more than one row, after `key_normalise` | Distinct keys in the table (per group) | Any |
 
-T1\_ON\_TIME and T1\_ZERO\_ROWS count expected loads, not rows: with a load due and nothing loaded they are FAILED, also on an empty table; with no load due they are DID\_NOT\_RUN / empty\_population. Neither can PASS on an empty table. Checks that need `load_time` are DID\_NOT\_RUN / invalid\_config when it is not set.
+T1\_ON\_TIME and T1\_ZERO\_ROWS count expected loads, not rows: with a load due and nothing loaded they are FAILED, also on an empty table; with no load due they are DID\_NOT\_RUN / empty\_population. Neither can PASS on an empty table. Both judge a slot once, in the window where its deadline (slot + `sla_hours`) falls, never when the slot first appears: a load due at 08:00 with an 8-hour SLA is not judged by a run at 09:00. T1\_VOLUME likewise judges each slot once, in the window where its load period ends, so a load is never split across windows; slots with no rows give no T1\_VOLUME result (T1\_ZERO\_ROWS reports them). Checks that need `load_time` are DID\_NOT\_RUN / invalid\_config when it is not set.
 
 **Hop checks** (datasets with `key_map` to an upstream dataset):
 

@@ -1,14 +1,21 @@
-{# Row counts of this dataset's earlier NORMAL T1_VOLUME events for the same cadence slot,
-   newest first, one per event. Events counted: evaluated ones and baseline ones. #}
-SELECT event_id, MAX(population) AS row_count, MAX(window_end) AS window_end
-FROM {{ dq_database }}.dq_check_result
-WHERE dataset = '{{ dataset }}'
-  AND check_id = 'T1_VOLUME'
-  AND execution_type = 'NORMAL'
-  AND detail = '{{ slot_detail }}'
-  AND population > 0
-  AND (state IN ('PASSED', 'FAILED') OR reason_code = 'insufficient_history')
-  AND window_end <= {{ before }}
-GROUP BY event_id
-ORDER BY window_end DESC
-LIMIT {{ limit }}
+{# Row counts of this dataset's earlier NORMAL T1_VOLUME results, per slot label, newest
+   {{ limit }} per label, one per evaluation. Counted: evaluated results and baseline ones. #}
+SELECT label, row_count
+FROM (
+  SELECT label, row_count,
+         ROW_NUMBER() OVER (PARTITION BY label ORDER BY window_end DESC) AS rn
+  FROM (
+    SELECT group_values['slot'] AS label, evaluation_id,
+           MAX(population) AS row_count, MAX(window_end) AS window_end
+    FROM {{ dq_database }}.dq_check_result
+    WHERE dataset = '{{ dataset }}'
+      AND check_id = 'T1_VOLUME'
+      AND execution_type = 'NORMAL'
+      AND population > 0
+      AND (state IN ('PASSED', 'FAILED') OR reason_code = 'insufficient_history')
+      AND window_end <= {{ before }}
+      AND group_values['slot'] IN ({% for l in labels %}'{{ l }}'{% if not loop.last %}, {% endif %}{% endfor %})
+    GROUP BY group_values['slot'], evaluation_id
+  ) per_evaluation
+) ranked
+WHERE rn <= {{ limit }}

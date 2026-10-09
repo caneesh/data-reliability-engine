@@ -1,0 +1,18 @@
+{# T1_ON_TIME and T1_ZERO_ROWS: for each cadence slot whose SLA deadline falls in the window,
+   the rows loaded in [slot, slot + SLA). population = slots due; violations = slots with
+   fewer than {{ minimum }} rows (1 for ON_TIME: any load; min_rows_per_load for ZERO_ROWS). #}
+SELECT COUNT(*) AS population,
+       SUM(CASE WHEN loaded < {{ minimum }} THEN 1 ELSE 0 END) AS violations
+FROM (
+  SELECT s.slot, COUNT(t.load_ts) AS loaded
+  FROM (SELECT explode(array({{ slots | join(', ') }})) AS slot) s
+  LEFT JOIN (
+    SELECT {{ load_expr }} AS load_ts
+    FROM {{ table }}
+{% if feed_filter %}
+    WHERE {{ feed_filter }}
+{% endif %}
+  ) t
+    ON t.load_ts >= s.slot AND t.load_ts < s.slot + INTERVAL {{ sla_minutes }} MINUTES
+  GROUP BY s.slot
+) per_slot

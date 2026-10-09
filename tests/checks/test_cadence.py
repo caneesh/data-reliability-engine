@@ -46,9 +46,13 @@ def test_interval_and_calendar_dates() -> None:
     assert dated == [datetime(2026, 1, 15, 15, 0, tzinfo=UTC)]
 
 
-def test_named_calendar_is_not_supported_yet() -> None:
+def test_named_calendar_is_rejected_by_config_and_guarded_here() -> None:
+    with pytest.raises(ValueError, match="named calendar file"):
+        cadence(calendar="holidays.yaml")  # dre validate reports it
+    unchecked = Cadence.model_construct(kind="times", times=["00:30"], interval_minutes=None, dates=None,
+                                        timezone="America/Chicago", calendar="holidays.yaml")
     with pytest.raises(UnsupportedCalendar):
-        slots(cadence(calendar="holidays.yaml"), datetime(2026, 1, 15, tzinfo=UTC), datetime(2026, 1, 16, tzinfo=UTC))
+        slots(unchecked, datetime(2026, 1, 15, tzinfo=UTC), datetime(2026, 1, 16, tzinfo=UTC))
 
 
 def test_slot_label_is_local_time_of_day() -> None:

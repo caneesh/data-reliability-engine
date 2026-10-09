@@ -102,6 +102,7 @@ CASES = [
     ("negative-settle", DEFAULTS, "settle_minutes: 15", "settle_minutes: -5", "settle_minutes", "settle_minutes", "greater than", ">= 0"),
     ("table-wide-needs-version", TABLE_WIDE, "expectation_version: 1 ", "# ", "expectation_version", "dataset: gold_member_coverage_all", "needs an expectation_version", "expectation_version: 1"),
     ("feed-dataset-no-version", GOLD, "layer: GOLD\n", "layer: GOLD\nexpectation_version: 2\n", "expectation_version", "expectation_version: 2", "versions this dataset's checks", "bump the feed's"),
+    ("named-calendar-file", FEED, "calendar: EVERYDAY", "calendar: holidays.yaml", "cadence.calendar", "calendar: holidays.yaml", "named calendar file", "EVERYDAY or WEEKDAYS"),
     ("bad-email", DEFAULTS, "dre-alerts@example.com", "dre-alerts", "recipients.membership-gold[0]", "membership-gold:", "email", "name@domain"),
 ]
 

@@ -1,0 +1,20 @@
+{# T1_VOLUME: rows loaded in each slot's period [slot, next slot), for the slots whose period
+   ends in the window. One row per slot: g_1 = slot label (local HH:MM), g_2 = slot time. #}
+SELECT p.label AS g_1, p.slot_time AS g_2, COUNT(t.load_ts) AS row_count
+FROM (
+  SELECT inline(array(
+{% for p in periods %}
+    named_struct('label', '{{ p.label }}', 'slot_time', '{{ p.slot_time }}', 'start_ts', {{ p.start }}, 'end_ts', {{ p.end }}){% if not loop.last %},{% endif %}
+
+{% endfor %}
+  ))
+) p
+LEFT JOIN (
+  SELECT {{ load_expr }} AS load_ts
+  FROM {{ table }}
+{% if feed_filter %}
+  WHERE {{ feed_filter }}
+{% endif %}
+) t
+  ON t.load_ts >= p.start_ts AND t.load_ts < p.end_ts
+GROUP BY p.label, p.slot_time

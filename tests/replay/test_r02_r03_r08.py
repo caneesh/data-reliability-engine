@@ -28,14 +28,16 @@ def test_r02_no_loads_for_longer_than_the_sla_is_on_time_failed(spark, tmp_path)
 def test_r03_gold_wrote_zero_rows_while_upstream_had_rows_is_zero_rows_failed(spark, tmp_path) -> None:
     replay = replay_conf(spark, tmp_path, "r03", {CURATED: [CURATED_LOAD_TIME]})
     create_table(spark, replay.gold, GOLD_COLUMNS, [gold_row(loaded=gold_load_time(72))])  # nothing recent
+    # Upstream loaded every hour through the window, so every load due upstream wrote rows.
     create_table(spark, replay.curated, CURATED_COLUMNS,
-                 [curated_row(updated=curated_load_time(2)), curated_row(sub_id="123402", updated=curated_load_time(3))])
+                 [curated_row(sub_id=f"1234{h:02d}", updated=curated_load_time(h)) for h in range(1, 40)])
 
     assert main(["run", "--conf", str(replay.conf)]) == 0
     results = latest(spark, replay)
     [gold] = results[("gold_member_coverage", "T1_ZERO_ROWS")]
-    assert (gold.state, gold.violations) == ("FAILED", 1)
-    assert gold.observed.startswith("0 rows loaded in the window")
+    assert gold.state == "FAILED"
+    assert gold.population > 0 and gold.violations == gold.population  # every load due wrote nothing
+    assert gold.observed.endswith("due loads wrote fewer rows than the minimum")
     [upstream] = results[("example_curated_enrollment", "T1_ZERO_ROWS")]
     assert upstream.state == "PASSED"  # upstream did load: the gap is at gold
 

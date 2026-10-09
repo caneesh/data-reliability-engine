@@ -95,6 +95,15 @@ def _regex(value: str) -> str:
     return value
 
 
+def _calendar(value: str) -> str:
+    if value not in ("EVERYDAY", "WEEKDAYS"):
+        raise invalid(
+            f"calendar {value!r} looks like a named calendar file, which release 1 does not support",
+            "use EVERYDAY or WEEKDAYS, or list the run dates with kind: calendar_dates",
+        )
+    return value
+
+
 def _str_to_list(value: Any) -> Any:
     return [value] if isinstance(value, str) else value
 
@@ -216,7 +225,7 @@ class Cadence(Model):
     interval_minutes: int | None = Field(default=None, gt=0)
     dates: list[date] | None = None
     timezone: TimeZone
-    calendar: NonEmptyStr = "EVERYDAY"
+    calendar: Annotated[str, AfterValidator(_calendar)] = "EVERYDAY"  # EVERYDAY | WEEKDAYS (named files: not in release 1)
 
     @model_validator(mode="after")
     def _check(self) -> Cadence:

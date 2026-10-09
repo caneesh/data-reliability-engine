@@ -1,9 +1,0 @@
-{# Rows whose load time (UTC) falls in the event window [window_start, window_end).
-   Used by T1_ZERO_ROWS and T1_VOLUME. #}
-SELECT COUNT(*) AS row_count
-FROM {{ table }}
-WHERE {{ load_expr }} >= {{ window_start }}
-  AND {{ load_expr }} < {{ window_end }}
-{% if feed_filter %}
-  AND ({{ feed_filter }})
-{% endif %}

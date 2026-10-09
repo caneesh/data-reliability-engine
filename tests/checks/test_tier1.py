@@ -7,12 +7,12 @@ Fixed window [2026-01-15 12:00, 2026-01-16 12:00) UTC. Cadence 00:30 and 12:30 C
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
 from hcsc.datalake.dre.checks.base import CheckContext, run_check
-from hcsc.datalake.dre.checks.events import Event
+from hcsc.datalake.dre.checks.events import Event, window_for
 from hcsc.datalake.dre.checks.tier1.key_nulls import KeyNulls
 from hcsc.datalake.dre.checks.tier1.on_time import OnTime
 from hcsc.datalake.dre.checks.tier1.schema_drift import SchemaDrift
@@ -80,16 +80,27 @@ def test_on_time_did_not_run_without_a_due_slot_or_load_time(spark) -> None:
     assert (r.reason_category, r.reason_code) == ("CONFIGURATION", "invalid_config")
 
 
-# --- T1_ZERO_ROWS: loads due in the window: 18:30 on the 15th and 06:30 on the 16th (UTC) ---
+# --- T1_ZERO_ROWS: judges the same slots as T1_ON_TIME (06:30 and 18:30 UTC on the 15th) ---
 
 def test_zero_rows_passes_and_fails(spark) -> None:
-    create_table(spark, "t1.zero_ok", GOLD_COLUMNS, [gold_row(loaded=local("2026-01-15 13:00"))])
+    rows = [gold_row(loaded=local("2026-01-15 01:00")), gold_row(loaded=local("2026-01-15 13:00"))]
+    create_table(spark, "t1.zero_ok", GOLD_COLUMNS, rows)
     [r] = run(spark, ZeroRows(), gold("t1.zero_ok"))
     assert (r.state, r.population, r.violations) == ("PASSED", 2, 0)
-    create_table(spark, "t1.zero_bad", GOLD_COLUMNS, [gold_row(loaded=local("2026-01-14 13:00"))])
+    # The 12:30 load wrote nothing: one of the two due loads is short.
+    create_table(spark, "t1.zero_bad", GOLD_COLUMNS, [gold_row(loaded=local("2026-01-15 01:00"))])
     [r] = run(spark, ZeroRows(), gold("t1.zero_bad"))
-    assert (r.state, r.violations) == ("FAILED", 1)
-    assert r.observed == "0 rows loaded in the window (2 loads due)"
+    assert (r.state, r.population, r.violations) == ("FAILED", 2, 1)
+    assert r.observed == "1 of 2 due loads wrote fewer rows than the minimum"
+
+
+def test_zero_rows_counts_rows_against_min_rows_per_load(spark) -> None:
+    rows = [gold_row(loaded=local("2026-01-15 01:00")), gold_row(loaded=local("2026-01-15 13:00"))]
+    create_table(spark, "t1.zero_min", GOLD_COLUMNS, rows)
+    settings = SETTINGS.model_copy(update={"min_rows_per_load": 2})
+    results, _ = run_check(ZeroRows(), CheckContext(spark, gold("t1.zero_min"), FEED, settings,
+                                                    "America/Chicago", DQ), EVENT)
+    assert [(r.state, r.violations) for r in results] == [("FAILED", 2)]
 
 
 def test_zero_rows_did_not_run_when_no_load_due(spark) -> None:
@@ -99,50 +110,91 @@ def test_zero_rows_did_not_run_when_no_load_due(spark) -> None:
     assert (r.state, r.reason_code) == ("DID_NOT_RUN", "empty_population")
 
 
-def test_zero_rows_window_excludes_its_end(spark) -> None:
-    # A load exactly at window_end (06:00 Chicago = 12:00 UTC on the 16th) belongs to the next window.
-    create_table(spark, "t1.zero_edge", GOLD_COLUMNS, [gold_row(loaded=local("2026-01-16 06:00"))])
-    [r] = run(spark, ZeroRows(), gold("t1.zero_edge"))
-    assert r.state == "FAILED"
+def test_a_load_counts_until_its_deadline_and_not_after(spark) -> None:
+    # The 00:30 Chicago slot (06:30 UTC) has until 14:30 UTC; a load at exactly 08:30 Chicago is late.
+    create_table(spark, "t1.zero_edge", GOLD_COLUMNS,
+                 [gold_row(loaded=local("2026-01-15 08:30")), gold_row(loaded=local("2026-01-15 13:00"))])
+    for check in (OnTime(), ZeroRows()):
+        [r] = run(spark, check, gold("t1.zero_edge"))
+        assert (r.state, r.violations) == ("FAILED", 1), check.check_id
 
 
-# --- T1_VOLUME: slot of the window = latest slot before its end = 00:30 Chicago ---
+def test_load_not_yet_due_is_not_judged(spark) -> None:
+    # Load due at 08:00 with an 8-hour SLA; DRE runs at 09:00 and nothing has loaded yet today.
+    # Neither check may fail: today's slot is judged only once its deadline (16:00) has passed.
+    feed = FEED.model_copy(update={"cadence": Cadence(kind="times", times=["08:00"], timezone="America/Chicago")})
+    create_table(spark, "t1.not_due", GOLD_COLUMNS, [gold_row(loaded=local("2026-01-14 08:30"))])  # yesterday's load
+    ds = gold("t1.not_due")
+    run_start = datetime(2026, 1, 15, 15, 0, tzinfo=UTC)  # 09:00 in Chicago
+    event = window_for(ds, run_start, None, SETTINGS, "America/Chicago")
+    for check in (OnTime(), ZeroRows()):
+        [r] = run(spark, check, ds, feed=feed, event=event)
+        assert r.state == "PASSED", (check.check_id, r)
+        assert r.population == 1, check.check_id  # yesterday's slot only; today's is not due
 
-def volume_history(spark, dataset: str, counts: list[int]) -> None:
-    rows = [{"evaluation_id": f"v{i}", "run_id": f"r{i}", "event_id": f"{dataset}-e{i}", "dataset": dataset,
-             "check_id": "T1_VOLUME", "execution_type": "NORMAL", "state": "PASSED", "population": n,
-             "violations": 0, "detail": "slot=00:30", "window_start": datetime(2026, 1, 1 + i, 11),
-             "window_end": datetime(2026, 1, 1 + i, 12), "run_date": date(2026, 1, 1 + i)}
-            for i, n in enumerate(counts)]
+
+# --- T1_VOLUME: one result per slot whose period ends in the window ---
+# Cadence every 4 hours in UTC; window [2026-01-15 12:00, 2026-01-16 12:00) holds six periods,
+# 12:00-16:00 on the 15th through 08:00-12:00 on the 16th.
+
+UTC_LOAD = TimeColumn(column="gld_lcts", format="yyyy-MM-dd HH:mm:ss:SSSSSS", granularity="minute", timezone="UTC")
+SIX_SLOTS = FEED.model_copy(update={"cadence": Cadence(
+    kind="times", times=["00:00", "04:00", "08:00", "12:00", "16:00", "20:00"], timezone="UTC")})
+PERIODS = [datetime(2026, 1, 15, 12, tzinfo=UTC) + timedelta(hours=4 * i) for i in range(6)]
+
+
+def label(slot: datetime) -> str:
+    return slot.strftime("%H:%M")
+
+
+def volume_history(spark, dataset: str, counts_per_slot: list[int]) -> None:
+    rows = []
+    for slot in PERIODS:
+        for i, n in enumerate(counts_per_slot):
+            day = date(2026, 1, 1 + i)
+            rows.append({"evaluation_id": f"{dataset}-{label(slot)}-{i}", "run_id": f"r{i}", "event_id": f"e{i}",
+                         "dataset": dataset, "check_id": "T1_VOLUME", "execution_type": "NORMAL",
+                         "state": "PASSED", "population": n, "violations": 0,
+                         "group_values": {"slot": label(slot), "slot_time": f"{day} {label(slot)}"},
+                         "window_start": datetime(2026, 1, 1 + i, 11), "window_end": datetime(2026, 1, 1 + i, 12),
+                         "run_date": day})
     append_rows(spark, DQ, "dq_check_result", rows)
 
 
-def loads(n: int) -> list[dict]:
-    return [gold_row(sub_id=f"{i:09d}", loaded=local("2026-01-15 13:00")) for i in range(n)]
+def loads_per_slot(sizes: dict[str, int]) -> list[dict]:
+    rows = []
+    for slot in PERIODS:
+        when = (slot + timedelta(minutes=30)).strftime("%Y-%m-%d %H:%M:00:000000")
+        rows += [gold_row(sub_id=f"{label(slot)}-{i}", loaded=when) for i in range(sizes.get(label(slot), 10))]
+    return rows
 
 
-def test_volume_passes_within_tolerance_and_fails_outside(spark) -> None:
-    volume_history(spark, "vol_a", [10, 10, 10, 10, 10, 10, 10])
-    create_table(spark, "t1.vol_ok", GOLD_COLUMNS, loads(12))
-    [r] = run(spark, Volume(), gold("t1.vol_ok", dataset="vol_a"))
-    assert (r.state, r.population, r.detail) == ("PASSED", 12, "slot=00:30")
-    create_table(spark, "t1.vol_bad", GOLD_COLUMNS, loads(2))
-    [r] = run(spark, Volume(), gold("t1.vol_bad", dataset="vol_a"))
-    assert (r.state, r.violations) == ("FAILED", 1)
-    assert r.expected == "5 to 15 rows (median 10 of the last 7 events)"
+def test_volume_judges_each_slot_and_flags_the_short_load(spark) -> None:
+    volume_history(spark, "vol_six", [10] * 7)
+    # Six loads in the window; the 20:00 load wrote less than half its usual 10 rows.
+    create_table(spark, "t1.vol_six", GOLD_COLUMNS, loads_per_slot({"20:00": 4}))
+    results = run(spark, Volume(), gold("t1.vol_six", dataset="vol_six", load_time=UTC_LOAD), feed=SIX_SLOTS)
+    by_slot = {r.group_values["slot"]: r for r in results}
+    assert sorted(by_slot) == ["00:00", "04:00", "08:00", "12:00", "16:00", "20:00"]
+    assert by_slot["20:00"].group_values["slot_time"] == "2026-01-15 20:00"
+    assert (by_slot["20:00"].state, by_slot["20:00"].population, by_slot["20:00"].violations) == ("FAILED", 4, 1)
+    assert by_slot["20:00"].expected == "5 to 15 rows (median 10 of the last 7 loads)"
+    assert all(r.state == "PASSED" and r.population == 10 for slot, r in by_slot.items() if slot != "20:00")
 
 
-def test_volume_needs_seven_earlier_events(spark) -> None:
-    volume_history(spark, "vol_b", [10, 10, 10])
-    create_table(spark, "t1.vol_new", GOLD_COLUMNS, loads(3))
-    [r] = run(spark, Volume(), gold("t1.vol_new", dataset="vol_b"))
-    assert (r.state, r.reason_category, r.reason_code) == ("DID_NOT_RUN", "BASELINE", "insufficient_history")
-    assert r.population == 3  # recorded, so the history builds up
+def test_volume_needs_seven_earlier_loads_per_slot(spark) -> None:
+    volume_history(spark, "vol_new", [10] * 3)
+    create_table(spark, "t1.vol_new", GOLD_COLUMNS, loads_per_slot({}))
+    results = run(spark, Volume(), gold("t1.vol_new", dataset="vol_new", load_time=UTC_LOAD), feed=SIX_SLOTS)
+    assert len(results) == 6
+    for r in results:
+        assert (r.state, r.reason_category, r.reason_code) == ("DID_NOT_RUN", "BASELINE", "insufficient_history")
+        assert r.population == 10  # recorded, so the history builds up
 
 
-def test_volume_empty_window_is_empty_population(spark) -> None:
+def test_volume_without_rows_is_empty_population(spark) -> None:
     create_table(spark, "t1.vol_empty", GOLD_COLUMNS)
-    [r] = run(spark, Volume(), gold("t1.vol_empty", dataset="vol_c"))
+    [r] = run(spark, Volume(), gold("t1.vol_empty", dataset="vol_empty", load_time=UTC_LOAD), feed=SIX_SLOTS)
     assert (r.state, r.reason_code) == ("DID_NOT_RUN", "empty_population")
 
 
