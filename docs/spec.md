@@ -1,0 +1,451 @@
+# Data Reliability Engine — Build spec (release 1)
+
+Oct 9, 2026 · @Aneesh Chan
+
+This is the single source of truth for building release 1 of the Data Reliability Engine (DRE). Where it disagrees with earlier design documents, this spec wins. Build the engine against synthetic data; production configuration comes later.
+
+## 1. Scope and constraints
+
+**Release 1 delivers:** configuration registry with validation; three ingestion patterns; Tier 1 checks; gold rule templates; cause checks; append-only results store; email digest; watchdog; record trace command.
+
+**Hard constraints (never break these):**
+
+1. **Read-only.** The engine reads production tables, HDFS listings and scheduler history. It writes only to its own database (`dq` in this spec; real name set by config). No INSERT, UPDATE, DELETE, MERGE, DROP or ALTER on anything else; no file moves or deletes in HDFS.
+2. **No pipeline changes.** Nothing is added to existing jobs, scripts or schedules.
+3. **No code per source.** Everything source-specific lives in YAML. If a source needs logic the engine lacks, add a generic capability, never an `if feed == ...` branch.
+4. **Three result states.** Every check, every run, writes exactly one of PASSED, FAILED, DID\_NOT\_RUN. A check that evaluated zero rows of its population is DID\_NOT\_RUN with reason `empty_population`, never PASSED.
+5. **Append-only evidence.** Result and event tables are only appended to. Current state is derived through views.
+6. **No member data outside the `dq` store.** Logs and emails carry counts, check ids and table names. Sample keys go to emails only when a feed sets `email_sample_keys: true`; default false.
+7. **Synthetic data only in development and tests.** No production extracts in the repository.
+
+**Not in release 1:** learned baselines, Kafka checks, reconciliation across every layer (release 1 compares adjacent layers only where a dataset has a key\_map), UI, alert acknowledgement, integrations other than email, blocking or quarantine of any kind.
+
+## 2. Stack and repository layout
+
+**Default stack** (confirm against the cluster; see section 11):
+
+- Python 3.10+, PySpark 3.5.1 (matches the cluster's Spark 3.5.1)
+- PyYAML for config, Pydantic v2 for schema validation, Jinja2 for SQL templates
+- pytest with local-mode Spark for all tests
+- Packaged as a wheel plus a zip of dependencies for `spark-submit --py-files`
+- No other runtime services: no database server, no web server, no message queue
+
+**Names.** Repository `data-reliability-engine`. Python package `hcsc.datalake.dre` under `src/` (`hcsc` and `hcsc/datalake` are namespace packages with no `__init__.py`, so other HCSC data lake tools can share the prefix). Distribution `hcsc-datalake-dre`. Command `dre`.
+
+All check logic is SQL rendered from templates and run through `spark.sql`, so the same logic runs on the cluster's Hive tables and on local test tables.
+
+```text
+data-reliability-engine/
+  README.md
+  CLAUDE.md                  # points to this spec; repeats the hard constraints
+  pyproject.toml             # distribution hcsc-datalake-dre; console script `dre`
+  src/
+    hcsc/                    # namespace package: no __init__.py
+      datalake/              # namespace package: no __init__.py
+        dre/
+          __init__.py
+          cli.py             # validate, dry-run, run, trace, watchdog
+          config/
+            models.py        # Pydantic models for feeds, datasets, rules, defaults
+            loader.py        # load YAML, apply defaults and overrides
+            validate.py      # static and runtime validation
+          patterns/
+            file_cyclic.yaml # checks and cause checks per pattern
+            file_periodic.yaml
+            table_merge.yaml
+          checks/
+            base.py          # Check interface, result building, denominator rule
+            tier1/           # one module per Tier 1 check
+            rules/           # gold rule templates
+            sql/             # Jinja2 SQL templates
+          causes/
+            engine.py        # runs cause checks in order
+            landing.py merge.py  # cause checks by hop type
+          store/
+            ddl.sql          # dq tables and views
+            writer.py        # append-only writes
+          sources/
+            hdfs.py          # listing landing folders (subprocess or Hadoop FS API)
+            scheduler.py     # optional: scheduler history adapter (stub in release 1)
+          notify/
+            email.py         # digest builder and sender
+          trace.py
+  conf/
+    defaults.yaml
+    feeds/  datasets/  rules/
+  tests/
+    fixtures/                # synthetic data builders
+    replay/                  # one test per replay scenario (section 9)
+```
+
+## 3. Configuration model
+
+Three kinds of YAML file, one object per file, plus one defaults file. Values resolve in this order: `defaults.yaml`, then the feed, then the dataset. A field set lower overrides one set higher.
+
+**Feed** (how data arrives):
+
+```yaml
+feed: rms_realtime                # unique id
+expectation_version: 1            # bump when checks for this feed change
+pattern: FILE_CYCLIC              # FILE_CYCLIC | FILE_PERIODIC | TABLE_MERGE
+owner: membership-gold
+landing:
+  roots: [/prod/incoming/Membership/HPS/RT/DMIH]
+  file_format: sequence           # sequence | text | xml | csv | parquet | orc
+  file_name_pattern: "*"
+cadence:
+  kind: times                     # times | interval | calendar_dates
+  times: ["00:30", "04:00", "08:00", "12:00", "16:00", "20:00"]
+  timezone: America/Chicago
+  calendar: EVERYDAY              # EVERYDAY | WEEKDAYS | named calendar file
+sla_hours: 8
+datasets: [rms_raw_enrollment, rms_curated_enrollment, gold_mbr_mbrshp]
+cause_inputs:                     # optional; empty means NOT_READY for checks that need it
+  stopper_file: null
+  partition_handoff_file: null
+  job_log_path: null
+  rejects_table: null
+email_sample_keys: false
+```
+
+**Dataset** (a table at any layer):
+
+```yaml
+dataset: gold_mbr_mbrshp
+table: gold_membership.mbr_mbrshp
+layer: GOLD                       # RAW | CURATED | CDC | GOLD
+upstream: [rms_curated_enrollment]
+feed_filter: "src_sys_nm = 'RMS'" # rows belonging to this feed, when a table holds several
+key: [sub_id, mem_nbr, mbr_mbrshp_covrg_eff_dt, covrg_agrmt_id]
+key_normalise: { sub_id: strip_leading_zeros }
+record_time: src_lcts
+load_time: { column: gld_lcts, format: "yyyy-MM-dd HH:mm:ss:SSSSSS", granularity: minute }
+partition_column: null
+file_name_column: null            # column holding the landed file name, if any
+min_rows_per_load: 1
+key_unique: true                  # table must hold one row per key
+group_by: [src_sys_nm]            # results split by these columns
+volume_tolerance_pct: 50
+key_map:                          # how this table's key maps to its upstream's key
+  rms_curated_enrollment:
+    sub_id: subscriberidnumber
+    mem_nbr: membernumber
+    mbr_mbrshp_covrg_eff_dt: effectivedate
+    covrg_agrmt_id: qualifiedhealthplanid
+winner_rule:                      # optional; how the merge chooses among versions
+  order_by: ["sourcelastupdatets DESC", "enddate DESC"]
+compute_budget_minutes: 8
+```
+
+**Rule** (a gold rule from a template):
+
+```yaml
+rule: one_open_row_per_coverage
+template: max_open_rows_per_key
+dataset: gold_mbr_mbrshp
+params:
+  open_when: "mbr_mbrshp_covrg_end_dt = '9999-12-31'"
+  max: 1
+group_by: [src_sys_nm]
+owner: membership-gold
+status: proposed                  # proposed | approved | retired
+severity: high                    # high | medium | low
+```
+
+**Validation**, in two stages:
+
+- `dre validate` (static, run in CI): YAML parses; required fields present; enums valid; every referenced dataset, feed and template exists; every `key_map` covers the full key; no duplicate ids. Errors name the file, line and field, and say how to fix them.
+- Runtime preconditions (before each run): table exists; every configured column exists; landing roots are readable. A failure here makes the affected checks DID\_NOT\_RUN with reason category CONFIGURATION, and the run continues.
+
+## 4. Core concepts
+
+**Run.** One execution of `dre run`. Gets a `run_id` (UUID), records start and end time, the engine version and the git commit of the configuration.
+
+**Evaluation event.** The thing a check evaluates. In release 1 there is one kind, a batch load event: one dataset, one load window (from the previous run's watermark to this run's), identified by `event_id = sha256(dataset + window_start + window_end)`. Streaming windows come later and must fit the same interface.
+
+**Evaluation identity.** `evaluation_id = sha256(event_id + check_id + expectation_version + engine_version)`. A rerun of the same evaluation writes a new row with the same `evaluation_id` and `execution_type = RERUN`; it never overwrites. Values: NORMAL, RERUN, REPLAY.
+
+**Result states.** Exactly one per check per event:
+
+| State | Meaning |
+| --- | --- |
+| PASSED | The check evaluated a non-empty population and the condition held |
+| FAILED | The check evaluated and the condition did not hold; `observed` and `expected` are filled |
+| DID\_NOT\_RUN | The check could not evaluate; `reason_category` and `reason_code` are filled |
+
+**Reason codes for DID\_NOT\_RUN** (category, then code):
+
+| Category | Codes |
+| --- | --- |
+| DATA\_UNAVAILABLE | partition\_missing, landing\_unreadable, empty\_population |
+| PLATFORM | metastore\_unavailable, hdfs\_unavailable, query\_failed |
+| CONFIGURATION | table\_missing, column\_missing, incompatible\_type, invalid\_config |
+| BUDGET | budget\_exceeded |
+| DEPENDENCY | upstream\_check\_failed, premise\_unconfirmed |
+| BASELINE | insufficient\_history |
+
+**Denominator rule.** Every check records `population` (rows or keys it evaluated) and `violations`. `population = 0` means DID\_NOT\_RUN / empty\_population.
+
+**Cause result states**, for cause checks only: CONFIRMED, RULED\_OUT, NOT\_READY (a required config input is empty), ERROR. The cause of a failure is the first CONFIRMED in the pattern's order; if none, "cause not proven".
+
+**Times.** Three kinds, never compared with each other: record time (the source's version of a row), load time (when a layer wrote it), first-seen time (when DRE first saw a file or record). Every check declares which one it uses. Parse every time column with its configured format before comparing; never compare times as strings.
+
+## 5. Data model
+
+All tables in the `dq` database, ORC, partitioned by `run_date`. Append-only: the writer module exposes only `append`. Retention is set per table in `defaults.yaml` (results and events default to 7 years, file registry to 13 months).
+
+```sql
+CREATE TABLE dq.dq_run (
+  run_id STRING, started_at TIMESTAMP, ended_at TIMESTAMP,
+  engine_version STRING, config_commit STRING, status STRING,  -- COMPLETED | PARTIAL | FAILED
+  checks_expected INT, checks_written INT
+) PARTITIONED BY (run_date DATE) STORED AS ORC;
+
+CREATE TABLE dq.dq_check_result (
+  evaluation_id STRING, run_id STRING, event_id STRING, execution_type STRING,
+  feed STRING, dataset STRING, check_id STRING, expectation_version INT,
+  state STRING,                         -- PASSED | FAILED | DID_NOT_RUN
+  reason_category STRING, reason_code STRING,
+  population BIGINT, violations BIGINT, observed STRING, expected STRING,
+  group_values MAP<STRING,STRING>,      -- e.g. src_sys_nm for gold rules
+  severity STRING, evaluated_at TIMESTAMP, duration_ms BIGINT, detail STRING
+) PARTITIONED BY (run_date DATE) STORED AS ORC;
+
+CREATE TABLE dq.dq_cause_result (
+  run_id STRING, evaluation_id STRING, failure_ref STRING,  -- file path or normalised key
+  hop STRING, cause_check_id STRING, order_no INT,
+  state STRING,                         -- CONFIRMED | RULED_OUT | NOT_READY | ERROR
+  cause_code STRING, evidence STRING, evaluated_at TIMESTAMP
+) PARTITIONED BY (run_date DATE) STORED AS ORC;
+
+CREATE TABLE dq.dq_key_event (
+  run_id STRING, evaluation_id STRING, dataset STRING, check_id STRING,
+  key_hash STRING, key_value STRING,    -- key_value restricted access
+  event STRING,                         -- FLAGGED | STILL_FLAGGED | CLEARED
+  state_detail STRING, observed_at TIMESTAMP
+) PARTITIONED BY (run_date DATE) STORED AS ORC;
+
+CREATE TABLE dq.dq_file (
+  path STRING, feed STRING, first_seen_at TIMESTAMP, size_bytes BIGINT,
+  modified_at TIMESTAMP, observed_at TIMESTAMP, run_id STRING
+) PARTITIONED BY (run_date DATE) STORED AS ORC;
+```
+
+Views derive current state:
+
+- `dq.v_latest_result`: latest row per (dataset, check\_id) by `evaluated_at`
+- `dq.v_open_keys`: keys whose latest `dq_key_event` is FLAGGED or STILL\_FLAGGED, with first flagged date
+- `dq.v_file_status`: one row per file path with first-seen time and latest size
+
+`key_hash` is HMAC-SHA256 of the normalised key, with the secret read from a protected file named in config, never from the repository. Emails use counts and, only if enabled, `key_hash`; `key_value` is never written to logs or emails.
+
+## 6. Check catalogue
+
+Each check is a class implementing `applies_to(dataset, pattern)`, `preconditions()`, `evaluate(event) -> CheckResult`. Logic lives in a Jinja2 SQL template; the class only renders, runs and builds the result.
+
+**Tier 1 checks** (applied automatically by pattern):
+
+| Check id | Patterns | Logic | FAILED when |
+| --- | --- | --- | --- |
+| T1\_ON\_TIME | all | For each cadence slot due in the window, look for a load time later than the slot within `sla_hours` | A due slot has no load within SLA |
+| T1\_ZERO\_ROWS | all | Count rows whose load time falls in the event window (or rows in the new partition) | Count below `min_rows_per_load` |
+| T1\_VOLUME | all | Compare the event's row count with the median of the last 14 events for the same cadence slot | Outside median ± `volume_tolerance_pct` (default 50). Fewer than 7 prior events: DID\_NOT\_RUN / insufficient\_history |
+| T1\_FILES\_NOT\_LOADED | FILE\_CYCLIC, FILE\_PERIODIC | Files in `dq_file` first seen more than `sla_hours` ago with zero rows in the raw dataset matching on `file_name_column` | Any such file |
+| T1\_SCHEMA\_DRIFT | all | Hash the table's column names and types; compare with the previous run's hash, stored in `observed` | Hash changed; `detail` lists added, removed and retyped columns |
+| T1\_KEY\_NULLS | all | Rows in the event window with a null or empty key column, grouped by `group_by` | Any |
+| T1\_KEY\_DUPLICATES | datasets with `key_unique: true` | Keys with more than one row, after `key_normalise` | Any |
+
+**Hop checks** (datasets with `key_map` to an upstream dataset):
+
+| Check id | Logic | FAILED when |
+| --- | --- | --- |
+| HOP\_FILE\_COMPLETENESS | For files loaded upstream in the window, compare row counts per `file_name_column` upstream and here | A file has rows upstream and none here, or fewer here than upstream after `feed_filter` |
+| HOP\_KEY\_CURRENCY | For each upstream key, take the latest record time (keeping every row tied at it); left-join to this dataset on the mapped, normalised key. States: MISSING (no row here), STALE (record time here is older), CURRENT | Any MISSING or STALE key older than `sla_hours`; each written to `dq_key_event` |
+| HOP\_VALUE\_AGREEMENT | For CURRENT keys, compare columns listed in `owned_columns` (upstream column to this column) with null-safe equality | Any mismatch |
+
+Add `owned_columns` to the dataset config when HOP\_VALUE\_AGREEMENT is wanted, for example `{enddate: mbr_mbrshp_covrg_end_dt}`.
+
+**Gold rule templates** (one rule file per use):
+
+| Template | Params | Violation |
+| --- | --- | --- |
+| max\_rows\_per\_key | max | Key with more than `max` rows |
+| max\_open\_rows\_per\_key | open\_when, max | Key with more than `max` rows matching `open_when` |
+| column\_order | lower, upper | Row where `upper < lower` (nulls ignored unless `nulls_fail: true`) |
+| superseded\_still\_open | group\_key, order\_column, open\_when | Row matching `open_when` while a row in the same group has a later `order_column` |
+| child\_within\_parent | parent\_dataset, join, child\_start, parent\_start, parent\_end | Child row whose start falls outside its parent's window |
+| value\_format | column, pattern | Non-null value not matching the regex |
+| null\_rate\_max | column, max\_rate | Group whose null rate exceeds `max_rate` |
+
+Rules with `status: proposed` run and record results but are listed as "report only" in the email. Only `approved` rules count toward alerts. The first result of a rule is its baseline; after that the email shows change from the previous run.
+
+Example template (`max_open_rows_per_key.sql.j2`):
+
+```sql
+SELECT {% for g in group_by %}{{ g }} AS g_{{ loop.index }},{% endfor %}
+       COUNT(*) AS population,
+       SUM(CASE WHEN open_rows > {{ params.max }} THEN 1 ELSE 0 END) AS violations
+FROM (
+  SELECT {{ key_expr }}{% for g in group_by %}, {{ g }}{% endfor %},
+         SUM(CASE WHEN {{ params.open_when }} THEN 1 ELSE 0 END) AS open_rows
+  FROM {{ table }}
+  {% if feed_filter %}WHERE {{ feed_filter }}{% endif %}
+  GROUP BY {{ key_expr }}{% for g in group_by %}, {{ g }}{% endfor %}
+) k
+{% if group_by %}GROUP BY {% for g in group_by %}{{ g }}{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}
+```
+
+`key_expr` applies `key_normalise` (for example `regexp_replace(sub_id,'^0+','')`). Never use positional `GROUP BY 1, 2`; Hive rejects it.
+
+## 7. Cause checks
+
+When a check FAILS, the cause engine runs every cause check listed for that failure type, in order, and writes one `dq_cause_result` row per cause check. The cause is the first CONFIRMED. If none is confirmed, the cause is "not proven" and the email lists what was ruled out and what was NOT\_READY. A cause check whose config input is empty returns NOT\_READY, never RULED\_OUT. Cause checks are listed per pattern in `patterns/*.yaml`, so adding one never touches the engine.
+
+**File not loaded** (T1\_FILES\_NOT\_LOADED, T1\_ON\_TIME on file patterns)
+
+| Order | Cause code | Confirmed when | Needs |
+| --- | --- | --- | --- |
+| 1 | RAW\_LOAD\_HELD | The stopper file exists | `cause_inputs.stopper_file` |
+| 2 | PIPELINE\_STALLED | No file first seen after this one has rows in raw either | nothing |
+| 3 | SKIPPED\_BEHIND\_CURSOR | The partition named in the handoff file is later than this file's folder | `cause_inputs.partition_handoff_file` |
+| 4 | INCOMPLETE\_AT\_LOAD | The file's size changed after it was first seen | nothing |
+| 5 | UNREADABLE | The file's header can't be read with the reader for `file_format` | nothing |
+| 6 | LOAD\_ERROR | The job log mentions the file with an error | `cause_inputs.job_log_path` |
+| fallback | PASSED\_OVER | Later files loaded; no cause confirmed |  |
+
+**Rows missing between layers** (HOP\_FILE\_COMPLETENESS)
+
+| Order | Cause code | Confirmed when | Needs |
+| --- | --- | --- | --- |
+| 1 | NOT\_RUN | Nothing loaded into this dataset after the upstream rows arrived | nothing |
+| 2 | FILE\_SKIPPED | No rows from that file here at all, while later files did load | nothing |
+| 3 | INVALID\_KEY | The upstream row has a null or unparseable key column | nothing |
+| 4 | FILTERED | The upstream row matches a configured filter rule | `cause_inputs.filter_rules` |
+| 5 | REJECTED | The row is in the rejects table | `cause_inputs.rejects_table` |
+| fallback | DROPPED | No cause confirmed |  |
+
+**Key missing or stale** (HOP\_KEY\_CURRENCY, HOP\_VALUE\_AGREEMENT)
+
+| Order | Cause code | Confirmed when | Needs |
+| --- | --- | --- | --- |
+| 1 | NOT\_RUN | No row in this dataset has a load time after the upstream record's load time | nothing |
+| 2 | KEY\_MISMATCH | The key matches once a column in `mismatch_probe_drop` is ignored | `mismatch_probe_drop` on the dataset |
+| 3 | TIE\_RESOLVED\_BY\_RULE | Several upstream rows share the latest record time, and applying `winner_rule` picks a row other than the one expected (for example the open row over a termination) | `winner_rule` |
+| 4 | OLDER\_VERSION\_WRITTEN\_LATER | STALE only: this row's load time is later than the newer upstream record's load time, compared at `load_time.granularity` | nothing |
+| 5 | FILTERED | Matches a configured filter rule | `cause_inputs.filter_rules` |
+| 6 | REJECTED | In the rejects table | `cause_inputs.rejects_table` |
+| fallback | MERGE\_NOT\_APPLIED | No cause confirmed |  |
+
+**Load wrote nothing** (T1\_ZERO\_ROWS)
+
+| Order | Cause code | Confirmed when | Needs |
+| --- | --- | --- | --- |
+| 1 | NO\_UPSTREAM\_DATA | The upstream dataset also had zero rows in the window | upstream configured |
+| 2 | WRONG\_PARTITION | Rows were written to a partition other than the one expected from the handoff file | `cause_inputs.partition_handoff_file` |
+| fallback | EMPTY\_LOAD | No cause confirmed |  |
+
+A filter rule in `cause_inputs.filter_rules` has `id`, `condition` (SQL), `code_ref` (file and line or commit), `owner` and `expected_daily_volume`.
+
+## 8. Command line, email and watchdog
+
+| Command | What it does | Exit code |
+| --- | --- | --- |
+| `dre validate [--conf DIR]` | Static validation of all config | 0 valid, 1 errors |
+| `dre dry-run --feed F` | Runs preconditions and checks for one feed, prints results, writes nothing | 0 always, unless the command itself fails |
+| `dre run [--feed F] [--execution-type NORMAL\|RERUN\|REPLAY]` | Full run: preconditions, checks, causes, append results, send email | 0 run completed (even with FAILED checks), 2 partial, 3 could not start |
+| `dre trace --dataset D --key "k1,k2,..."` | Prints one line per layer along the `upstream` chain: present or not, record time, load time, file; ends with the first layer where the key is absent or older, then that hop's cause line | 0 |
+| `dre watchdog` | Checks the last expected run exists and wrote every expected check; emails if not | 0 healthy, 1 alert sent |
+
+**Email digest**, one per run, plain text, in this order:
+
+1. Subject: `DRE <env>: <n> new failures, <m> checks did not run` (or `all clear`)
+2. Checks that changed state since the last run, then DID\_NOT\_RUN checks, each with dataset, check, observed versus expected, and the cause line: `cause: FILE_SKIPPED (confirmed)` or `cause not proven: ruled out NOT_RUN, INVALID_KEY; not ready FILTERED`
+3. Still-failing checks, one line each with the date first failed
+4. Proposed rules, under "report only"
+5. Passing checks, as a single count
+
+Recipients come from each feed's `owner`, mapped to addresses in `defaults.yaml`.
+
+**Watchdog.** A separate entry point with no dependency on the main run's code beyond the store schema. It alerts when no `dq_run` row exists for an expected run time plus grace, or when `checks_written < checks_expected`. Schedule it separately from the main run (a different scheduler folder or host), so one scheduling failure doesn't stop both.
+
+**Compute budget.** Each dataset has `compute_budget_minutes`. Before running, estimate the scan size from partition statistics; if a check exceeds its budget, cancel it and record DID\_NOT\_RUN / budget\_exceeded. Hop checks read only keys changed in the window, plus a full sweep on the day set by `full_sweep_day` (default Sunday).
+
+## 9. Testing
+
+All tests run on local-mode Spark against synthetic tables built by fixtures in `tests/fixtures/`. Fixtures copy the quirks of the real layers so the logic is exercised honestly:
+
+- subscriber ids zero-padded in gold, unpadded upstream
+- raw dates as MM/DD/YYYY, curated and gold as YYYY-MM-DD
+- curated keeps several versions per key, including ties at the same record time
+- gold load times minute-granular, in the format `yyyy-MM-dd HH:mm:ss:000000`
+- one raw table holding two feeds, told apart by file name
+- landing files as small local files, including a sequence file
+
+**Replay scenarios.** Each is a test that builds the situation, runs `dre run`, and asserts the check state and the cause. Each is the shape of a real past incident, with no real data.
+
+| ID | Situation built | Expected check | Expected cause |
+| --- | --- | --- | --- |
+| R01 | A landed file has no raw rows; later files did load | T1\_FILES\_NOT\_LOADED FAILED | PASSED\_OVER (not proven) without inputs; SKIPPED\_BEHIND\_CURSOR when the handoff file is configured |
+| R02 | No files loaded for longer than the SLA | T1\_ON\_TIME FAILED | PIPELINE\_STALLED, or RAW\_LOAD\_HELD when the stopper file exists |
+| R03 | Gold load wrote zero rows while upstream had rows | T1\_ZERO\_ROWS FAILED | WRONG\_PARTITION when rows landed in another partition |
+| R04 | A message is in raw and not in curated; its file's other rows loaded | HOP\_FILE\_COMPLETENESS FAILED | DROPPED (not proven) with FILE\_SKIPPED and NOT\_RUN ruled out |
+| R05 | Curated latest is a termination; gold is older | HOP\_KEY\_CURRENCY FAILED (STALE) | NOT\_RUN or MERGE\_NOT\_APPLIED, depending on gold load times |
+| R06 | Curated has an open row and a termination tied at the latest record time; gold is open | HOP\_VALUE\_AGREEMENT FAILED | TIE\_RESOLVED\_BY\_RULE with winner rule `sourcelastupdatets DESC, enddate DESC` |
+| R07 | An older version was loaded into gold after a newer one reached curated | HOP\_KEY\_CURRENCY FAILED (STALE) | OLDER\_VERSION\_WRITTEN\_LATER |
+| R08 | Duplicate rows per key in gold | T1\_KEY\_DUPLICATES FAILED | none required |
+| R09 | A configured column is renamed in the table | Checks using it are DID\_NOT\_RUN / column\_missing; run continues | n/a |
+| R10 | An older coverage stays open while a newer one exists | Rule superseded\_still\_open FAILED, grouped by source | n/a |
+| R11 | Empty table | Checks DID\_NOT\_RUN / empty\_population, never PASSED | n/a |
+| R12 | Main run never happens | Watchdog alerts | n/a |
+
+**Guard tests.** A test scans the code for write statements (INSERT, MERGE, UPDATE, DELETE, DROP, ALTER, TRUNCATE, `hdfs dfs -rm`, `-mv`) and fails unless the target is the `dq` database. A second test asserts that email text contains no `key_value`.
+
+## 10. Build order
+
+Build in this order. Each step ends with its tests passing and is usable before the next starts.
+
+1. **Skeleton.** Repository layout, `CLAUDE.md` with the hard constraints, local Spark test setup, guard tests. Done when the guard tests run in CI.
+2. **Configuration.** Pydantic models, loader with defaults and overrides, `dre validate`. Done when valid sample config passes and each error type gives a file, line and fix.
+3. **Store.** DDL, append-only writer, views, `dq_run` bookkeeping. Done when a run with no checks writes a `dq_run` row and the views read back correctly.
+4. **Check framework.** Base class, preconditions, denominator rule, result building, Jinja2 rendering. Done when R09 and R11 pass.
+5. **Tier 1 checks.** All seven. Done when R02, R03 and R08 pass (checks only; causes come in step 8).
+6. **Landing.** HDFS listing adapter (local filesystem in tests), `dq_file` registry, T1\_FILES\_NOT\_LOADED. Done when R01 passes at check level.
+7. **Hop checks and gold rules.** HOP\_FILE\_COMPLETENESS, HOP\_KEY\_CURRENCY, HOP\_VALUE\_AGREEMENT, all seven rule templates. Done when R04 to R07 and R10 pass at check level.
+8. **Cause engine.** Ordered cause checks per pattern from YAML, NOT\_READY handling. Done when every replay scenario passes with its expected cause.
+9. **Email and trace.** Digest builder and `dre trace`. Done when a golden-file test of the email passes and trace output matches for R05.
+10. **Watchdog and budgets.** Done when R12 passes and a deliberately slow check ends DID\_NOT\_RUN / budget\_exceeded.
+11. **Packaging.** Wheel and dependency zip; a `spark-submit` command documented in the README.
+
+**Release 1 is done when:** all replay scenarios pass; a second synthetic feed with a different pattern is added with configuration only; and, later in a test environment, the RMS configuration runs unattended for two weeks.
+
+## 11. Open decisions and first configuration
+
+**Decide before step 1**
+
+| Decision | Default in this spec | Who confirms |
+| --- | --- | --- |
+| Language | PySpark 3.5.1 | Team: what you can maintain; platform: whether Python jobs can be submitted |
+| Python version and packages on the cluster | Python 3.10+, dependencies shipped in a zip | Platform team |
+| Where it runs and is scheduled | Control-M for the main run, a separate folder or cron for the watchdog | Scheduling owner |
+| Database name and service account | `dq`, read-only account with write only to `dq` | Platform team |
+| Use of AI coding tools on HCSC code | Only through HCSC-approved access | HCSC policy |
+
+**Decide before RMS goes live** (do not block the engine build)
+
+| Item | Status |
+| --- | --- |
+| Curated winner rule across loads | Within one load confirmed (`sourcelastupdatets DESC, enddate DESC`); across loads: developer question 2 |
+| Gold merge clause and dedupe | Developer question 3 |
+| CDC table and key | Believed `rms_incr`; developer question 4 |
+| Run logs location | Developer question 5 |
+| Filter rules and rejects table | Developer question 6 |
+| Plan join for the gold key | Query 4 |
+| Rule baselines | Queries 5 to 7 |
+
+**First configuration (RMS), values known so far**
+
+- Feed `rms_realtime`: pattern FILE\_CYCLIC; landing `/prod/incoming/Membership/HPS/RT/DMIH`; sequence files; runs 00:30, 04:00, 08:00, 12:00, 16:00, 20:00 on the EVERYDAY calendar; stopper file `rms_stopper/DDA_GOLD_RMS_raw_load_2b1bu.stopper`; handoff file `partition_details.prm`.
+- Datasets: `rms_raw.rms_membership_enrollment` (dates MM/DD/YYYY, partition `file_date`, real-time rows filtered by file name); `rms_merge.rms_membership_enrollment` (load time `curr_upd_ts`, record time `sourcelastupdatets`); `gold_membership.mbr_mbrshp` (key `sub_id, mem_nbr, mbr_mbrshp_covrg_eff_dt, covrg_agrmt_id`, record time `src_lcts`, load time `gld_lcts` minute-granular, `feed_filter: src_sys_nm = 'RMS'`).
+- Rules: `one_row_per_coverage` (max\_rows\_per\_key), `end_not_before_start` (column\_order), `older_coverage_still_open` (superseded\_still\_open, grouped by `src_sys_nm`).
+
+The RMS configuration lives in the `conf/` folder of the deployed instance, not in the engine repository.
