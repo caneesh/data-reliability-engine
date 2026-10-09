@@ -2,7 +2,7 @@
 
 A read-only engine that watches the membership data lake, finds data issues before consumers report them, and works out why each one happened. It checks feeds and tables against configuration, writes every result to its own append-only store, and emails a digest.
 
-**Source of truth:** `docs/spec.md`. Read the relevant sections before every task. If anything here or in `docs/background/` disagrees with the spec, the spec wins. If the spec is unclear or contradicts itself, stop and ask; do not guess.
+**Source of truth:** `docs/spec.md`. Read the relevant sections before every task. If anything here disagrees with the spec, the spec wins. If the spec is unclear or contradicts itself, stop and ask; do not guess.
 
 ## Hard constraints (never break these)
 
@@ -12,12 +12,12 @@ A read-only engine that watches the membership data lake, finds data issues befo
 4. **Three result states.** Every check, every run, writes exactly one of PASSED, FAILED, DID_NOT_RUN. A check that evaluated zero rows is DID_NOT_RUN / `empty_population`, never PASSED. An exception inside a check becomes DID_NOT_RUN with a reason; it never stops the run or disappears.
 5. **Append-only evidence.** Result and event tables are only appended to. The writer exposes `append` and nothing else. Current state comes from views.
 6. **No member data outside the `dq` store.** Logs, exceptions and emails carry counts, check ids and table names only. `key_value` never appears in logs or emails. The HMAC secret is read from a file path given in config and never committed.
-7. **Synthetic data only.** No production extracts, real keys, real file names from production or real member values anywhere in the repo, including tests, fixtures, docs and commit messages.
+7. **Synthetic data only.** No production extracts, real keys, real member values, or production paths, file names, database or table names anywhere in the repo, including tests, fixtures, docs and commit messages. The column names used in the spec's examples are allowed, so that fixtures match the real layers. Use placeholder paths and tables such as `/data/landing/example_feed` and `gold_db.member_coverage`.
 
 ## How to work
 
 - **Build in the order in spec section 10, one step at a time.** Start each step by stating the plan: files to add or change, and tests to write. A step is done only when its "done when" condition passes. Then stop and summarise what was built, anything in the spec that was unclear, and any assumption made.
-- **Do not build ahead.** Anything listed under "Not in release 1" (spec section 1) is out of scope, as is everything in `docs/background/` that is not in the spec.
+- **Do not build ahead.** Anything listed under "Not in release 1" (spec section 1) is out of scope, as is anything else not in the spec.
 - **Tests first where practical.** Every check and cause check needs a test that shows it can FAIL and a test that shows it can PASS, plus the DID_NOT_RUN path.
 - **Never weaken a test to make it pass.** If a replay scenario (R01 to R12) fails, fix the engine or raise the spec question.
 - **Unknown production values stay unknown.** Section 11 lists values still waiting on the developer or platform team. Leave them as `null` in config, so that `dre validate` reports them or the dependent cause checks return NOT_READY. Never invent table names, paths or column names.
@@ -52,7 +52,6 @@ dre validate --conf conf/    # static config validation
 
 - `docs/spec.md`: build spec (source of truth)
 - `docs/decisions.md`: answers to open decisions and any defaults taken
-- `docs/background/`: feature list and use cases, context only
 - `src/hcsc/datalake/dre/`: engine code (layout in spec section 2)
 - `conf/`: sample synthetic configuration only. Real feed configuration lives with the deployed instance, not in this repo.
 - `tests/fixtures/`: synthetic data builders. `tests/replay/`: one test per replay scenario.

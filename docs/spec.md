@@ -1,8 +1,8 @@
 # Data Reliability Engine — Build spec (release 1)
 
-Oct 9, 2026 · @Aneesh Chan
-
 This is the single source of truth for building release 1 of the Data Reliability Engine (DRE). Where it disagrees with earlier design documents, this spec wins. Build the engine against synthetic data; production configuration comes later.
+
+Repository copy: production paths, file names, and database and table names are replaced with placeholders. Column names in the examples are kept so that the fixtures match the real layers.
 
 ## 1. Scope and constraints
 
@@ -90,7 +90,7 @@ expectation_version: 1            # bump when checks for this feed change
 pattern: FILE_CYCLIC              # FILE_CYCLIC | FILE_PERIODIC | TABLE_MERGE
 owner: membership-gold
 landing:
-  roots: [/prod/incoming/Membership/HPS/RT/DMIH]
+  roots: [/data/landing/example_feed]
   file_format: sequence           # sequence | text | xml | csv | parquet | orc
   file_name_pattern: "*"
 cadence:
@@ -99,7 +99,7 @@ cadence:
   timezone: America/Chicago
   calendar: EVERYDAY              # EVERYDAY | WEEKDAYS | named calendar file
 sla_hours: 8
-datasets: [rms_raw_enrollment, rms_curated_enrollment, gold_mbr_mbrshp]
+datasets: [rms_raw_enrollment, rms_curated_enrollment, gold_member_coverage]
 cause_inputs:                     # optional; empty means NOT_READY for checks that need it
   stopper_file: null
   partition_handoff_file: null
@@ -111,8 +111,8 @@ email_sample_keys: false
 **Dataset** (a table at any layer):
 
 ```yaml
-dataset: gold_mbr_mbrshp
-table: gold_membership.mbr_mbrshp
+dataset: gold_member_coverage
+table: gold_db.member_coverage
 layer: GOLD                       # RAW | CURATED | CDC | GOLD
 upstream: [rms_curated_enrollment]
 feed_filter: "src_sys_nm = 'RMS'" # rows belonging to this feed, when a table holds several
@@ -142,7 +142,7 @@ compute_budget_minutes: 8
 ```yaml
 rule: one_open_row_per_coverage
 template: max_open_rows_per_key
-dataset: gold_mbr_mbrshp
+dataset: gold_member_coverage
 params:
   open_when: "mbr_mbrshp_covrg_end_dt = '9999-12-31'"
   max: 1
@@ -436,16 +436,16 @@ Build in this order. Each step ends with its tests passing and is usable before 
 | --- | --- |
 | Curated winner rule across loads | Within one load confirmed (`sourcelastupdatets DESC, enddate DESC`); across loads: developer question 2 |
 | Gold merge clause and dedupe | Developer question 3 |
-| CDC table and key | Believed `rms_incr`; developer question 4 |
+| CDC table and key | Not confirmed; developer question 4 |
 | Run logs location | Developer question 5 |
 | Filter rules and rejects table | Developer question 6 |
 | Plan join for the gold key | Query 4 |
 | Rule baselines | Queries 5 to 7 |
 
-**First configuration (RMS), values known so far**
+**First configuration (RMS)**
 
-- Feed `rms_realtime`: pattern FILE\_CYCLIC; landing `/prod/incoming/Membership/HPS/RT/DMIH`; sequence files; runs 00:30, 04:00, 08:00, 12:00, 16:00, 20:00 on the EVERYDAY calendar; stopper file `rms_stopper/DDA_GOLD_RMS_raw_load_2b1bu.stopper`; handoff file `partition_details.prm`.
-- Datasets: `rms_raw.rms_membership_enrollment` (dates MM/DD/YYYY, partition `file_date`, real-time rows filtered by file name); `rms_merge.rms_membership_enrollment` (load time `curr_upd_ts`, record time `sourcelastupdatets`); `gold_membership.mbr_mbrshp` (key `sub_id, mem_nbr, mbr_mbrshp_covrg_eff_dt, covrg_agrmt_id`, record time `src_lcts`, load time `gld_lcts` minute-granular, `feed_filter: src_sys_nm = 'RMS'`).
-- Rules: `one_row_per_coverage` (max\_rows\_per\_key), `end_not_before_start` (column\_order), `older_coverage_still_open` (superseded\_still\_open, grouped by `src_sys_nm`).
+The real RMS values (landing path, stopper and handoff file names, database and table names) are kept with the deployed instance's configuration, not in this repository. The shape the engine must support:
 
-The RMS configuration lives in the `conf/` folder of the deployed instance, not in the engine repository.
+- One feed, pattern FILE\_CYCLIC: sequence files; six runs a day on an every-day calendar; a stopper file that holds the raw load; a handoff file naming the partition passed between phases.
+- Three datasets: raw (dates MM/DD/YYYY, partitioned by file date, real-time rows told apart by file name); curated (several versions per key, its own load time and record time); gold (four-part key with a zero-padded subscriber id, minute-granular load time, `feed_filter` on source system).
+- Three rules: `one_row_per_coverage` (max\_rows\_per\_key), `end_not_before_start` (column\_order), `older_coverage_still_open` (superseded\_still\_open, grouped by source system).
