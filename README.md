@@ -16,4 +16,4 @@ pytest                 # all tests, local-mode Spark
 pytest tests/guard     # guard tests only
 ```
 
-Status: build step 3 (store) of spec section 10. `dre validate --conf conf/` checks the sample configuration in `conf/`. `dre install --print|--apply|--check` manages the dq store tables and views (the platform team creates the empty database first). The other `dre` subcommands are placeholders until their build steps land.
+Status: build step 4 (check framework) of spec section 10. `dre validate --conf conf/` checks the sample configuration in `conf/`. `dre install --print|--apply|--check` manages the dq store tables and views (the platform team creates the empty database first). `dre run` and `dre dry-run --feed F` run the checks built so far (T1_KEY_DUPLICATES) and record results; causes and email come in later steps. `dre trace` and `dre watchdog` are placeholders until their build steps land.

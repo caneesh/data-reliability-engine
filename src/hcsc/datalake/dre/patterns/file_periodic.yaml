@@ -1,0 +1,5 @@
+# Checks for pattern FILE_PERIODIC, in run order (spec sections 6 and 7).
+# Build step 5 adds the other Tier 1 checks; step 8 adds the cause checks.
+pattern: FILE_PERIODIC
+checks:
+  - T1_KEY_DUPLICATES

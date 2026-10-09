@@ -1,8 +1,9 @@
 """Command line entry point for `dre` (spec section 8).
 
-`validate` (step 2) and `install` (step 3) are built; `run` checks the store
-is installed. Each other subcommand is filled in by the build step named in
-its help text (spec section 10) and until then says so.
+`validate` (step 2), `install` (step 3), and `run` and `dry-run` (checks and
+results, step 4; causes and email follow in steps 8 and 9) are built. Each
+other subcommand is filled in by the build step named in its help text (spec
+section 10) and until then says so.
 """
 
 from __future__ import annotations
@@ -31,8 +32,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
     for name, (help_text, step) in COMMANDS.items():
         cmd = sub.add_parser(name, help=f"{help_text} (build step {step})")
-        if name in ("validate", "install", "run"):
+        if name in ("validate", "install", "run", "dry-run"):
             cmd.add_argument("--conf", default="conf", help=CONF_HELP)
+        if name == "dry-run":
+            cmd.add_argument("--feed", required=True, help="the feed to check")
+        if name == "run":
+            cmd.add_argument("--feed", help="run one feed only (default: all feeds)")
+            cmd.add_argument("--execution-type", default="NORMAL", choices=("NORMAL", "RERUN", "REPLAY"))
         if name == "install":
             mode = cmd.add_mutually_exclusive_group(required=True)
             mode.add_argument("--print", dest="mode", action="store_const", const="print",
@@ -78,27 +84,6 @@ def install(conf: str, mode: str) -> int:
     return install_command(get_spark(), config.defaults.dq_database, mode)
 
 
-def run(conf: str) -> int:
-    """Exit 3 when the run cannot start: invalid config or the store not installed."""
-    from hcsc.datalake.dre.config.validate import validate_conf
-    from hcsc.datalake.dre.session import get_spark
-    from hcsc.datalake.dre.store.install import missing_objects
-
-    config, errors, _ = validate_conf(Path(conf))
-    if errors or config.defaults is None:
-        print(f"dre run: {conf} has {len(errors)} configuration error(s); run dre validate --conf {conf}")
-        return 3
-    db = config.defaults.dq_database
-    missing = missing_objects(get_spark(), db)
-    if missing:
-        print(f"dre run: the dq store is not installed in {db} (missing: {', '.join(missing)}). "
-              "Run dre install --apply once the platform team has created the database.")
-        return 3
-    _, step = COMMANDS["run"]
-    print(f"dre run: store ready in {db}; checks are not built yet (build step {step})", file=sys.stderr)
-    return 3
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -109,8 +94,13 @@ def main(argv: list[str] | None = None) -> int:
         return validate(args.conf)
     if args.command == "install":
         return install(args.conf, args.mode)
-    if args.command == "run":
-        return run(args.conf)
+    if args.command in ("run", "dry-run"):
+        from hcsc.datalake.dre import runner
+        from hcsc.datalake.dre.session import get_spark
+
+        if args.command == "run":
+            return runner.run(get_spark(), args.conf, args.feed, args.execution_type)
+        return runner.dry_run(get_spark(), args.conf, args.feed)
     _, step = COMMANDS[args.command]
     print(f"dre {args.command}: not built yet (build step {step})", file=sys.stderr)
     return 3

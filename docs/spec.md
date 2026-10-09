@@ -46,16 +46,21 @@ data-reliability-engine/
           __init__.py
           cli.py             # validate, install, dry-run, run, trace, watchdog
           session.py         # the Spark session (active one, or a new one with Hive support)
+          runner.py          # dre run and dre dry-run: plan, evaluate, append results, run rows
           config/
             models.py        # Pydantic models for feeds, datasets, rules, defaults
             loader.py        # load YAML, apply defaults and overrides
             validate.py      # static and runtime validation
+            fragments.py     # dry-run: parse SQL fragments from config against Spark
           patterns/
             file_cyclic.yaml # checks and cause checks per pattern
             file_periodic.yaml
             table_merge.yaml
           checks/
-            base.py          # Check interface, result building, denominator rule
+            base.py          # Check interface, result building, denominator rule, preconditions, run_check
+            keys.py          # key expressions with key_normalise applied
+            events.py        # batch load events, event_id and evaluation_id
+            registry.py      # which checks run, from patterns/*.yaml
             tier1/           # one module per Tier 1 check
             rules/           # gold rule templates
             sql/             # Jinja2 SQL templates
@@ -68,6 +73,7 @@ data-reliability-engine/
             install.py       # dre install: print, apply or check the DDL; the only path that applies it
             runs.py          # dq_run bookkeeping: STARTED row at start, final row at end
             writer.py        # append-only writes; the only DataFrame write path
+            results.py       # appends check results through the writer
             retention.py     # drops expired run_date partitions; the only DROP PARTITION
             local_setup.py   # creates the dq database for tests and local runs only
             names.py         # identifier validation for dq names
@@ -257,7 +263,7 @@ Views derive current state:
 
 ## 6. Check catalogue
 
-Each check is a class implementing `applies_to(dataset, pattern)`, `preconditions()`, `evaluate(event) -> CheckResult`. Logic lives in a Jinja2 SQL template; the class only renders, runs and builds the result.
+Each check is a class implementing `applies_to(dataset, pattern)`, `required_columns(dataset)` (the configured columns its preconditions verify) and `evaluate(ctx, event) -> list[CheckResult]` (one result per `group_by` group, one in total for an ungrouped check). Logic lives in a Jinja2 SQL template; the class only renders, runs and builds the result. `run_check` wraps every check: preconditions first (table and columns exist), then `evaluate`; any exception becomes DID\_NOT\_RUN with a reason, and `detail` keeps only the exception type and Spark error class, never the message. The checks for each pattern are listed in `patterns/*.yaml`; table-wide datasets (no feed, so no pattern) get gold rules only.
 
 **Tier 1 checks** (applied automatically by pattern):
 

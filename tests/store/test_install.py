@@ -95,9 +95,12 @@ def test_run_exits_3_naming_install_until_the_store_exists(spark, tmp_path, caps
     assert not spark.catalog.tableExists("dq_run_preflight.dq_run")  # run never creates the store
 
     install(conf, "apply", capsys)
-    assert main(["run", "--conf", conf]) == 3  # store found; the run itself is built in a later step
-    captured = capsys.readouterr()
-    assert "not installed" not in captured.out and "store ready" in captured.err
+    assert main(["run", "--conf", conf]) == 0  # store found: the run goes ahead
+    out = capsys.readouterr().out
+    assert "not installed" not in out
+    # The sample's tables do not exist here: the check is DID_NOT_RUN, and the run still completes.
+    assert "T1_KEY_DUPLICATES: DID_NOT_RUN (CONFIGURATION/table_missing)" in out
+    assert "dre run: COMPLETED" in out
 
 
 def test_run_exits_3_on_invalid_config(tmp_path, capsys) -> None:

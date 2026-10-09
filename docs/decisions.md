@@ -41,9 +41,19 @@ The engine field names chosen in step 2 are in spec section 3. The other assumpt
 4. **v_file_status** gives the earliest `first_seen_at`, and size, `modified_at` and `observed_at` from the latest observation.
 5. **`dre install` applies the DDL** (decided in the step 3 review, 2026-10-09). The platform team only creates the empty dq database and grants the service account access. `dre install --print` renders the DDL for the configured database, `--apply` runs it, `--check` compares the existing tables and views with it. Every statement is IF NOT EXISTS, so `--apply` is safe to rerun and never replaces an existing table or view: a changed definition shows up as DIFFERS in `--check` and needs a person to migrate it. `dre run` checks the store tables and views exist and exits 3 naming `dre install` if not. Reason: the engine owns its schema, while creating databases and granting access stays with the platform team. Enforced by guard rule 8 (spec section 9).
 
+## Check framework assumptions (step 4, 2026-10-09)
+
+1. **T1_KEY_DUPLICATES built in step 4.** R09 and R11 need a real check or they pass vacuously. T1_KEY_DUPLICATES needs no load-time window and step 5 needs it for R08; step 5 adds the other six Tier 1 checks.
+2. **Event windows.** The spec stores no watermark. The window ends at the run's start (`started_at`); it starts at the start of the latest run that wrote NORMAL results for the dataset (`dq_check_result` joined to `v_latest_run`), or is open on the first run. `event_id` and `evaluation_id` are SHA-256 of their parts joined with `|` (the spec writes `+`), so parts cannot run into each other. Times are hashed as UTC ISO strings; naive times are taken as UTC, so the Spark session time zone should be UTC.
+3. **`evaluate` returns a list,** one result per group, rather than the single `CheckResult` in the spec's interface. A query that returns no rows (an empty table with `group_by`) is one DID\_NOT\_RUN / `empty_population` result.
+4. **Error mapping.** Spark error classes map to reason codes: `UNRESOLVED_COLUMN*` to `column_missing`, `TABLE_OR_VIEW_NOT_FOUND` to `table_missing`, `DATATYPE_MISMATCH*` and `CAST_INVALID_INPUT` to `incompatible_type`, and everything else (including Python errors) to PLATFORM / `query_failed`. A failing catalogue call in the preconditions is `metastore_unavailable`.
+5. **Run accounting and exit codes.** `checks_expected` is the number of (dataset, check) evaluations planned; `checks_written` the number whose rows were appended. A failed write is logged (check id and table only) and leaves the run PARTIAL (exit 2). An error outside a check ends the run FAILED, also exit 2, since spec section 8 has no separate code for it.
+6. **Execution type.** `--execution-type` is recorded on each result row. Only NORMAL results move the window forward. Reusing the earlier window for a RERUN, so that it gets the same `evaluation_id`, is left to step 8, where the full run comes together.
+7. **dry-run** exits 0 even when SQL fragments do not resolve (spec section 8: "0 always, unless the command itself fails"); it exits 3 only when the config is invalid or the feed unknown. It reads the window from the store when there is one and writes nothing.
+
 ## Notes for later steps
 
-- **Step 4:** parse SQL fragments in `dre dry-run` (see configuration assumption 7).
+- **Step 4:** done: `dre dry-run` parses SQL fragments (`config/fragments.py`).
 - **Step 5:** keep `LOAD_TIME_CHECKS` in `config/validate.py` in line with the Tier 1 checks (configuration assumption 5).
 - **Step 7:** during the full sweep (`full_sweep_day`), append CLEARED with `state_detail` "no longer upstream" for open keys (`v_open_keys`) that are no longer found upstream, so they do not stay open forever.
 - **Step 9:** the digest reports groups (`group_values`) that were present in the previous run and are missing now, since `v_latest_result` shows only the latest evaluation's groups.
