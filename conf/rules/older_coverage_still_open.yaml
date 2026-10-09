@@ -1,0 +1,13 @@
+# Synthetic sample: grouping and order are placeholders until the rule
+# baselines are run (spec section 11, queries 5 to 7).
+rule: older_coverage_still_open
+template: superseded_still_open
+dataset: gold_member_coverage
+params:
+  group_key: [sub_id, mem_nbr]
+  order_column: mbr_mbrshp_covrg_eff_dt
+  open_when: "mbr_mbrshp_covrg_end_dt = '9999-12-31'"
+group_by: [src_sys_nm]
+owner: membership-gold
+status: proposed
+severity: medium

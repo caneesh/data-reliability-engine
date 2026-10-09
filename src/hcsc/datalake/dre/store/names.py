@@ -20,3 +20,7 @@ def validate_identifier(name: str, what: str) -> str:
 def validate_dq_database(name: str) -> str:
     """The configured dq database name: a plain identifier, no dots, quotes or spaces."""
     return validate_identifier(name, "dq database name")
+
+
+# The dq store tables (spec section 5).
+DQ_TABLES = ("dq_run", "dq_check_result", "dq_cause_result", "dq_key_event", "dq_file")

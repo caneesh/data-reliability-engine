@@ -1,0 +1,11 @@
+# The rule example in spec section 3.
+rule: one_open_row_per_coverage
+template: max_open_rows_per_key
+dataset: gold_member_coverage
+params:
+  open_when: "mbr_mbrshp_covrg_end_dt = '9999-12-31'"
+  max: 1
+group_by: [src_sys_nm]
+owner: membership-gold
+status: proposed
+severity: high

@@ -1,0 +1,9 @@
+rule: one_row_per_coverage
+template: max_rows_per_key
+dataset: gold_member_coverage
+params:
+  max: 1
+group_by: [src_sys_nm]
+owner: membership-gold
+status: proposed
+severity: high

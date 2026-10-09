@@ -18,6 +18,7 @@ Answers to the open decisions in spec section 11. Fill in **Answer** before buil
 - 2026-10-09, step 1: Where it runs and is scheduled: no answer recorded; took the spec default (Control-M for the main run, a separate folder or cron for the watchdog). Nothing built in step 1 depends on it.
 - 2026-10-09, step 1: Database name and service account: no answer recorded; took the spec default, `dq`. The guard test accepts `dq` or the placeholder `dq_database` (see tests/guard/scan.py), since the real name comes from config.
 - 2026-10-09, step 1: Use of AI coding tools on HCSC code: handled with HCSC separately, outside this build. Not a build blocker; no default recorded here.
+- 2026-10-09, step 2: Settings defaults from the spec applied when defaults.yaml omits them: `volume_tolerance_pct` 50 (section 6), `email_sample_keys` false (section 1), `full_sweep_day` SUNDAY (section 8). Sample `retention_months`: 84 for results, events and runs, 13 for the file registry (section 5).
 
 ## Guard rules: reasons (decided after step 1, 2026-10-09)
 

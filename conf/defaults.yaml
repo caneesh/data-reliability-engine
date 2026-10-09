@@ -1,0 +1,25 @@
+# Engine-wide defaults (spec section 3). Synthetic sample: real values live with
+# the deployed instance. Settings resolve defaults.yaml, then the feed, then the
+# dataset; a value set lower wins.
+
+dq_database: dq
+environment: dev
+hmac_secret_file: null        # absolute path to a protected file; never commit the secret
+
+retention_months:             # spec section 5: results and events 7 years, file registry 13 months
+  dq_run: 84
+  dq_check_result: 84
+  dq_cause_result: 84
+  dq_key_event: 84
+  dq_file: 13
+
+recipients:                   # feed owner -> email addresses (spec section 8)
+  membership-gold: [dre-alerts@example.com]
+
+# Settings
+sla_hours: 8
+email_sample_keys: false
+min_rows_per_load: 1
+volume_tolerance_pct: 50
+compute_budget_minutes: 8
+full_sweep_day: SUNDAY

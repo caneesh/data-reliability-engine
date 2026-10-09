@@ -1,0 +1,11 @@
+# Synthetic sample: curated layer, several versions per key (spec section 11).
+dataset: example_curated_enrollment
+table: curated_db.enrollment
+layer: CURATED
+upstream: []
+key: [subscriberidnumber, membernumber, effectivedate, qualifiedhealthplanid]
+record_time: sourcelastupdatets
+load_time: null               # load time column not yet confirmed
+partition_column: null
+file_name_column: null
+key_unique: false             # keeps several versions per key

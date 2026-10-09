@@ -1,0 +1,10 @@
+rule: end_not_before_start
+template: column_order
+dataset: gold_member_coverage
+params:
+  lower: mbr_mbrshp_covrg_eff_dt
+  upper: mbr_mbrshp_covrg_end_dt
+group_by: [src_sys_nm]
+owner: membership-gold
+status: proposed
+severity: medium

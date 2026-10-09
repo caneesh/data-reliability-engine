@@ -1,0 +1,26 @@
+# Synthetic sample: gold layer, the dataset example in spec section 3.
+dataset: gold_member_coverage
+table: gold_db.member_coverage
+layer: GOLD
+upstream: [example_curated_enrollment]
+feed_filter: "src_sys_nm = 'SRC_A'"
+key: [sub_id, mem_nbr, mbr_mbrshp_covrg_eff_dt, covrg_agrmt_id]
+key_normalise: { sub_id: strip_leading_zeros }
+record_time: src_lcts
+load_time: { column: gld_lcts, format: "yyyy-MM-dd HH:mm:ss:SSSSSS", granularity: minute }
+partition_column: null
+file_name_column: null
+min_rows_per_load: 1
+key_unique: true
+group_by: [src_sys_nm]
+volume_tolerance_pct: 50
+key_map:
+  example_curated_enrollment:
+    sub_id: subscriberidnumber
+    mem_nbr: membernumber
+    mbr_mbrshp_covrg_eff_dt: effectivedate
+    covrg_agrmt_id: qualifiedhealthplanid
+owned_columns: { enddate: mbr_mbrshp_covrg_end_dt }
+winner_rule:
+  order_by: ["sourcelastupdatets DESC", "enddate DESC"]
+compute_budget_minutes: 8
