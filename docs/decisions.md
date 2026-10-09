@@ -20,6 +20,19 @@ Answers to the open decisions in spec section 11. Fill in **Answer** before buil
 - 2026-10-09, step 1: Use of AI coding tools on HCSC code: handled with HCSC separately, outside this build. Not a build blocker; no default recorded here.
 - 2026-10-09, step 2: Settings defaults from the spec applied when defaults.yaml omits them: `volume_tolerance_pct` 50 (section 6), `email_sample_keys` false (section 1), `full_sweep_day` SUNDAY (section 8). Sample `retention_months`: 84 for results, events and runs, 13 for the file registry (section 5).
 
+## Configuration assumptions (step 2, reviewed 2026-10-09)
+
+The engine field names chosen in step 2 are in spec section 3. The other assumptions:
+
+1. **Settings levels.** `sla_hours`, `email_sample_keys`, `min_rows_per_load`, `volume_tolerance_pct`, `compute_budget_minutes` and `full_sweep_day` may be set in `defaults.yaml`, a feed or a dataset. A dataset takes the value from the lowest level that sets it (dataset, then the feed that lists it, then defaults); null means inherit. Table-wide datasets skip the feed level.
+2. **`defaults.yaml` fields.** `dq_database`, `environment`, `hmac_secret_file` (null until set; an absolute path outside the repository and the conf directory), `retention_months` (one entry per dq table), `recipients` (owner to addresses), and the settings above.
+3. **Which nulls are allowed.** Fields the spec shows as null are optional: `partition_column`, `file_name_column`, `cause_inputs.*`, `owner` on feed datasets. `load_time` is optional with a warning. `record_time` is optional unless the dataset has a `key_map` or is mapped to by one. Every other field is required, so a null there is an error.
+4. **Time formats.** `record_time` and `load_time` share the shape `{column, format, granularity}`; `format: null` means the column is already DATE or TIMESTAMP. The sample leaves `format` null where the real format is not confirmed.
+5. **Load-time checks.** The warning names T1\_ON\_TIME, T1\_ZERO\_ROWS, T1\_VOLUME and T1\_KEY\_NULLS (and, with a key_map, cause checks NOT\_RUN and OLDER\_VERSION\_WRITTEN\_LATER). Step 5 must keep this list (`config/validate.py`, `LOAD_TIME_CHECKS`) in line with the checks it builds, including any fallback to `partition_column`.
+6. **Regex dialect.** `value_format` patterns are compiled with Python's `re`; Spark uses Java regex. A pattern valid in one and not the other is caught by dry-run.
+7. **SQL fragments.** `dre validate` only rejects `;` in `feed_filter`, `open_when` and filter conditions. **Step 4 must parse them in `dre dry-run`** (Spark `EXPLAIN` or equivalent) and report failures with file, line and field.
+8. **Sample config.** No raw dataset until its columns are confirmed. The `older_coverage_still_open` grouping and order are placeholders until the rule baselines are run (spec section 11, queries 5 to 7).
+
 ## Guard rules: reasons (decided after step 1, 2026-10-09)
 
 The rules themselves are in spec section 9 (Guard tests). Reasons, by rule:

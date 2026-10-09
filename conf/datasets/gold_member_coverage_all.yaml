@@ -1,0 +1,13 @@
+# Synthetic sample: a table-wide dataset. No feed lists it, so it has its own
+# owner, no feed_filter, and takes its settings from defaults.yaml. Gold rules
+# that cover every source system target it.
+dataset: gold_member_coverage_all
+table: gold_db.member_coverage
+layer: GOLD
+owner: membership-gold
+key: [src_sys_nm, sub_id, mem_nbr, mbr_mbrshp_covrg_eff_dt, covrg_agrmt_id]
+key_normalise: { sub_id: strip_leading_zeros }
+record_time: { column: src_lcts, format: null }
+load_time: { column: gld_lcts, format: "yyyy-MM-dd HH:mm:ss:SSSSSS", granularity: minute }
+key_unique: true
+group_by: [src_sys_nm]

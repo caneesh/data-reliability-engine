@@ -98,7 +98,9 @@ landing:
   file_name_pattern: "*"
 cadence:
   kind: times                     # times | interval | calendar_dates
-  times: ["00:30", "04:00", "08:00", "12:00", "16:00", "20:00"]
+  times: ["00:30", "04:00", "08:00", "12:00", "16:00", "20:00"]  # kind times: quoted HH:MM
+  # kind interval:       interval_minutes: 60
+  # kind calendar_dates: dates: [2026-01-05, 2026-02-02]
   timezone: America/Chicago
   calendar: EVERYDAY              # EVERYDAY | WEEKDAYS | named calendar file
 sla_hours: 8
@@ -121,7 +123,7 @@ upstream: [rms_curated_enrollment]
 feed_filter: "src_sys_nm = 'RMS'" # rows belonging to this feed, when a table holds several
 key: [sub_id, mem_nbr, mbr_mbrshp_covrg_eff_dt, covrg_agrmt_id]
 key_normalise: { sub_id: strip_leading_zeros }
-record_time: src_lcts
+record_time: { column: src_lcts, format: null }  # same shape as load_time; format null when the column is DATE or TIMESTAMP
 load_time: { column: gld_lcts, format: "yyyy-MM-dd HH:mm:ss:SSSSSS", granularity: minute }
 partition_column: null
 file_name_column: null            # column holding the landed file name, if any
@@ -140,6 +142,8 @@ winner_rule:                      # optional; how the merge chooses among versio
 compute_budget_minutes: 8
 ```
 
+**Table-wide datasets.** A dataset that no feed lists covers a whole table, for example to run gold rules across every source system. It must set `owner` (whose recipients get its results), has no `feed_filter`, and takes its settings from `defaults.yaml`. A dataset that a feed lists takes its owner from the feed and must not set `owner`. Each dataset is listed by at most one feed.
+
 **Rule** (a gold rule from a template):
 
 ```yaml
@@ -155,9 +159,11 @@ status: proposed                  # proposed | approved | retired
 severity: high                    # high | medium | low
 ```
 
+Rule `params` shapes, where section 6 does not spell them out: `superseded_still_open.group_key` is a list of columns (a single column may be written as a string); `child_within_parent.join` maps each child column to its parent column, for example `{ sub_id: sub_id, mem_nbr: mem_nbr }`.
+
 **Validation**, in two stages:
 
-- `dre validate` (static, run in CI): YAML parses; required fields present; enums valid; every referenced dataset, feed and template exists; every `key_map` covers the full key; no duplicate ids. Errors name the file, line and field, and say how to fix them.
+- `dre validate` (static, run in CI): YAML parses; required fields present; enums valid; every referenced dataset, feed and template exists; every `key_map` covers the full key; no duplicate ids. A dataset with `key_map`, and each upstream it maps to, must set `record_time`. Every owner (feed, table-wide dataset, rule) has recipients. `value_format` patterns compile. `hmac_secret_file` is an absolute path outside the repository and the conf directory. Errors name the file, line and field, and say how to fix them. Warnings are reported without failing validation: a dataset without `load_time` gets a warning naming the checks that will be DID\_NOT\_RUN. SQL fragments (`feed_filter`, `open_when`, filter conditions) are parsed by `dre dry-run`, not here.
 - Runtime preconditions (before each run): table exists; every configured column exists; landing roots are readable. A failure here makes the affected checks DID\_NOT\_RUN with reason category CONFIGURATION, and the run continues.
 
 ## 4. Core concepts
@@ -367,7 +373,7 @@ A filter rule in `cause_inputs.filter_rules` has `id`, `condition` (SQL), `code_
 4. Proposed rules, under "report only"
 5. Passing checks, as a single count
 
-Recipients come from each feed's `owner`, mapped to addresses in `defaults.yaml`.
+Recipients come from each owner (a feed's, a table-wide dataset's or a rule's): `recipients` in `defaults.yaml` maps each owner to its addresses.
 
 **Watchdog.** A separate entry point with no dependency on the main run's code beyond the store schema. It alerts when no `dq_run` row exists for an expected run time plus grace, or when `checks_written < checks_expected`. Schedule it separately from the main run (a different scheduler folder or host), so one scheduling failure doesn't stop both.
 

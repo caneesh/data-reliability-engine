@@ -36,14 +36,14 @@ def build_parser() -> argparse.ArgumentParser:
 def validate(conf: str) -> int:
     from hcsc.datalake.dre.config.validate import validate_conf
 
-    config, errors = validate_conf(Path(conf))
-    for error in errors:
-        print(error)
+    config, errors, warnings = validate_conf(Path(conf))
+    for issue in sorted([*errors, *warnings], key=lambda e: (e.file, e.line)):
+        print(issue)
     if errors:
-        print(f"dre validate: {len(errors)} error(s) in {conf}")
+        print(f"dre validate: {len(errors)} error(s), {len(warnings)} warning(s) in {conf}")
         return 1
     print(
-        f"dre validate: {conf} is valid "
+        f"dre validate: {conf} is valid, {len(warnings)} warning(s) "
         f"({len(config.feeds)} feeds, {len(config.datasets)} datasets, {len(config.rules)} rules)"
     )
     return 0

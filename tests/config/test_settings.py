@@ -56,3 +56,12 @@ def test_spec_defaults_apply_when_defaults_file_omits_them(conf: Path) -> None:
     assert errors == []
     s = config.dataset_settings("gold_member_coverage")
     assert (s.email_sample_keys, s.volume_tolerance_pct, s.full_sweep_day) == (False, 50, "SUNDAY")
+
+
+def test_table_wide_dataset_takes_settings_from_defaults(conf: Path) -> None:
+    edit(conf, FEED, "email_sample_keys: false", "email_sample_keys: false\nvolume_tolerance_pct: 30")
+    config, errors = load(conf)
+    assert errors == []
+    assert config.feed_of("gold_member_coverage_all") is None
+    assert config.dataset_settings("gold_member_coverage_all").volume_tolerance_pct == 50
+    assert config.dataset_settings("example_curated_enrollment").volume_tolerance_pct == 30

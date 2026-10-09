@@ -40,10 +40,12 @@ class ConfigError:
     field: str
     problem: str
     fix: str
+    level: str = "error"  # "error" fails dre validate; "warning" is reported only
 
     def __str__(self) -> str:
         where = f" {self.field}:" if self.field else ""
-        return f"{self.file}:{self.line}:{where} {self.problem}. Fix: {self.fix}"
+        tag = "warning: " if self.level == "warning" else ""
+        return f"{self.file}:{self.line}:{where} {tag}{self.problem}. Fix: {self.fix}"
 
 
 @dataclass(frozen=True)

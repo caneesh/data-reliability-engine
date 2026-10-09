@@ -14,21 +14,28 @@ from hcsc.datalake.dre.cli import main
 from hcsc.datalake.dre.config.loader import ConfigError
 from hcsc.datalake.dre.config.validate import validate_conf
 from tests.config.conftest import SAMPLE_CONF, edit, line_with
+from tests.conftest import REPO_ROOT
 
 FEED = "feeds/example_realtime.yaml"
 GOLD = "datasets/gold_member_coverage.yaml"
 CURATED = "datasets/example_curated_enrollment.yaml"
 DEFAULTS = "defaults.yaml"
 RULE = "rules/one_row_per_coverage.yaml"
+TABLE_WIDE = "datasets/gold_member_coverage_all.yaml"
+FORMAT_RULE = "rules/coverage_end_date_format.yaml"
+GOLD_RECORD_TIME = "record_time: { column: src_lcts, format: null }             # format not yet confirmed\n"
+CURATED_RECORD_TIME = "record_time: { column: sourcelastupdatets, format: null }   # format not yet confirmed\n"
 LANDING = 'landing:\n  roots: [/data/landing/example_feed]\n  file_format: sequence\n  file_name_pattern: "*"\n'
 
 
 def test_sample_config_is_valid() -> None:
-    config, errors = validate_conf(SAMPLE_CONF)
+    config, errors, warnings = validate_conf(SAMPLE_CONF)
     assert errors == []
     assert set(config.feeds) == {"example_realtime"}
-    assert set(config.datasets) == {"example_curated_enrollment", "gold_member_coverage"}
-    assert len(config.rules) == 4
+    assert set(config.datasets) == {"example_curated_enrollment", "gold_member_coverage", "gold_member_coverage_all"}
+    assert len(config.rules) == 5
+    # The curated load time column is not confirmed yet: reported, not an error.
+    assert [(Path(w.file).name, w.field) for w in warnings] == [("example_curated_enrollment.yaml", "load_time")]
 
 
 def test_cli_validate_exit_codes(conf: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -80,6 +87,15 @@ CASES = [
     ("dq-database-not-identifier", DEFAULTS, "dq_database: dq", "dq_database: dq.prod", "dq_database", "dq_database", "plain identifier", "plain identifier"),
     ("hmac-relative-path", DEFAULTS, "hmac_secret_file: null", "hmac_secret_file: secrets/key", "", "dq_database: dq", "absolute path", "outside the repository"),
     ("retention-missing-table", DEFAULTS, "  dq_file: 13\n", "", "", "dq_database: dq", "retention_months", "dq_file"),
+    ("record-time-shorthand", GOLD, GOLD_RECORD_TIME, "record_time: src_lcts\n", "record_time", "record_time:", "expected a mapping", "key: value"),
+    ("key-map-needs-record-time", GOLD, GOLD_RECORD_TIME, "", "record_time", "dataset: gold_member_coverage", "needs record_time", "add record_time"),
+    ("upstream-needs-record-time", CURATED, CURATED_RECORD_TIME, "", "record_time", "dataset: example_curated_enrollment", "compares against this dataset", "add record_time"),
+    ("table-wide-needs-owner", TABLE_WIDE, "owner: membership-gold\n", "", "owner", "dataset: gold_member_coverage_all", "needs an owner", "add owner"),
+    ("table-wide-no-feed-filter", TABLE_WIDE, "layer: GOLD\n", "layer: GOLD\nfeed_filter: \"src_sys_nm = 'SRC_A'\"\n", "feed_filter", "feed_filter: ", "cannot have a feed_filter", "remove feed_filter"),
+    ("table-wide-owner-recipients", TABLE_WIDE, "owner: membership-gold", "owner: other-team", "owner", "owner: other-team", "no recipients", "recipients in defaults.yaml"),
+    ("feed-dataset-no-owner", GOLD, "layer: GOLD\n", "layer: GOLD\nowner: membership-gold\n", "owner", "owner: membership-gold", "feed 'example_realtime' owns", "remove owner"),
+    ("rule-owner-recipients", RULE, "owner: membership-gold", "owner: other-team", "owner", "owner: other-team", "no recipients", "recipients in defaults.yaml"),
+    ("regex-does-not-compile", FORMAT_RULE, "'^\\d{4}-\\d{2}-\\d{2}$'", "'^([0-9'", "params.pattern", "pattern:", "does not compile", "regular expression"),
     ("bad-email", DEFAULTS, "dre-alerts@example.com", "dre-alerts", "recipients.membership-gold[0]", "membership-gold:", "email", "name@domain"),
 ]
 
@@ -95,7 +111,7 @@ def test_error_names_file_line_field_and_fix(
     conf: Path, case: str, rel: str, old: str, new: str, field: str, needle: str, problem: str, fix: str
 ) -> None:
     edit(conf, rel, old, new)
-    _, errors = validate_conf(conf)
+    _, errors, _ = validate_conf(conf)
     error = _find(errors, conf / rel, field)
     assert error.line == line_with(conf, rel, needle), str(error)
     assert problem in error.problem, str(error)
@@ -105,7 +121,7 @@ def test_error_names_file_line_field_and_fix(
 
 def test_duplicate_id(conf: Path) -> None:
     shutil.copy(conf / GOLD, conf / "datasets/zz_copy.yaml")
-    _, errors = validate_conf(conf)
+    _, errors, _ = validate_conf(conf)
     error = _find(errors, conf / "datasets/zz_copy.yaml", "dataset")
     assert error.line == line_with(conf, "datasets/zz_copy.yaml", "dataset: gold_member_coverage")
     assert "duplicate dataset id" in error.problem and "unique" in error.fix
@@ -114,7 +130,7 @@ def test_duplicate_id(conf: Path) -> None:
 def test_dataset_in_two_feeds(conf: Path) -> None:
     shutil.copy(conf / FEED, conf / "feeds/zz_other.yaml")
     edit(conf, "feeds/zz_other.yaml", "feed: example_realtime", "feed: zz_other")
-    _, errors = validate_conf(conf)
+    _, errors, _ = validate_conf(conf)
     error = _find(errors, conf / "feeds/zz_other.yaml", "datasets[0]")
     assert error.line == line_with(conf, "feeds/zz_other.yaml", "datasets: [")
     assert "already listed by feed 'example_realtime'" in error.problem and "one feed only" in error.fix
@@ -123,7 +139,7 @@ def test_dataset_in_two_feeds(conf: Path) -> None:
 def test_setting_not_set_at_any_level(conf: Path) -> None:
     edit(conf, DEFAULTS, "sla_hours: 8\n", "")
     edit(conf, FEED, "\nsla_hours: 8", "")
-    _, errors = validate_conf(conf)
+    _, errors, _ = validate_conf(conf)
     error = _find(errors, conf / GOLD, "sla_hours")
     assert error.line == line_with(conf, GOLD, "dataset: gold_member_coverage")
     assert "not set at any level" in error.problem
@@ -132,13 +148,47 @@ def test_setting_not_set_at_any_level(conf: Path) -> None:
 
 def test_file_not_a_mapping(conf: Path) -> None:
     (conf / RULE).write_text("- just\n- a list\n", encoding="utf-8")
-    _, errors = validate_conf(conf)
+    _, errors, _ = validate_conf(conf)
     error = _find(errors, conf / RULE, "")
     assert error.line == 1 and "one YAML mapping" in error.problem and error.fix
 
 
 def test_defaults_missing(conf: Path) -> None:
     (conf / DEFAULTS).unlink()
-    _, errors = validate_conf(conf)
+    _, errors, _ = validate_conf(conf)
     error = _find(errors, conf / DEFAULTS, "")
     assert error.line == 1 and "missing" in error.problem and "create" in error.fix
+
+
+@pytest.mark.parametrize(
+    "where",
+    [lambda conf: conf / "secrets" / "hmac.key", lambda conf: REPO_ROOT / "hmac.key"],
+    ids=["inside-conf-dir", "inside-engine-repo"],
+)
+def test_hmac_secret_inside_repo_rejected(conf: Path, where) -> None:
+    edit(conf, DEFAULTS, "hmac_secret_file: null", f"hmac_secret_file: {where(conf)}")
+    _, errors, _ = validate_conf(conf)
+    error = _find(errors, conf / DEFAULTS, "hmac_secret_file")
+    assert error.line == line_with(conf, DEFAULTS, "hmac_secret_file:")
+    assert "inside" in error.problem and "outside the repository" in error.fix
+
+
+def test_hmac_secret_outside_repo_accepted(conf: Path) -> None:
+    edit(conf, DEFAULTS, "hmac_secret_file: null", "hmac_secret_file: /etc/dre/hmac.key")
+    _, errors, _ = validate_conf(conf)
+    assert errors == []
+
+
+def test_missing_load_time_warns_with_checks(conf: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    edit(conf, GOLD, "load_time: {", "# load_time: {")
+    _, errors, warnings = validate_conf(conf)
+    assert errors == []
+    warning = _find(warnings, conf / GOLD, "load_time")
+    assert warning.level == "warning"
+    assert warning.line == line_with(conf, GOLD, "dataset: gold_member_coverage")
+    for check in ("T1_ON_TIME", "T1_ZERO_ROWS", "T1_VOLUME", "T1_KEY_NULLS"):
+        assert check in warning.problem
+    assert "DID_NOT_RUN" in warning.problem
+    assert "NOT_RUN, OLDER_VERSION_WRITTEN_LATER" in warning.problem  # gold has a key_map
+    assert main(["validate", "--conf", str(conf)]) == 0  # warnings do not fail validation
+    assert "warning: load_time is not set" in capsys.readouterr().out

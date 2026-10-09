@@ -4,7 +4,7 @@ table: curated_db.enrollment
 layer: CURATED
 upstream: []
 key: [subscriberidnumber, membernumber, effectivedate, qualifiedhealthplanid]
-record_time: sourcelastupdatets
+record_time: { column: sourcelastupdatets, format: null }   # format not yet confirmed
 load_time: null               # load time column not yet confirmed
 partition_column: null
 file_name_column: null

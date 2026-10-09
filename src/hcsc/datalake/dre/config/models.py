@@ -87,8 +87,12 @@ def _dq_database(value: str) -> str:
         raise invalid(str(exc), "use a plain identifier, e.g. dq") from None
 
 
-def _column_or_mapping(value: Any) -> Any:
-    return {"column": value} if isinstance(value, str) else value
+def _regex(value: str) -> str:
+    try:
+        re.compile(value)
+    except re.error as exc:
+        raise invalid(f"pattern {value!r} does not compile: {exc}", "fix the regular expression") from None
+    return value
 
 
 def _str_to_list(value: Any) -> Any:
@@ -256,6 +260,8 @@ class Feed(SettingsOverride):
 
 
 class TimeColumn(Model):
+    """A time column and how to parse it. format null: the column is already DATE or TIMESTAMP."""
+
     column: Identifier
     format: NonEmptyStr | None = None
     granularity: Granularity | None = None
@@ -273,8 +279,9 @@ class Dataset(SettingsOverride):
     feed_filter: SqlFragment | None = None
     key: Annotated[list[Identifier], Field(min_length=1)]
     key_normalise: dict[Identifier, Normaliser] = {}
-    record_time: Annotated[TimeColumn | None, BeforeValidator(_column_or_mapping)] = None
-    load_time: Annotated[TimeColumn | None, BeforeValidator(_column_or_mapping)] = None
+    owner: NonEmptyStr | None = None  # only for table-wide datasets that no feed lists
+    record_time: TimeColumn | None = None
+    load_time: TimeColumn | None = None
     partition_column: Identifier | None = None
     file_name_column: Identifier | None = None
     key_unique: bool = False
@@ -330,7 +337,7 @@ class ChildWithinParent(Model):
 
 class ValueFormat(Model):
     column: Identifier
-    pattern: NonEmptyStr
+    pattern: Annotated[str, Field(min_length=1), AfterValidator(_regex)]
 
 
 class NullRateMax(Model):

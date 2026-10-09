@@ -1,9 +1,11 @@
 """Static validation of a conf directory: `dre validate` (spec section 3).
 
 Runs the loader's per-file checks, then checks across files: references
-exist, key_map covers the key, each feed owner has recipients, and every
-dataset's settings resolve. Runtime preconditions (tables and columns exist)
-come with the check framework in build step 4.
+exist, key_map covers the key, owners have recipients, time columns needed by
+hop checks are set, and every dataset's settings resolve. Errors fail
+validation; warnings are reported only. SQL fragments are not parsed here:
+dry-run does that against Spark (build step 4). Runtime preconditions (tables
+and columns exist) also come in step 4.
 """
 
 from __future__ import annotations
@@ -22,22 +24,51 @@ from hcsc.datalake.dre.config.loader import (
 )
 from hcsc.datalake.dre.config.models import TEMPLATE_PARAMS
 
+# Checks whose evaluation window is defined by load time (spec section 6).
+LOAD_TIME_CHECKS = ("T1_ON_TIME", "T1_ZERO_ROWS", "T1_VOLUME", "T1_KEY_NULLS")
+# Cause checks that compare load times (spec section 7, key missing or stale).
+LOAD_TIME_CAUSES = ("NOT_RUN", "OLDER_VERSION_WRITTEN_LATER")
 
-def validate_conf(conf_dir: Path | str) -> tuple[Config, list[ConfigError]]:
-    config, errors = load(conf_dir)
-    errors.extend(cross_check(config))
-    return config, sorted(set(errors), key=lambda e: (e.file, e.line, e.field, e.problem))
+_ENGINE_ROOT = Path(__file__).resolve()
 
 
-def cross_check(config: Config) -> list[ConfigError]:
+def validate_conf(conf_dir: Path | str) -> tuple[Config, list[ConfigError], list[ConfigError]]:
+    """(config, errors, warnings) for a conf directory."""
+    conf_dir = Path(conf_dir)
+    config, issues = load(conf_dir)
+    feeds_dir = str(conf_dir / "feeds")
+    feeds_complete = not any(e.file.startswith(feeds_dir) for e in issues)
+    issues.extend(cross_check(config, feeds_complete=feeds_complete))
+    ordered = sorted(set(issues), key=lambda e: (e.file, e.line, e.field, e.problem))
+    return (
+        config,
+        [e for e in ordered if e.level == "error"],
+        [e for e in ordered if e.level == "warning"],
+    )
+
+
+def cross_check(config: Config, feeds_complete: bool = True) -> list[ConfigError]:
+    """Checks across files. feeds_complete=False skips checks that need every feed loaded."""
     errors: list[ConfigError] = []
 
-    def err(kind: str, obj_id: str, loc: tuple[Any, ...], problem: str, fix: str) -> None:
+    def err(kind: str, obj_id: str, loc: tuple[Any, ...], problem: str, fix: str, level: str = "error") -> None:
         file, line = config.locate(kind, obj_id, loc)
-        errors.append(ConfigError(file, line, format_loc(loc), problem, fix))
+        errors.append(ConfigError(file, line, format_loc(loc), problem, fix, level))
 
     datasets = config.datasets
     defaults = config.defaults
+    recipients = defaults.recipients if defaults is not None else None
+
+    def check_owner(kind: str, obj_id: str, owner: str) -> None:
+        if recipients is not None and owner not in recipients:
+            err(kind, obj_id, ("owner",), f"owner {owner!r} has no recipients",
+                f"add `{owner}: [address]` under recipients in defaults.yaml")
+
+    if defaults is not None and defaults.hmac_secret_file is not None:
+        root = _containing_root(Path(defaults.hmac_secret_file), config.conf_dir)
+        if root is not None:
+            err("defaults", "defaults", ("hmac_secret_file",), f"hmac_secret_file is inside {root}",
+                "keep the secret in a protected file outside the repository and the conf directory")
 
     # Feeds: dataset references, one feed per dataset, owner recipients.
     member_of: dict[str, str] = {}
@@ -51,19 +82,34 @@ def cross_check(config: Config) -> list[ConfigError]:
                     "list each dataset in one feed only")
             else:
                 member_of[ds] = feed_id
-        if defaults is not None and feed.owner not in defaults.recipients:
-            err("feed", feed_id, ("owner",), f"owner {feed.owner!r} has no recipients",
-                f"add `{feed.owner}: [address]` under recipients in defaults.yaml")
+        check_owner("feed", feed_id, feed.owner)
 
-    # Datasets: upstream, key_map, key-relative fields, settings.
+    # Datasets.
     for ds_id, ds in datasets.items():
         key = set(ds.key)
+
+        # Feed datasets take their owner from the feed; table-wide datasets need their own.
+        if ds_id in member_of:
+            if ds.owner is not None:
+                err("dataset", ds_id, ("owner",), f"owner is set, but feed {member_of[ds_id]!r} owns this dataset",
+                    "remove owner; the feed's owner receives its results")
+        elif feeds_complete:
+            if ds.owner is None:
+                err("dataset", ds_id, ("owner",), "a dataset that no feed lists needs an owner",
+                    "add owner: (a table-wide dataset), or list the dataset in its feed")
+            else:
+                check_owner("dataset", ds_id, ds.owner)
+            if ds.feed_filter is not None:
+                err("dataset", ds_id, ("feed_filter",), "a dataset that no feed lists cannot have a feed_filter",
+                    "remove feed_filter (table-wide datasets cover the whole table), or list the dataset in its feed")
+
         for i, up in enumerate(ds.upstream):
             if up == ds_id:
                 err("dataset", ds_id, ("upstream", i), "dataset lists itself as upstream", "remove it")
             elif up not in datasets:
                 err("dataset", ds_id, ("upstream", i), f"unknown dataset {up!r}",
                     f"add datasets/{up}.yaml or remove it from upstream")
+
         for up, mapping in ds.key_map.items():
             if up not in ds.upstream:
                 err("dataset", ds_id, ("key_map", up), f"key_map names {up!r}, which is not in upstream",
@@ -82,6 +128,22 @@ def cross_check(config: Config) -> list[ConfigError]:
                     err("dataset", ds_id, ("key_map", up),
                         f"mapped column(s) {not_up_key} are not in {up}'s key",
                         f"map to columns of {up}'s key {datasets[up].key}")
+                if datasets[up].record_time is None:
+                    err("dataset", up, ("record_time",),
+                        f"record_time is not set, and {ds_id!r} compares against this dataset through key_map",
+                        "add record_time: {column: ..., format: ...}")
+
+        if ds.key_map and ds.record_time is None:
+            err("dataset", ds_id, ("record_time",), "a dataset with key_map needs record_time",
+                "add record_time: {column: ..., format: ...}")
+
+        if ds.load_time is None:
+            causes = f"; cause checks {', '.join(LOAD_TIME_CAUSES)} cannot be confirmed" if ds.key_map else ""
+            err("dataset", ds_id, ("load_time",),
+                f"load_time is not set: {', '.join(LOAD_TIME_CHECKS)} will be DID_NOT_RUN{causes}",
+                "add load_time: {column, format, granularity} once the column is confirmed",
+                level="warning")
+
         for col in ds.key_normalise:
             if col not in key:
                 err("dataset", ds_id, ("key_normalise", col), f"{col!r} is not a key column",
@@ -93,6 +155,7 @@ def cross_check(config: Config) -> list[ConfigError]:
         if ds.owned_columns and not ds.key_map:
             err("dataset", ds_id, ("owned_columns",), "owned_columns needs a key_map",
                 "add key_map for the upstream dataset, or remove owned_columns")
+
         if defaults is not None:
             try:
                 config.dataset_settings(ds_id)
@@ -107,11 +170,12 @@ def cross_check(config: Config) -> list[ConfigError]:
 
     errors.extend(_upstream_cycles(config))
 
-    # Rules: dataset, template params, parent dataset.
+    # Rules: dataset, owner, template params, parent dataset.
     for rule_id, rule in config.rules.items():
         if rule.dataset not in datasets:
             err("rule", rule_id, ("dataset",), f"unknown dataset {rule.dataset!r}",
                 f"add datasets/{rule.dataset}.yaml or point the rule at an existing dataset")
+        check_owner("rule", rule_id, rule.owner)
         try:
             params = TEMPLATE_PARAMS[rule.template].model_validate(rule.params)
         except ValidationError as exc:
@@ -124,6 +188,24 @@ def cross_check(config: Config) -> list[ConfigError]:
                 f"add datasets/{parent}.yaml or fix parent_dataset")
 
     return errors
+
+
+def _git_root(start: Path) -> Path | None:
+    for parent in (start, *start.parents):
+        if (parent / ".git").exists():
+            return parent
+    return None
+
+
+def _containing_root(path: Path, conf_dir: Path) -> Path | None:
+    """The conf directory or repository that contains path, if any."""
+    target = path.resolve()
+    conf = conf_dir.resolve()
+    roots = [conf, _git_root(conf), _git_root(_ENGINE_ROOT.parent)]
+    for root in roots:
+        if root is not None and (target == root or root in target.parents):
+            return root
+    return None
 
 
 def _upstream_cycles(config: Config) -> list[ConfigError]:

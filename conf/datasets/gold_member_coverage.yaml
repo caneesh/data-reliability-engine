@@ -6,7 +6,7 @@ upstream: [example_curated_enrollment]
 feed_filter: "src_sys_nm = 'SRC_A'"
 key: [sub_id, mem_nbr, mbr_mbrshp_covrg_eff_dt, covrg_agrmt_id]
 key_normalise: { sub_id: strip_leading_zeros }
-record_time: src_lcts
+record_time: { column: src_lcts, format: null }             # format not yet confirmed
 load_time: { column: gld_lcts, format: "yyyy-MM-dd HH:mm:ss:SSSSSS", granularity: minute }
 partition_column: null
 file_name_column: null
