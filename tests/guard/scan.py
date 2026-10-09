@@ -1,11 +1,23 @@
-"""Static scanner behind the read-only guard test (spec section 9, hard rule 1).
+"""Static scanner behind the read-only and append-only guard tests.
 
-It looks for write statements in source text and reports each one whose
-target is not the dq store. The store's database is referenced either as the
-literal `dq` or, because its real name comes from config, through one of the
-placeholders below. Any other target fails, including a target the scanner
-cannot read (for example a table name built by string concatenation): build
-write statements so the target is visible in the text.
+Rules (hard rules 1 and 5, spec section 9, docs/decisions.md "Guard rules"):
+
+- INSERT INTO is the only DML allowed, and only into the dq store.
+- UPDATE, DELETE, MERGE, TRUNCATE and INSERT OVERWRITE are banned everywhere,
+  dq included, as are DataFrame overwrite modes.
+- CREATE TABLE and CREATE [OR REPLACE] VIEW are allowed on dq only; CREATE
+  DATABASE only for dq itself. DROP TABLE/VIEW/DATABASE and every other ALTER
+  are banned.
+- ALTER TABLE <dq>.<t> DROP PARTITION is allowed only in store/retention.py.
+- DataFrame path writes, Hadoop FileSystem delete/rename/mkdirs, os/shutil
+  file removal and moves, and `hdfs dfs` deletes, moves and mkdirs are flagged
+  unless the target is the dq store. The dq store is a database addressed by
+  table name, so in practice a path target never qualifies.
+
+The dq database is named either as the literal `dq` or, because the real name
+comes from config, through one of DQ_PLACEHOLDERS. A target the scanner cannot
+read (for example one built by string concatenation) fails: write statements
+so the target is visible in the text.
 """
 
 from __future__ import annotations
@@ -17,45 +29,52 @@ from pathlib import Path
 DQ_DATABASE = "dq"
 # Ways engine code may name the dq database when the real name comes from config.
 DQ_PLACEHOLDERS = ("{{dq_database}}", "{dq_database}")
+# The only module allowed to drop dq partitions (retention).
+RETENTION_MODULE = "hcsc/datalake/dre/store/retention.py"
 
 # A target is either a Jinja expression (which may contain spaces) followed by
 # the rest of a dotted name, or a plain run of non-space characters.
 _TARGET = r"(?P<target>\{\{\s*\w+\s*\}\}[^\s(;,]*|[^\s(;,]+)"
+_ARG = r"\(\s*(?P<target>[^,)]*)"  # first call argument
+_I = re.I
 
-# (label, pattern, target_is_database)
-_SQL_WRITES: list[tuple[str, re.Pattern[str], bool]] = [
-    ("INSERT", re.compile(rf"\bINSERT\s+(?:INTO|OVERWRITE)\s+(?:TABLE\s+)?{_TARGET}", re.I), False),
-    ("MERGE", re.compile(rf"\bMERGE\s+INTO\s+{_TARGET}", re.I), False),
-    ("UPDATE", re.compile(rf"\bUPDATE\s+{_TARGET}\s+SET\b", re.I), False),
-    ("DELETE", re.compile(rf"\bDELETE\s+FROM\s+{_TARGET}", re.I), False),
-    ("DROP", re.compile(rf"\bDROP\s+(?:TABLE|VIEW)\s+(?:IF\s+EXISTS\s+)?{_TARGET}", re.I), False),
-    ("DROP", re.compile(rf"\bDROP\s+(?:DATABASE|SCHEMA)\s+(?:IF\s+EXISTS\s+)?{_TARGET}", re.I), True),
-    ("ALTER", re.compile(rf"\bALTER\s+(?:TABLE|VIEW)\s+{_TARGET}", re.I), False),
-    ("ALTER", re.compile(rf"\bALTER\s+(?:DATABASE|SCHEMA)\s+{_TARGET}", re.I), True),
-    ("TRUNCATE", re.compile(rf"\bTRUNCATE\s+TABLE\s+{_TARGET}", re.I), False),
-    (
-        "CREATE",
-        re.compile(
-            rf"\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:EXTERNAL\s+)?(?:TABLE|VIEW)\s+"
-            rf"(?:IF\s+NOT\s+EXISTS\s+)?{_TARGET}",
-            re.I,
-        ),
-        False,
-    ),
-    (
-        "CREATE",
-        re.compile(rf"\bCREATE\s+(?:DATABASE|SCHEMA)\s+(?:IF\s+NOT\s+EXISTS\s+)?{_TARGET}", re.I),
-        True,
-    ),
-    # DataFrame writer calls: the first argument is the target table.
-    ("WRITER", re.compile(r"\.(?:saveAsTable|insertInto)\(\s*(?P<target>[^,)]+)"), False),
+# Banned everywhere, whatever the target.
+_BANNED: list[tuple[str, re.Pattern[str]]] = [
+    ("INSERT OVERWRITE", re.compile(rf"\bINSERT\s+OVERWRITE\s+(?:TABLE\s+)?{_TARGET}", _I)),
+    ("MERGE", re.compile(rf"\bMERGE\s+INTO\s+{_TARGET}", _I)),
+    ("UPDATE", re.compile(rf"\bUPDATE\s+{_TARGET}\s+SET\b", _I)),
+    ("DELETE", re.compile(rf"\bDELETE\s+FROM\s+{_TARGET}", _I)),
+    ("TRUNCATE", re.compile(rf"\bTRUNCATE\s+TABLE\s+{_TARGET}", _I)),
+    ("DROP", re.compile(rf"\bDROP\s+(?:TABLE|VIEW|DATABASE|SCHEMA)\s+(?:IF\s+EXISTS\s+)?{_TARGET}", _I)),
+    ("ALTER", re.compile(rf"\bALTER\s+(?:VIEW|DATABASE|SCHEMA)\s+{_TARGET}", _I)),
+    ("saveAsTable", re.compile(rf"\.saveAsTable{_ARG}")),
+    ("overwrite mode", re.compile(r"(?P<target>\.mode\(\s*[\"']overwrite[\"']\s*\)|\bmode\s*=\s*[\"']overwrite[\"'])", _I)),
+    ("overwrite=True", re.compile(r"(?P<target>\boverwrite\s*=\s*True\b)")),
+    ("HDFS", re.compile(
+        r"(?P<target>\b(?:hdfs\s+dfs|hadoop\s+fs)\s+-(?:rm|rmr|rmdir|mv|mkdir)\b"
+        r"|[\"'](?:-rm|-rmr|-rmdir|-mv|-mkdir)[\"'])"
+    )),
 ]
 
-# HDFS moves and deletes are never allowed: the dq store is a database, not a path.
-_HDFS_WRITES = re.compile(
-    r"\b(?:hdfs\s+dfs|hadoop\s+fs)\s+-(?:rm|rmr|rmdir|mv)\b"
-    r"|[\"'](?:-rm|-rmr|-rmdir|-mv)[\"']"
-)
+# Allowed only when the target is the dq store: (label, pattern, target_is_database).
+_DQ_ONLY: list[tuple[str, re.Pattern[str], bool]] = [
+    ("INSERT INTO", re.compile(rf"\bINSERT\s+INTO\s+(?:TABLE\s+)?{_TARGET}", _I), False),
+    ("insertInto", re.compile(rf"\.insertInto{_ARG}"), False),
+    ("CREATE", re.compile(
+        rf"\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:EXTERNAL\s+)?(?:TABLE|VIEW)\s+(?:IF\s+NOT\s+EXISTS\s+)?{_TARGET}", _I
+    ), False),
+    ("CREATE DATABASE", re.compile(rf"\bCREATE\s+(?:DATABASE|SCHEMA)\s+(?:IF\s+NOT\s+EXISTS\s+)?{_TARGET}", _I), True),
+    # DataFrameWriter path writes: df.write[.option(..)...].save/orc/parquet/csv/json/text(path)
+    ("path write", re.compile(
+        r"\.write(?:Stream)?(?:[\s\\]*\.\s*\w+\((?:[^()]|\([^()]*\))*\))*[\s\\]*\.\s*"
+        rf"(?:save|orc|parquet|csv|json|text){_ARG}"
+    ), False),
+    ("FileSystem", re.compile(rf"\.(?:delete|rename|mkdirs){_ARG}"), False),
+    ("os/shutil", re.compile(rf"\b(?:os\.(?:remove|unlink|rmdir|removedirs|rename|replace)|shutil\.(?:rmtree|move)){_ARG}"), False),
+]
+
+_ALTER_TABLE = re.compile(rf"\bALTER\s+TABLE\s+{_TARGET}", _I)
+_DROP_PARTITION_TAIL = re.compile(r"\s+DROP\s+(?:IF\s+EXISTS\s+)?PARTITION\b", _I)
 
 _SCANNED_SUFFIXES = {".py", ".sql", ".j2", ".yaml", ".yml", ".sh", ".txt", ".cfg", ".toml", ".json"}
 
@@ -66,9 +85,10 @@ class Violation:
     line: int
     statement: str
     target: str
+    reason: str
 
     def __str__(self) -> str:
-        return f"{self.path}:{self.line}: {self.statement} targets {self.target!r}, not the dq store"
+        return f"{self.path}:{self.line}: {self.statement} {self.target!r}: {self.reason}"
 
 
 def _clean(target: str) -> str:
@@ -78,26 +98,39 @@ def _clean(target: str) -> str:
 
 
 def _is_dq(target: str, is_database: bool) -> bool:
-    t = _clean(target)
+    t = _clean(target).lower()
     names = (DQ_DATABASE, *DQ_PLACEHOLDERS)
     if is_database:
-        return t.lower() in names
-    return any(t.lower().startswith(f"{name}.") for name in names)
+        return t in names
+    return any(t.startswith(f"{name}.") for name in names)
 
 
 def scan_text(text: str, path: str = "<text>") -> list[Violation]:
     found: list[Violation] = []
 
-    def line_of(pos: int) -> int:
-        return text.count("\n", 0, pos) + 1
+    def add(pos: int, label: str, target: str, reason: str) -> None:
+        found.append(Violation(path, text.count("\n", 0, pos) + 1, label, _clean(target), reason))
 
-    for label, pattern, is_database in _SQL_WRITES:
+    for label, pattern in _BANNED:
         for m in pattern.finditer(text):
-            target = m.group("target")
-            if not _is_dq(target, is_database):
-                found.append(Violation(path, line_of(m.start()), label, _clean(target)))
-    for m in _HDFS_WRITES.finditer(text):
-        found.append(Violation(path, line_of(m.start()), "HDFS", m.group(0)))
+            add(m.start(), label, m.group("target"), "banned everywhere (read-only, append-only)")
+
+    for label, pattern, is_database in _DQ_ONLY:
+        for m in pattern.finditer(text):
+            if not _is_dq(m.group("target"), is_database):
+                add(m.start(), label, m.group("target"), "allowed only on the dq store")
+
+    in_retention = path.replace("\\", "/").endswith(RETENTION_MODULE)
+    for m in _ALTER_TABLE.finditer(text):
+        target = m.group("target")
+        if _DROP_PARTITION_TAIL.match(text, m.end()):
+            if not _is_dq(target, False):
+                add(m.start(), "DROP PARTITION", target, "allowed only on the dq store")
+            elif not in_retention:
+                add(m.start(), "DROP PARTITION", target, f"allowed only in {RETENTION_MODULE}")
+        else:
+            add(m.start(), "ALTER", target, "banned everywhere; only retention may DROP PARTITION")
+
     return sorted(found, key=lambda v: (v.path, v.line))
 
 
