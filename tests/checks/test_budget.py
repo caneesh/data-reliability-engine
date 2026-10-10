@@ -74,3 +74,35 @@ def test_scan_size_estimate(spark) -> None:
     spark.sql("ANALYZE TABLE budget.gold COMPUTE STATISTICS")
     assert estimated_scan_bytes(spark, "budget.gold") > 0
     assert estimated_scan_bytes(spark, "budget.no_such_table") is None
+
+
+def test_a_spent_dataset_budget_or_a_too_large_scan_is_not_run(spark) -> None:
+    """compute_budget_scope: dataset (no minutes left) and scan_mb_per_minute (refused up front)."""
+    context = ctx(spark, SETTINGS)
+    spent = CheckContext(context.spark, context.dataset, None, SETTINGS, "UTC", budget_minutes=0)
+    [result], duration_ms = run_check(Quick(), spent, EVENT)
+    assert (result.reason_code, duration_ms) == ("budget_exceeded", 0)
+    assert "spent" in result.detail
+    spark.sql("ANALYZE TABLE budget.gold COMPUTE STATISTICS")
+    slow_cluster = CheckContext(context.spark, context.dataset, None, BUDGET, "UTC", scan_mb_per_minute=1e-9)
+    [result], _ = run_check(Quick(), slow_cluster, EVENT)
+    assert result.reason_code == "budget_exceeded" and "not run" in result.detail
+    fast_cluster = CheckContext(context.spark, context.dataset, None, BUDGET, "UTC", scan_mb_per_minute=1e6)
+    [result], _ = run_check(Quick(), fast_cluster, EVENT)
+    assert result.state == "PASSED"
+
+
+def test_dataset_budget_scope_is_shared_by_a_dataset_s_checks_in_a_run(spark, tmp_path) -> None:
+    from hcsc.datalake.dre.cli import main
+    from tests.replay.conftest import latest, replay_conf
+
+    # A budget of a few milliseconds per dataset: the first check spends it, the rest are not run.
+    replay = replay_conf(spark, tmp_path, "budget_scope", {"defaults.yaml": [
+        ("compute_budget_scope: check", "compute_budget_scope: dataset"),
+        ("compute_budget_minutes: 8", "compute_budget_minutes: 0.0001")],
+        "datasets/gold_member_coverage.yaml": [("compute_budget_minutes: 8", "compute_budget_minutes: 0.0001")]})
+    create_table(spark, replay.gold, GOLD_COLUMNS, [gold_row()])
+    assert main(["run", "--conf", str(replay.conf), "--feed", "example_realtime"]) == 0
+    gold = [row for (ds, _), rows in latest(spark, replay).items() if ds == "gold_member_coverage" for row in rows]
+    assert {r.reason_code for r in gold} == {"budget_exceeded"}
+    assert any("spent" in (r.detail or "") for r in gold)

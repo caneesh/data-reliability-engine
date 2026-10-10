@@ -21,6 +21,7 @@ email:                        # mail relay for the digest; not yet confirmed (sp
   smtp_host: null             # null: digests are built but not sent
   smtp_port: 25
   sender: null
+  all_clear_digest: every_run # every_run | daily (the run in the hour from rule_run_at) | never
 
 # Settings
 sla_hours: 8
@@ -33,4 +34,8 @@ settle_minutes: 15            # a window ends this long before the run starts
 initial_lookback_hours: 24    # a dataset's first window covers this many hours
 max_window_hours: 72          # a window held by PLATFORM or BUDGET problems is released after this long
 rule_run_at: "06:00"          # daily gold rules run at the first run at or after this time; weekly ones on full_sweep_day
+rule_weekly_day: null         # weekly gold rules' day; null: each dataset's full_sweep_day
 watchdog_grace_minutes: 30    # dre watchdog expects each hour's run to have started (and finished) this long after the hour
+watchdog_owner: null          # whose recipients get watchdog alerts; null: every address in recipients
+compute_budget_scope: check   # check: each check gets compute_budget_minutes; dataset: a dataset's checks share it
+scan_mb_per_minute: null      # cluster throughput; set it to refuse checks whose estimated scan exceeds the budget

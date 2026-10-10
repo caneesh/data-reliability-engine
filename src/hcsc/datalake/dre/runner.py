@@ -96,7 +96,7 @@ def rules_due(spark: SparkSession, config: Config, planned: list[Planned], run_s
     d = config.defaults
     return [p for p in rules
             if is_due(p.check.rule.frequency, run_start, d.rule_run_at, d.timezone,
-                      config.dataset_settings(p.dataset.dataset).full_sweep_day,
+                      d.rule_weekly_day or config.dataset_settings(p.dataset.dataset).full_sweep_day,
                       done.get((p.dataset.dataset, p.check.check_id)))]
 
 
@@ -270,7 +270,7 @@ def refresh_landing(spark: SparkSession, config: Config, work: list[Planned], ru
 
 def evaluate(spark: SparkSession, config: Config, planned: Planned, event: Event,
              landing_problems: dict[str, CheckResult] | None = None, key_secret: bytes | None = None,
-             run_start: datetime | None = None) -> Evaluation:
+             run_start: datetime | None = None, budget_minutes: float | None = None) -> Evaluation:
     ds = planned.dataset
     settings = config.dataset_settings(ds.dataset)
     landing_problem = (landing_problems or {}).get(planned.feed.feed) if planned.feed else None
@@ -279,6 +279,7 @@ def evaluate(spark: SparkSession, config: Config, planned: Planned, event: Event
         upstreams={u: config.datasets[u] for u in ds.key_map if u in config.datasets},
         key_secret=key_secret,
         full_sweep=is_full_sweep(config, ds.dataset, run_start or event.window_end),
+        budget_minutes=budget_minutes, scan_mb_per_minute=config.defaults.scan_mb_per_minute,
     )
     results, duration_ms = run_check(planned.check, ctx, event)
     return Evaluation(planned, event, results, datetime.now(timezone.utc), duration_ms, ctx)
@@ -353,8 +354,14 @@ def email_digests(spark: SparkSession, config: Config, run: runs.Run) -> list[st
     from hcsc.datalake.dre.notify.digest import digests_for_run
     from hcsc.datalake.dre.notify.email import send
 
+    from hcsc.datalake.dre.notify.digest import to_send
+
     try:
-        return send(digests_for_run(spark, config, run), config.defaults.email)
+        digests = digests_for_run(spark, config, run)
+        kept = to_send(digests, config.defaults, run.started_at)
+        skipped = [f"email for {d.owner}: {d.subject} (not sent: email.all_clear_digest is "
+                   f"{config.defaults.email.all_clear_digest})" for d in digests if d not in kept]
+        return send(kept, config.defaults.email) + skipped
     except Exception as exc:
         log.error("could not build the digests for run %s: %s", run.run_id, error_detail(exc))
         return [f"email: not sent ({type(exc).__name__})"]
@@ -426,9 +433,15 @@ def run(spark: SparkSession, conf: str, feed_id: str | None = None, execution_ty
                                                      datetime.now(timezone.utc))])
             written += 1
             print(f"{ds_id} {GAP_CHECK_ID}: DID_NOT_RUN (DATA_UNAVAILABLE/window_gap)")
+        spent: dict[str, float] = {}  # compute_budget_scope dataset: minutes used per dataset this run
         for planned in work:
-            evaluation = evaluate(spark, config, planned, events[planned.dataset.dataset], landing, key_secret,
-                                  run_record.started_at)
+            ds_id = planned.dataset.dataset
+            budget = None
+            if config.defaults.compute_budget_scope == "dataset":
+                budget = config.dataset_settings(ds_id).compute_budget_minutes - spent.get(ds_id, 0.0)
+            evaluation = evaluate(spark, config, planned, events[ds_id], landing, key_secret,
+                                  run_record.started_at, budget)
+            spent[ds_id] = spent.get(ds_id, 0.0) + evaluation.duration_ms / 60000
             try:
                 rows = result_rows(evaluation, run_record, execution_type)
                 append_check_results(spark, db, rows)

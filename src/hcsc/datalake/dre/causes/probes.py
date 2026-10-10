@@ -5,7 +5,8 @@ source: what it reads comes from the feed's `probes:` parameters. All reads only
 - file_value_compare: reads a value from a file (first regex group, else the whole match),
   parses it with `format` and compares it with the failure's partition (the same regex on the
   folder name of each landed file of the failure, or the slot's partition) or with the window.
-  CONFIRMED when the value is later than the partition, or outside the window.
+  CONFIRMED when the value is later than the partition (confirm_when: different: when it differs
+  from it), or outside the window.
 - log_contains: CONFIRMED when a log file matching the glob has a line matching the pattern
   that also names one of the failure's files (base name).
 - table_contains: CONFIRMED when the table has rows matching the condition for the failure's
@@ -86,9 +87,12 @@ def file_value_compare(cx: CauseContext, params: Any, failure: Failure) -> Outco
         partitions.append((failure.slot.isoformat(), _slot_partition(cx, failure, params.format)))
     else:
         return ruled_out(reason="no partition to compare with")
-    later = [text for text, parsed in partitions if value > parsed]
-    evidence = {"value": raw, "partitions": [text for text, _ in partitions]}
-    return confirmed(**evidence, behind=later) if later else ruled_out(**evidence)
+    if params.confirm_when == "different":
+        hits = [text for text, parsed in partitions if value != parsed]
+    else:
+        hits = [text for text, parsed in partitions if value > parsed]
+    evidence = {"value": raw, "partitions": [text for text, _ in partitions], "confirm_when": params.confirm_when}
+    return confirmed(**evidence, matched=hits) if hits else ruled_out(**evidence)
 
 
 def _names(failure: Failure) -> list[str]:

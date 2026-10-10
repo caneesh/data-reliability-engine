@@ -337,3 +337,14 @@ def test_cause_lines() -> None:
     line = CauseLine("DROPPED", False, ("NOT_RUN", "INVALID_KEY"), ("FILTERED",))
     assert line.text() == "cause not proven (DROPPED): ruled out NOT_RUN, INVALID_KEY; not ready FILTERED"
     assert CauseLine("EMPTY_LOAD", False).text() == "cause not proven (EMPTY_LOAD)"
+
+
+def test_file_value_compare_can_confirm_on_any_different_partition(spark, tmp_path) -> None:
+    """confirm_when: different (configurable; the spec's default is later)."""
+    cx = context(spark, gold("causes.unused"), "T1_FILES_NOT_LOADED")
+    failing = Failure("f", files=("file:/data/landing/example_feed/20261001/rt_0001.seq",))
+    params = lambda value, when: FileValueCompare(path=_cursor(tmp_path, value), extract_regex=r"(\d{8})",  # noqa: E731
+                                                  format="yyyyMMdd", compare_to="partition", confirm_when=when)
+    assert file_value_compare(cx, params("20260930", "later"), failing).state == "RULED_OUT"
+    assert file_value_compare(cx, params("20260930", "different"), failing).state == "CONFIRMED"
+    assert file_value_compare(cx, params("20261001", "different"), failing).state == "RULED_OUT"

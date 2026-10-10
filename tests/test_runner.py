@@ -263,3 +263,24 @@ def test_full_sweep_day_is_counted_in_the_default_timezone() -> None:
     assert not is_full_sweep(config, "gold_member_coverage", datetime(2026, 1, 17, 12, tzinfo=timezone.utc))  # Saturday
     # Sunday 03:00 UTC is still Saturday evening in Chicago.
     assert not is_full_sweep(config, "gold_member_coverage", datetime(2026, 1, 18, 3, tzinfo=timezone.utc))
+
+
+def test_weekly_rules_use_rule_weekly_day_when_set(monkeypatch, tmp_path) -> None:
+    import shutil
+
+    from hcsc.datalake.dre.checks.rules import schedule
+    from hcsc.datalake.dre.config.loader import load
+    from hcsc.datalake.dre.runner import plan_rules, rules_due
+    from tests.conftest import REPO_ROOT
+
+    conf = tmp_path / "conf"
+    shutil.copytree(REPO_ROOT / "conf", conf)
+    defaults = conf / "defaults.yaml"
+    defaults.write_text(defaults.read_text(encoding="utf-8").replace("rule_weekly_day: null", "rule_weekly_day: MONDAY"),
+                        encoding="utf-8")
+    config, _ = load(conf)
+    days = []
+    monkeypatch.setattr(schedule, "last_completed", lambda spark, db: {})
+    monkeypatch.setattr(schedule, "is_due", lambda freq, start, at, tz, day, done: days.append(day) or True)
+    rules_due(None, config, plan_rules(config), datetime(2026, 1, 16, tzinfo=timezone.utc))
+    assert set(days) == {"MONDAY"}

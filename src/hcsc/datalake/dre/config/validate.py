@@ -71,6 +71,10 @@ def cross_check(config: Config, feeds_complete: bool = True) -> list[ConfigError
             err("defaults", "defaults", ("hmac_secret_file",), f"hmac_secret_file is inside {root}",
                 "keep the secret in a protected file outside the repository and the conf directory")
 
+    if defaults is not None and defaults.watchdog_owner is not None and defaults.watchdog_owner not in defaults.recipients:
+        err("defaults", "defaults", ("watchdog_owner",), f"watchdog_owner {defaults.watchdog_owner!r} has no recipients",
+            f"add `{defaults.watchdog_owner}: [address]` under recipients, or set watchdog_owner: null")
+
     # Feeds: dataset references, one feed per dataset, owner recipients.
     member_of: dict[str, str] = {}
     for feed_id, feed in config.feeds.items():

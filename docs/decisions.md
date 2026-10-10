@@ -133,6 +133,17 @@ The engine field names chosen in step 2 are in spec section 3. The other assumpt
 5. **Watchdog alerts** go to every address in `recipients` (no separate operations owner is configured; **flag if there should be one**), through the digest's mail relay; with the relay unset the alert is printed and the exit code is still 1. A FAILED final row is an alert as well as `checks_written < checks_expected`.
 6. **Independence.** `watchdog.py` imports only the config loader, the store's name validation and the mail sender; a test checks its imports.
 
+## Packaging (step 11, 2026-10-10)
+
+1. **Artifacts** (`python scripts/package.py`): the wheel; `dre-pyfiles-<version>.zip` with the package for `--py-files`; `dre-deps-<version>-<platform>.zip`, wheels of pydantic, PyYAML and Jinja2 for the cluster's Python and platform (default 3.10, manylinux2014\_x86\_64); `dre_main.py`, the entry point. PySpark is the cluster's.
+2. **Dependencies are installed, not shipped in `--py-files`.** pydantic's core is compiled, and Python cannot import compiled modules from a zip. They are installed once on the driver host from the wheel zip (offline), and runs use `--deploy-mode client`. Executors need only the package itself (for the key-hash function), which the `--py-files` zip carries. **To confirm with the platform team:** client mode on an edge node, and its Python version.
+3. **Namespace packages in the zip.** Python's zip importer cannot resolve native namespace packages, so the `--py-files` zip alone gets pkgutil-style `hcsc/__init__.py` and `hcsc/datalake/__init__.py`, which still merge with other HCSC tools' portions. The source keeps native namespace packages (CLAUDE.md).
+4. **CI** gains a `package` job: it builds the artifacts, installs only PySpark and the dependency wheels (the `dre` package itself is not installed), and runs `validate`, `install --print` and `dry-run` through `spark-submit` from `dist/`.
+
+## Configurable assumptions (2026-10-10)
+
+Asked to make the engine work on its assumptions and make them configurable, until answers come. Each choice where the spec was open is now a setting whose default is the assumption (README, "Settings that carry an assumption"): `email.all_clear_digest` (step 9, item 2), `watchdog_owner` (step 10, item 5), `compute_budget_scope` (step 10, item 1), `scan_mb_per_minute` (step 10, item 3), `rule_weekly_day` (step 7 review, item 2) and the probe parameter `confirm_when` (step 8, item 5: `different` confirms WRONG\_PARTITION for any partition other than the cursor's). Unknown production values (table, column and path names, formats) are not given assumed values: CLAUDE.md forbids inventing them, and they stay null so the dependent checks and causes say DID\_NOT\_RUN or NOT\_READY.
+
 ## Notes for later steps
 
 - **Step 4:** done: `dre dry-run` parses SQL fragments (`config/fragments.py`).

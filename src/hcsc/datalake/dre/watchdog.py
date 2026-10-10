@@ -9,6 +9,7 @@ The expected run is the hour H = (now - watchdog_grace_minutes) floored to the h
 - no dq_run row started in [H, H + 1 hour);
 - a run started then whose latest row is still STARTED more than the grace after it started;
 - a run started then that ended FAILED, or wrote fewer checks than it expected.
+Alerts go to watchdog_owner's recipients, or every address in recipients when it is not set.
 Exit 0 healthy, 1 alert raised (sent, or printed when no mail relay is configured).
 """
 
@@ -110,6 +111,9 @@ def watch(spark: SparkSession, conf: str, now: datetime | None = None) -> int:
     body = "\n".join([subject, "", *[f"- {p}" for p in found], ""])
     for line in found:
         print(f"dre watchdog: {line}")
-    recipients = sorted({address for addresses in defaults.recipients.values() for address in addresses})
+    if defaults.watchdog_owner is not None:
+        recipients = list(defaults.recipients.get(defaults.watchdog_owner, []))
+    else:
+        recipients = sorted({address for addresses in defaults.recipients.values() for address in addresses})
     print(send_text("watchdog", subject, body, recipients, defaults.email))
     return 1

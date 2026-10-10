@@ -102,6 +102,8 @@ class CheckContext:
     upstreams: dict[str, Dataset] = field(default_factory=dict)  # datasets named in this dataset's key_map
     key_secret: bytes | None = None  # HMAC secret for key_hash (from hmac_secret_file); None: no key events
     full_sweep: bool = False  # today is full_sweep_day: hop checks read every key, not only changed ones
+    budget_minutes: float | None = None  # this check's budget; None: settings.compute_budget_minutes
+    scan_mb_per_minute: float | None = None  # throughput to refuse a check up front; None: never
 
 
 class Check(ABC):
@@ -189,6 +191,16 @@ def run_check(check: Check, ctx: CheckContext, event: Event) -> tuple[list[Check
     from hcsc.datalake.dre.checks.budget import BudgetExceeded, estimated_scan_bytes, within_budget
 
     started = time.monotonic()
+    budget = ctx.settings.compute_budget_minutes if ctx.budget_minutes is None else ctx.budget_minutes
+    if budget <= 0:
+        return [did_not_run("budget_exceeded", detail="the dataset's compute budget is spent for this run")], 0
+    if ctx.scan_mb_per_minute is not None:
+        size = estimated_scan_bytes(ctx.spark, ctx.dataset.table)
+        if size is not None and size / 1_000_000 / ctx.scan_mb_per_minute > budget:
+            minutes = size / 1_000_000 / ctx.scan_mb_per_minute
+            return [did_not_run("budget_exceeded", detail=(
+                f"estimated scan {size} bytes at {ctx.scan_mb_per_minute:g} MB a minute would take "
+                f"{minutes:.1f} minutes, over the budget of {budget:g}; not run"))], 0
 
     def work() -> list[CheckResult]:
         failed = preconditions(ctx.spark, ctx.dataset, check.required_columns(ctx.dataset))
@@ -197,7 +209,7 @@ def run_check(check: Check, ctx: CheckContext, event: Event) -> tuple[list[Check
         return check.evaluate(ctx, event) or [did_not_run("empty_population")]
 
     try:
-        results = within_budget(ctx.spark, ctx.settings.compute_budget_minutes, work)
+        results = within_budget(ctx.spark, budget, work)
     except BudgetExceeded as exc:
         size = estimated_scan_bytes(ctx.spark, ctx.dataset.table)
         scan = f"; estimated scan {size} bytes" if size is not None else "; no table statistics for a scan estimate"

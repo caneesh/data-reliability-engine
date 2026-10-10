@@ -196,6 +196,9 @@ class EmailServer(Model):
     smtp_host: NonEmptyStr | None = None
     smtp_port: int = Field(default=25, ge=1, le=65535)
     sender: Email | None = None
+    # An owner's digest with nothing failing or not run ("all clear"): sent every run (spec
+    # default), only from the run starting in the hour from rule_run_at (daily), or never.
+    all_clear_digest: Literal["every_run", "daily", "never"] = "every_run"
 
 
 class Defaults(SettingsOverride):
@@ -217,8 +220,16 @@ class Defaults(SettingsOverride):
     # Gold rules (spec section 6): daily rules run at the first run at or after this local time
     # (defaults.yaml timezone); weekly rules on the dataset's full_sweep_day at this time.
     rule_run_at: TimeOfDay = "06:00"
+    rule_weekly_day: Weekday | None = None  # weekly rules' day; null: the dataset's full_sweep_day
     # The watchdog (spec section 8) expects the hourly run's dq_run rows this long after the hour.
     watchdog_grace_minutes: int = Field(default=30, ge=1, le=59)
+    watchdog_owner: NonEmptyStr | None = None  # whose recipients get watchdog alerts; null: every recipient
+    # Compute budget (spec section 8): each check gets its dataset's compute_budget_minutes
+    # ("check"), or the dataset's checks in a run share it ("dataset").
+    compute_budget_scope: Literal["check", "dataset"] = "check"
+    # With a throughput figure, a check whose table's estimated scan would take longer than its
+    # budget is refused before running (DID_NOT_RUN / budget_exceeded); null: never refused up front.
+    scan_mb_per_minute: float | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")
     def _check(self) -> Defaults:

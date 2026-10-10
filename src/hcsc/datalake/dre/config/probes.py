@@ -49,6 +49,9 @@ class FileValueCompare(Model):
     extract_regex: Regex | None = None
     format: NonEmptyStr | None = None  # Spark datetime pattern for the extracted value, e.g. yyyyMMdd
     compare_to: Literal["partition", "window"] | None = None
+    # partition: CONFIRMED when the file's value is later than the failure's partition (spec
+    # default), or when it differs from it at all ("different").
+    confirm_when: Literal["later", "different"] = "later"
 
 
 class LogContains(Model):

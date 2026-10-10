@@ -86,3 +86,16 @@ def test_the_watchdog_does_not_depend_on_the_main_run_s_code() -> None:
     engine = {m for m in imported if m and m.startswith("hcsc.datalake.dre")}
     assert engine == {"hcsc.datalake.dre.store.names", "hcsc.datalake.dre.config.loader",
                       "hcsc.datalake.dre.notify.email"}
+
+
+def test_watchdog_owner_gets_the_alerts(spark, tmp_path, capsys) -> None:
+    replay = replay_conf(spark, tmp_path, "r12_owner", {"defaults.yaml": [
+        ("watchdog_owner: null", "watchdog_owner: provider-data")]})
+    code, out = watchdog(replay, capsys)
+    assert code == 1 and "email for watchdog" in out
+    from hcsc.datalake.dre.config.validate import validate_conf
+
+    (replay.conf / "defaults.yaml").write_text((replay.conf / "defaults.yaml").read_text(encoding="utf-8").replace(
+        "watchdog_owner: provider-data", "watchdog_owner: nobody"), encoding="utf-8")
+    _, errors, _ = validate_conf(replay.conf)
+    assert [e.field for e in errors] == ["watchdog_owner"]

@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from jinja2 import Environment, PackageLoader, StrictUndefined
@@ -92,8 +92,12 @@ class Digest:
         return sum(1 for i in self.changed if i.state == "FAILED")
 
     @property
+    def all_clear(self) -> bool:
+        return not (self.new_failures or self.did_not_run or self.still_failing)
+
+    @property
     def subject(self) -> str:
-        if not (self.new_failures or self.did_not_run or self.still_failing):
+        if self.all_clear:
             return f"DRE {self.environment}: all clear"
         return (f"DRE {self.environment}: {self.new_failures} new failures, "
                 f"{len(self.did_not_run)} checks did not run")
@@ -288,3 +292,18 @@ def build_digests(config: Config, run: Run, data: dict[str, Any]) -> list[Digest
 
 def digests_for_run(spark: SparkSession, config: Config, run: Run) -> list[Digest]:
     return build_digests(config, run, read_run(spark, config.defaults.dq_database, run.run_id))
+
+
+def to_send(digests: list[Digest], defaults, run_started: datetime) -> list[Digest]:
+    """The digests to send: an all-clear digest only as email.all_clear_digest allows (every run,
+    once a day from the run starting in the hour from rule_run_at, or never)."""
+    from zoneinfo import ZoneInfo
+
+    mode = defaults.email.all_clear_digest
+    if mode == "every_run":
+        return list(digests)
+    local = as_utc(run_started).astimezone(ZoneInfo(defaults.timezone))
+    hour, minute = (int(p) for p in defaults.rule_run_at.split(":"))
+    start = local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    daily_run = start <= local < start + timedelta(hours=1)
+    return [d for d in digests if not d.all_clear or (mode == "daily" and daily_run)]

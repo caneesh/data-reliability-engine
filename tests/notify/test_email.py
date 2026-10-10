@@ -55,3 +55,20 @@ def test_a_failed_send_is_reported(monkeypatch) -> None:
     monkeypatch.setattr(email.smtplib, "SMTP", Down)
     server = EmailServer(smtp_host="relay.example.com", sender="dre@example.com")
     assert email.send([digest()], server) == ["email for membership-gold: not sent (ConnectionRefusedError)"]
+
+
+def test_all_clear_digests_follow_the_setting() -> None:
+    from hcsc.datalake.dre.config.models import Defaults
+    from hcsc.datalake.dre.notify.digest import to_send
+
+    clear, failing = digest(), digest()
+    failing.did_not_run.append(object())
+    base = {"dq_database": "dq", "environment": "dev", "timezone": "UTC", "rule_run_at": "06:00",
+            "retention_months": {t: 13 for t in ("dq_run", "dq_check_result", "dq_cause_result", "dq_key_event",
+                                                  "dq_file")}}
+    at = lambda mode: Defaults(**base, email={"all_clear_digest": mode})  # noqa: E731
+    six_thirty, noon = datetime(2026, 1, 16, 6, 30, tzinfo=timezone.utc), datetime(2026, 1, 16, 12, tzinfo=timezone.utc)
+    assert to_send([clear, failing], at("every_run"), noon) == [clear, failing]
+    assert to_send([clear, failing], at("never"), six_thirty) == [failing]
+    assert to_send([clear, failing], at("daily"), six_thirty) == [clear, failing]
+    assert to_send([clear, failing], at("daily"), noon) == [failing]
