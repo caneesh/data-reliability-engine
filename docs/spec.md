@@ -60,6 +60,7 @@ data-reliability-engine/
           checks/
             rules/schedule.py  # when a gold rule is due (frequency)
             base.py          # Check interface, result building, denominator rule, preconditions, run_check
+            budget.py        # compute budget: a check in its own Spark job group, cancelled when over
             keys.py          # key expressions with key_normalise applied
             times.py         # time columns to UTC; window bounds truncated to granularity
             cadence.py       # cadence slots (expected loads) in UTC
@@ -96,6 +97,7 @@ data-reliability-engine/
             digest.txt.j2    # the digest's plain-text layout
             email.py         # sender (SMTP, standard library)
           trace.py           # dre trace: one key along the upstream chain
+          watchdog.py        # dre watchdog: reads dq_run only; no dependency on the run's code
   conf/
     defaults.yaml
     feeds/  datasets/  rules/
@@ -170,6 +172,8 @@ compute_budget_minutes: 8
 ```
 
 **Table-wide datasets.** A dataset that no feed lists covers a whole table, for example to run gold rules across every source system. It must set `owner` (whose recipients get its results) and `expectation_version` (it has no feed to take one from), has no `feed_filter`, and takes its settings from `defaults.yaml`. It gets the checks in `patterns/table_wide.yaml`: T1\_SCHEMA\_DRIFT, T1\_KEY\_NULLS and T1\_KEY\_DUPLICATES only, plus gold rules. A dataset that a feed lists takes its owner and expectation version from the feed and must set neither. Each dataset is listed by at most one feed.
+
+**Watchdog** (in `defaults.yaml`): `watchdog_grace_minutes` (default 30).
 
 **Defaults for time and windows** (in `defaults.yaml`, overridable per feed or dataset where noted): `timezone` (IANA name for time columns that do not set their own; not overridable), `settle_minutes` (default 15), `initial_lookback_hours` (default 24) and `max_window_hours` (default 72), all used by event windows (section 4), and `rule_run_at` (default `"06:00"`, local time in `timezone`; not overridable), when daily and weekly gold rules fall due.
 
@@ -470,9 +474,9 @@ Digest details:
 
 **Scheduling.** `dre run` is scheduled hourly; there is no per-feed schedule. Each run decides which feeds are due (see the command table) and skips the rest, writing nothing for them; a skipped feed's window simply carries on to the next run that evaluates it. A feed's `check_delay_minutes` (default 0) moves its window end back, so a slot is judged only once its deadline plus the delay has passed. Table-wide datasets run when a due feed's dataset shares their table, and every run when no feed dataset covers their table.
 
-**Watchdog.** A separate entry point with no dependency on the main run's code beyond the store schema. The expected run times are every hour. It alerts when no `dq_run` row exists for an expected hour plus grace, when a run's latest row is still STARTED after the grace, or when `checks_written < checks_expected`. Schedule it separately from the main run (a different scheduler folder or host), so one scheduling failure doesn't stop both.
+**Watchdog.** A separate entry point with no dependency on the main run's code beyond the store schema. The expected run times are every hour. It alerts when no `dq_run` row exists for an expected hour plus grace, when a run's latest row is still STARTED after the grace, or when `checks_written < checks_expected`. Grace is `watchdog_grace_minutes` in `defaults.yaml` (default 30). Each watchdog run judges one hour: now minus the grace, floored to the hour; a run ending FAILED is an alert too. The alert goes to every address in `recipients`, by the same mail relay as the digest (printed, and not sent, while the relay is unset); if `dq_run` cannot be read, that is the alert. It writes nothing. Schedule it separately from the main run (a different scheduler folder or host), so one scheduling failure doesn't stop both.
 
-**Compute budget.** Each dataset has `compute_budget_minutes`. Before running, estimate the scan size from partition statistics; if a check exceeds its budget, cancel it and record DID\_NOT\_RUN / budget\_exceeded. Hop checks read only keys changed in the window, plus a full sweep on the day set by `full_sweep_day` (default Sunday).
+**Compute budget.** Each dataset has `compute_budget_minutes`. Before running, estimate the scan size from partition statistics; if a check exceeds its budget, cancel it and record DID\_NOT\_RUN / budget\_exceeded. Each check gets its dataset's full budget and runs in its own Spark job group; when the budget runs out the group is cancelled (its running Spark jobs are interrupted) and the result's `detail` gives the budget and the table's estimated scan size from Spark's table statistics (or says there are none). BUDGET holds the window, so the span is evaluated again, up to `max_window_hours` (section 4). Hop checks read only keys changed in the window, plus a full sweep on the day set by `full_sweep_day` (default Sunday).
 
 ## 9. Testing
 

@@ -124,6 +124,15 @@ The engine field names chosen in step 2 are in spec section 3. The other assumpt
 6. **Missing groups** are judged only on configured group columns (the dataset's or rule's `group_by`, and `upstream`): T1\_VOLUME's groups name the slot's date, so last run's slots are never "missing".
 7. **Trace** prints layers most upstream first and finds the first hop with the key missing or at an older record time. Its cause line is the latest HOP\_KEY\_CURRENCY cause for the key's `key_hash` at that hop, so it needs `hmac_secret_file`. Key values on the command line are split on commas (a value containing a comma cannot be traced). Bad input exits 3, like `dre run` when it cannot start.
 
+## Watchdog and budgets (step 10, 2026-10-10)
+
+1. **Budget per check.** "If a check exceeds its budget" read as each check getting its dataset's whole `compute_budget_minutes` (not one budget shared by the dataset's checks in a run). **Flag if a shared budget per dataset is meant.**
+2. **Cancelling.** Each check runs in its own Spark job group in a worker thread; at the budget the group is cancelled with interrupt, which stops its running Spark jobs. Python work inside the check cannot be interrupted; it is abandoned and its result ignored.
+3. **Scan estimate.** The spec asks to estimate the scan size before running, but turning bytes into minutes needs the cluster's throughput, which nobody has given. The estimate (Spark's table statistics, present when the metastore has them, e.g. after ANALYZE TABLE) is recorded in a budget\_exceeded result's detail; checks are not refused up front. **To confirm with the platform team:** a throughput figure, if checks should be refused before running.
+4. **Watchdog hour and grace.** One hour judged per watchdog run: (now − `watchdog_grace_minutes`), floored to the hour; grace 30 minutes by default. A run that started late and is still within its grace is not an alert; if it is still STARTED at the next watchdog run it falls outside the judged hour and is not reported again (a known gap, to keep the watchdog stateless).
+5. **Watchdog alerts** go to every address in `recipients` (no separate operations owner is configured; **flag if there should be one**), through the digest's mail relay; with the relay unset the alert is printed and the exit code is still 1. A FAILED final row is an alert as well as `checks_written < checks_expected`.
+6. **Independence.** `watchdog.py` imports only the config loader, the store's name validation and the mail sender; a test checks its imports.
+
 ## Notes for later steps
 
 - **Step 4:** done: `dre dry-run` parses SQL fragments (`config/fragments.py`).

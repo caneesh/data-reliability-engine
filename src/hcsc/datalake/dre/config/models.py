@@ -217,6 +217,8 @@ class Defaults(SettingsOverride):
     # Gold rules (spec section 6): daily rules run at the first run at or after this local time
     # (defaults.yaml timezone); weekly rules on the dataset's full_sweep_day at this time.
     rule_run_at: TimeOfDay = "06:00"
+    # The watchdog (spec section 8) expects the hourly run's dq_run rows this long after the hour.
+    watchdog_grace_minutes: int = Field(default=30, ge=1, le=59)
 
     @model_validator(mode="after")
     def _check(self) -> Defaults:

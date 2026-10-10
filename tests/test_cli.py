@@ -12,7 +12,12 @@ def test_no_command_prints_help(capsys: pytest.CaptureFixture[str]) -> None:
         assert name in out
 
 
-@pytest.mark.parametrize("command", sorted(set(COMMANDS) - {"validate", "install", "run", "dry-run", "trace"}))
-def test_unbuilt_command_reports_not_built(command: str, capsys: pytest.CaptureFixture[str]) -> None:
-    assert main([command]) == 3
-    assert "not built yet" in capsys.readouterr().err
+def test_every_command_is_built() -> None:
+    """Step 10 builds the last one (watchdog): no subcommand falls through to "not built yet"."""
+    import inspect
+
+    from hcsc.datalake.dre import cli
+
+    source = inspect.getsource(cli.main)
+    for name in COMMANDS:
+        assert f'"{name}"' in source, name

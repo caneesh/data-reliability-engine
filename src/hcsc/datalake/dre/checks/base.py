@@ -184,14 +184,24 @@ def preconditions(spark: SparkSession, dataset: Dataset, columns: list[str]) -> 
 
 
 def run_check(check: Check, ctx: CheckContext, event: Event) -> tuple[list[CheckResult], int]:
-    """(results, duration_ms). Never raises: a failure is a DID_NOT_RUN result."""
+    """(results, duration_ms). Never raises: a failure is a DID_NOT_RUN result. The check runs
+    within its dataset's compute_budget_minutes (checks/budget.py)."""
+    from hcsc.datalake.dre.checks.budget import BudgetExceeded, estimated_scan_bytes, within_budget
+
     started = time.monotonic()
-    try:
+
+    def work() -> list[CheckResult]:
         failed = preconditions(ctx.spark, ctx.dataset, check.required_columns(ctx.dataset))
         if failed is not None:
-            results = [failed]
-        else:
-            results = check.evaluate(ctx, event) or [did_not_run("empty_population")]
+            return [failed]
+        return check.evaluate(ctx, event) or [did_not_run("empty_population")]
+
+    try:
+        results = within_budget(ctx.spark, ctx.settings.compute_budget_minutes, work)
+    except BudgetExceeded as exc:
+        size = estimated_scan_bytes(ctx.spark, ctx.dataset.table)
+        scan = f"; estimated scan {size} bytes" if size is not None else "; no table statistics for a scan estimate"
+        results = [did_not_run("budget_exceeded", detail=f"{exc}{scan}")]
     except Exception as exc:
         results = [from_exception(exc)]
     return results, int((time.monotonic() - started) * 1000)

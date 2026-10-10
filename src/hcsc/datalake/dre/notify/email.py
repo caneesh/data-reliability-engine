@@ -18,30 +18,30 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-def message(digest: Digest, sender: str) -> EmailMessage:
+def message(subject: str, body: str, recipients: list[str], sender: str) -> EmailMessage:
     msg = EmailMessage()
-    msg["Subject"] = digest.subject
+    msg["Subject"] = subject
     msg["From"] = sender
-    msg["To"] = ", ".join(digest.recipients)
-    msg.set_content(digest.text())
+    msg["To"] = ", ".join(recipients)
+    msg.set_content(body)
     return msg
 
 
-def send(digests: list[Digest], server: EmailServer) -> list[str]:
-    """Send each digest; return one status line per digest. Never raises: a failed send is reported."""
-    lines = []
+def send_text(owner: str, subject: str, body: str, recipients: list[str], server: EmailServer) -> str:
+    """Send one plain-text email; return a status line. Never raises: a failed send is reported."""
     if server.smtp_host is None or server.sender is None:
-        return [f"email for {d.owner}: {d.subject} (not sent: email.smtp_host and email.sender are not set)"
-                for d in digests]
-    for digest in digests:
-        if not digest.recipients:
-            lines.append(f"email for {digest.owner}: not sent (no recipients)")
-            continue
-        try:
-            with smtplib.SMTP(server.smtp_host, server.smtp_port, timeout=30) as smtp:
-                smtp.send_message(message(digest, server.sender))
-            lines.append(f"email for {digest.owner}: {digest.subject} (sent to {len(digest.recipients)})")
-        except (OSError, smtplib.SMTPException) as exc:
-            log.error("could not send the digest for %s: %s", digest.owner, type(exc).__name__)
-            lines.append(f"email for {digest.owner}: not sent ({type(exc).__name__})")
-    return lines
+        return f"email for {owner}: {subject} (not sent: email.smtp_host and email.sender are not set)"
+    if not recipients:
+        return f"email for {owner}: not sent (no recipients)"
+    try:
+        with smtplib.SMTP(server.smtp_host, server.smtp_port, timeout=30) as smtp:
+            smtp.send_message(message(subject, body, recipients, server.sender))
+    except (OSError, smtplib.SMTPException) as exc:
+        log.error("could not send the email for %s: %s", owner, type(exc).__name__)
+        return f"email for {owner}: not sent ({type(exc).__name__})"
+    return f"email for {owner}: {subject} (sent to {len(recipients)})"
+
+
+def send(digests: list[Digest], server: EmailServer) -> list[str]:
+    """Send each digest; return one status line per digest."""
+    return [send_text(d.owner, d.subject, d.text(), d.recipients, server) for d in digests]

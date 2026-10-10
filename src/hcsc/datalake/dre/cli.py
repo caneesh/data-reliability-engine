@@ -1,8 +1,7 @@
 """Command line entry point for `dre` (spec section 8).
 
-`validate` (step 2), `install` (step 3), `run` and `dry-run` (steps 4 to 9) and
-`trace` (step 9) are built. `watchdog` is filled in by build step 10 and until
-then says so.
+Every subcommand is built: `validate` (step 2), `install` (step 3), `run` and
+`dry-run` (steps 4 to 9), `trace` (step 9) and `watchdog` (step 10).
 """
 
 from __future__ import annotations
@@ -31,7 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
     for name, (help_text, step) in COMMANDS.items():
         cmd = sub.add_parser(name, help=f"{help_text} (build step {step})")
-        if name in ("validate", "install", "run", "dry-run", "trace"):
+        if name in ("validate", "install", "run", "dry-run", "trace", "watchdog"):
             cmd.add_argument("--conf", default="conf", help=CONF_HELP)
         if name == "dry-run":
             cmd.add_argument("--feed", required=True, help="the feed to check")
@@ -108,6 +107,11 @@ def main(argv: list[str] | None = None) -> int:
         from hcsc.datalake.dre.trace import run_trace
 
         return run_trace(get_spark(), args.conf, args.dataset, args.key)
+    if args.command == "watchdog":
+        from hcsc.datalake.dre.session import get_spark
+        from hcsc.datalake.dre.watchdog import watch
+
+        return watch(get_spark("dre-watchdog"), args.conf)
     _, step = COMMANDS[args.command]
     print(f"dre {args.command}: not built yet (build step {step})", file=sys.stderr)
     return 3
