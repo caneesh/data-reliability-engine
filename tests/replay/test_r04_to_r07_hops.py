@@ -188,3 +188,35 @@ def test_hops_pass_when_gold_is_current_and_agrees(spark, tmp_path) -> None:
     assert hop(spark, replay, "HOP_KEY_CURRENCY").state == "PASSED"
     assert hop(spark, replay, "HOP_VALUE_AGREEMENT").state == "PASSED"
     assert key_events(spark, replay) == []
+
+
+def test_r05_trace_shows_gold_older_than_curated_and_the_cause(spark, tmp_path, capsys) -> None:
+    """Build step 9: `dre trace` for R05's key, layer by layer, ending with the hop's cause."""
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
+
+    replay = setup(spark, tmp_path, "r05_trace")
+    opened, terminated = curated_load_time(30), curated_load_time(12)
+    gold_loaded = gold_load_time(29)
+    create_table(spark, replay.curated, CURATED_COLUMNS,
+                 [curated_row(updated=opened), curated_row(end="2026-06-30", updated=terminated)])
+    create_table(spark, replay.gold, GOLD_COLUMNS, [gold_row(record=opened, loaded=gold_loaded)])
+    assert main(["run", "--conf", str(replay.conf)]) == 0
+    capsys.readouterr()
+
+    # The gold key as gold writes it (zero-padded); trace normalises it for each layer.
+    assert main(["trace", "--conf", str(replay.conf), "--dataset", "gold_member_coverage",
+                 "--key", "000123401,01,2026-01-01,AGR-A"]) == 0
+    chicago = ZoneInfo("America/Chicago")
+    utc = lambda naive: naive.replace(tzinfo=chicago).astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")  # noqa: E731
+    loaded = datetime.strptime(gold_loaded, "%Y-%m-%d %H:%M:%S:000000")
+    out = capsys.readouterr().out
+    assert out.splitlines() == [
+        f"example_curated_enrollment ({replay.curated}): present, 2 rows; record {utc(terminated)}; "
+        f"loaded {utc(terminated)}; file -",
+        f"gold_member_coverage ({replay.gold}): present, 1 row; record {utc(opened)}; loaded {utc(loaded)}; file -",
+        "first gap: example_curated_enrollment -> gold_member_coverage: gold_member_coverage holds an older "
+        "version (STALE)",
+        "cause: NOT_RUN (confirmed)",
+    ]
+    assert "123401" not in out and "AGR-A" not in out  # the key itself is never printed

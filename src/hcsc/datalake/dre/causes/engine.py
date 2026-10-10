@@ -128,13 +128,13 @@ class CauseLine:
     errors: tuple[str, ...] = ()
 
     def text(self) -> str:
-        """`cause: FILE_SKIPPED (confirmed)`, or `cause: DROPPED (not proven): ruled out NOT_RUN;
-        not ready FILTERED` (spec section 8)."""
+        """The spec's cause line (section 8): `cause: FILE_SKIPPED (confirmed)`, or `cause not proven
+        (DROPPED): ruled out NOT_RUN, INVALID_KEY; not ready FILTERED`, naming the fallback."""
         if self.proven:
             return f"cause: {self.code} (confirmed)"
         parts = [f"{label} {', '.join(codes)}" for label, codes in
                  (("ruled out", self.ruled_out), ("not ready", self.not_ready), ("error", self.errors)) if codes]
-        return f"cause: {self.code} (not proven)" + (": " + "; ".join(parts) if parts else "")
+        return f"cause not proven ({self.code})" + (": " + "; ".join(parts) if parts else "")
 
 
 def resolve(rows: list[dict[str, Any]], ft: FailureType) -> CauseLine:

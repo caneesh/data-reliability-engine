@@ -335,5 +335,5 @@ def test_a_failure_that_cannot_be_listed_is_error_for_every_cause(spark) -> None
 def test_cause_lines() -> None:
     assert CauseLine("FILE_SKIPPED", True).text() == "cause: FILE_SKIPPED (confirmed)"
     line = CauseLine("DROPPED", False, ("NOT_RUN", "INVALID_KEY"), ("FILTERED",))
-    assert line.text() == "cause: DROPPED (not proven): ruled out NOT_RUN, INVALID_KEY; not ready FILTERED"
-    assert CauseLine("EMPTY_LOAD", False).text() == "cause: EMPTY_LOAD (not proven)"
+    assert line.text() == "cause not proven (DROPPED): ruled out NOT_RUN, INVALID_KEY; not ready FILTERED"
+    assert CauseLine("EMPTY_LOAD", False).text() == "cause not proven (EMPTY_LOAD)"

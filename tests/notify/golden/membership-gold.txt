@@ -1,0 +1,33 @@
+DRE dev: 4 new failures, 2 checks did not run
+Run 00000000-0000-0000-0000-000000000003, started 2026-01-16 12:05 UTC, for membership-gold.
+
+Changed since the last run
+- example_curated_enrollment HOP_FILE_COMPLETENESS [upstream=example_raw_enrollment]: first result -> FAILED
+    observed: 1 of 4 upstream files have fewer rows here; expected: every upstream row of each file present here
+    cause not proven (DROPPED): ruled out NOT_RUN, FILE_SKIPPED, INVALID_KEY; not ready FILTERED, REJECTED
+- example_curated_enrollment T1_KEY_DUPLICATES: FAILED -> PASSED
+- gold_member_coverage HOP_KEY_CURRENCY [upstream=example_curated_enrollment]: PASSED -> FAILED
+    observed: 0 missing and 1 stale of 1 keys; expected: every upstream key present at its latest version
+    cause: NOT_RUN (confirmed)
+    sample keys (key_hash): aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+- gold_member_coverage T1_KEY_DUPLICATES [src_sys_nm=SRC_A]: PASSED -> FAILED
+    observed: 1 of 3 keys have more than one row; expected: every key at most once
+- gold_member_coverage T1_ON_TIME: PASSED -> FAILED
+    observed: 2 of 2 due loads had no load within the SLA; expected: a load within 8 hours of each cadence slot
+    T1_ZERO_ROWS failed for the same 2 loads (shown once)
+    cause: PIPELINE_STALLED (confirmed) [2 failing]
+- gold_member_coverage T1_KEY_DUPLICATES [src_sys_nm=SRC_B]: not reported this run (was PASSED)
+
+Did not run
+- example_curated_enrollment T1_ON_TIME: CONFIGURATION/invalid_config
+- gold_member_coverage WINDOW_GAP: DATA_UNAVAILABLE/window_gap
+
+Still failing
+- gold_member_coverage T1_KEY_NULLS [src_sys_nm=SRC_A]: failing since 2026-01-14
+- gold_member_coverage one_row_per_coverage [src_sys_nm=SRC_A]: failing since 2026-01-15, 3 violations (was 1)
+
+Report only (proposed rules)
+- gold_member_coverage end_not_before_start [src_sys_nm=SRC_A]: PASSED, 0 violations (baseline)
+- gold_member_coverage one_open_row_per_coverage [src_sys_nm=SRC_A]: FAILED, 2 violations (was 0)
+
+Passing checks: 2

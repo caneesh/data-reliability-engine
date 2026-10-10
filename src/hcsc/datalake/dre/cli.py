@@ -1,9 +1,8 @@
 """Command line entry point for `dre` (spec section 8).
 
-`validate` (step 2), `install` (step 3), and `run` and `dry-run` (checks and
-results, step 4; causes and email follow in steps 8 and 9) are built. Each
-other subcommand is filled in by the build step named in its help text (spec
-section 10) and until then says so.
+`validate` (step 2), `install` (step 3), `run` and `dry-run` (steps 4 to 9) and
+`trace` (step 9) are built. `watchdog` is filled in by build step 10 and until
+then says so.
 """
 
 from __future__ import annotations
@@ -32,10 +31,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
     for name, (help_text, step) in COMMANDS.items():
         cmd = sub.add_parser(name, help=f"{help_text} (build step {step})")
-        if name in ("validate", "install", "run", "dry-run"):
+        if name in ("validate", "install", "run", "dry-run", "trace"):
             cmd.add_argument("--conf", default="conf", help=CONF_HELP)
         if name == "dry-run":
             cmd.add_argument("--feed", required=True, help="the feed to check")
+        if name == "trace":
+            cmd.add_argument("--dataset", required=True, help="the dataset to start from")
+            cmd.add_argument("--key", required=True, help='the key values in the dataset\'s key order, "k1,k2,..."')
         if name == "run":
             cmd.add_argument("--feed", help="run one feed only (default: all feeds)")
             cmd.add_argument("--execution-type", default="NORMAL", choices=("NORMAL", "RERUN", "REPLAY"))
@@ -101,6 +103,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "run":
             return runner.run(get_spark(), args.conf, args.feed, args.execution_type)
         return runner.dry_run(get_spark(), args.conf, args.feed)
+    if args.command == "trace":
+        from hcsc.datalake.dre.session import get_spark
+        from hcsc.datalake.dre.trace import run_trace
+
+        return run_trace(get_spark(), args.conf, args.dataset, args.key)
     _, step = COMMANDS[args.command]
     print(f"dre {args.command}: not built yet (build step {step})", file=sys.stderr)
     return 3

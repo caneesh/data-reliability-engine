@@ -12,7 +12,7 @@ def test_no_command_prints_help(capsys: pytest.CaptureFixture[str]) -> None:
         assert name in out
 
 
-@pytest.mark.parametrize("command", sorted(set(COMMANDS) - {"validate", "install", "run", "dry-run"}))
+@pytest.mark.parametrize("command", sorted(set(COMMANDS) - {"validate", "install", "run", "dry-run", "trace"}))
 def test_unbuilt_command_reports_not_built(command: str, capsys: pytest.CaptureFixture[str]) -> None:
     assert main([command]) == 3
     assert "not built yet" in capsys.readouterr().err

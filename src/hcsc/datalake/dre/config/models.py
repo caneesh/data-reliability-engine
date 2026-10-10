@@ -189,6 +189,15 @@ class Settings(Model):
 # --- defaults.yaml ---
 
 
+class EmailServer(Model):
+    """Where the digest is sent from (spec section 8). smtp_host null: digests are built but not
+    sent (the run says so). Values come from the platform team (spec section 11)."""
+
+    smtp_host: NonEmptyStr | None = None
+    smtp_port: int = Field(default=25, ge=1, le=65535)
+    sender: Email | None = None
+
+
 class Defaults(SettingsOverride):
     dq_database: Annotated[str, AfterValidator(_dq_database)]
     environment: NonEmptyStr
@@ -196,6 +205,7 @@ class Defaults(SettingsOverride):
     hmac_secret_file: str | None = None
     retention_months: dict[str, Annotated[int, Field(ge=1)]]
     recipients: dict[NonEmptyStr, Annotated[list[Email], Field(min_length=1)]] = {}
+    email: EmailServer = EmailServer()
     # Spec defaults (sections 6 and 8, constraint 6).
     email_sample_keys: bool | None = False
     volume_tolerance_pct: float | None = Field(default=50, gt=0)

@@ -17,6 +17,10 @@ retention_months:             # spec section 5: results and events 7 years, file
 recipients:                   # feed owner -> email addresses (spec section 8)
   membership-gold: [dre-alerts@example.com]
   provider-data: [provider-data-alerts@example.com]
+email:                        # mail relay for the digest; not yet confirmed (spec section 11):
+  smtp_host: null             # null: digests are built but not sent
+  smtp_port: 25
+  sender: null
 
 # Settings
 sla_hours: 8

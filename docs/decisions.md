@@ -114,6 +114,16 @@ The engine field names chosen in step 2 are in spec section 3. The other assumpt
 12. **`log_contains`** matches the pattern with Spark's (Java) regex; `dre validate` compiles it with Python's. Simple patterns behave the same; flag if the real pattern uses syntax where they differ.
 13. **Cause checks never stop the run.** A probe that raises is ERROR; if the failing things cannot be listed, every cause check is written as ERROR; a failed cause write is logged (exception type only) and the run continues.
 
+## Email and trace (step 9, 2026-10-10)
+
+1. **Sending.** The spec names a sender but no mail relay. `defaults.yaml` gets `email: {smtp_host, smtp_port, sender}` (standard-library SMTP, no service of ours); null until the platform team confirms the relay (added to spec section 11). Until then each run prints, per owner, the subject and "not sent".
+2. **One digest per owner per run**, holding only that owner's results (the feed's owner; a table-wide dataset's owner; a rule's owner for its results). An owner with nothing evaluated in a run gets no digest. **Flag:** with the hourly run (genericity review) this is up to 24 digests a day per owner, and a DID\_NOT\_RUN for a configuration problem appears in each. Say if you want, for example, all-clear digests only once a day.
+3. **What counts.** New failures: results FAILED now whose previous result was not FAILED (a first result that FAILED counts). Did not run: every DID\_NOT\_RUN this run, including WINDOW\_GAP. `all clear` only when nothing is newly failing, still failing or did not run. Proposed rules are report only and never counted; approved rules count like checks.
+4. **Cause line** follows the spec's form and also names the fallback: `cause not proven (DROPPED): ruled out …`. `dre run` prints the same lines.
+5. **One alert for T1\_ON\_TIME and T1\_ZERO\_ROWS** when every short load of T1\_ZERO\_ROWS is also a missed load of T1\_ON\_TIME (a missed load always writes zero rows); shown under T1\_ON\_TIME with a note. A T1\_ZERO\_ROWS with other short loads keeps its own alert.
+6. **Missing groups** are judged only on configured group columns (the dataset's or rule's `group_by`, and `upstream`): T1\_VOLUME's groups name the slot's date, so last run's slots are never "missing".
+7. **Trace** prints layers most upstream first and finds the first hop with the key missing or at an older record time. Its cause line is the latest HOP\_KEY\_CURRENCY cause for the key's `key_hash` at that hop, so it needs `hmac_secret_file`. Key values on the command line are split on commas (a value containing a comma cannot be traced). Bad input exits 3, like `dre run` when it cannot start.
+
 ## Notes for later steps
 
 - **Step 4:** done: `dre dry-run` parses SQL fragments (`config/fragments.py`).
@@ -121,8 +131,7 @@ The engine field names chosen in step 2 are in spec section 3. The other assumpt
 - **Step 6:** done: T1\_FILES\_NOT\_LOADED is in `patterns/file_cyclic.yaml` and `patterns/file_periodic.yaml`.
 - **Step 6 (open):** a dataset with `partition_column` but no `load_time` may use the partition value as its load time, at the partition's granularity. Waiting on the developer to confirm whether the raw table has a load-time column; until then such a dataset's load-time checks stay DID\_NOT\_RUN / invalid\_config.
 - **Step 7:** done: on the full sweep, open keys no longer found upstream get CLEARED with `state_detail` "no longer upstream".
-- **Step 9:** when T1\_ON\_TIME and T1\_ZERO\_ROWS both fail for the same slot, the digest shows one alert, not two.
-- **Step 9:** the digest reports groups (`group_values`) that were present in the previous run and are missing now, since `v_latest_result` shows only the latest evaluation's groups.
+- **Step 9:** done: one alert when T1\_ON\_TIME and T1\_ZERO\_ROWS fail for the same loads; groups missing since the previous run are listed.
 - **Step 10:** `dre retention` is a separate command, scheduled weekly. By default it lists the partitions it would drop under each table's `retention_months`; `--apply` drops them through `store/retention.py`.
 
 ## Guard rules: reasons (decided after step 1, 2026-10-09)

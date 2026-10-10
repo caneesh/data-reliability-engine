@@ -1,7 +1,7 @@
 """`dre run` and `dre dry-run`: preconditions, checks and results (spec section 8).
 
-Build step 4 runs the checks and appends their results; causes (step 8) and
-the email digest (step 9) come later. A check never stops the run: run_check
+It runs the checks, appends their results, explains failures (causes) and
+emails one digest per owner. A check never stops the run: run_check
 turns any failure into DID_NOT_RUN, and a failed write leaves the run PARTIAL.
 """
 
@@ -348,6 +348,18 @@ def explain_failures(spark: SparkSession, config: Config, evaluation: Evaluation
     return lines
 
 
+def email_digests(spark: SparkSession, config: Config, run: runs.Run) -> list[str]:
+    """Build this run's digests from the store and send them; never stops the run."""
+    from hcsc.datalake.dre.notify.digest import digests_for_run
+    from hcsc.datalake.dre.notify.email import send
+
+    try:
+        return send(digests_for_run(spark, config, run), config.defaults.email)
+    except Exception as exc:
+        log.error("could not build the digests for run %s: %s", run.run_id, error_detail(exc))
+        return [f"email: not sent ({type(exc).__name__})"]
+
+
 def describe(evaluation: Evaluation) -> list[str]:
     """Counts, check ids and table names only (hard rule 6)."""
     p = evaluation.planned
@@ -432,6 +444,8 @@ def run(spark: SparkSession, conf: str, feed_id: str | None = None, execution_ty
         log.error("run %s failed: %s", run_record.run_id, error_detail(exc))
         runs.finish_run(spark, db, run_record, expected, written, failed=True)
         return EXIT_PARTIAL
+    for line in email_digests(spark, config, run_record):
+        print(line)
     status = runs.finish_run(spark, db, run_record, expected, written)
     print(f"dre run: {status}, {written} of {expected} checks written (run {run_record.run_id})")
     return EXIT_COMPLETED if status == runs.COMPLETED else EXIT_PARTIAL

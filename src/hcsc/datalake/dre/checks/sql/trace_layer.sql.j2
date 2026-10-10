@@ -1,0 +1,16 @@
+{# dre trace: one key in one layer (after its feed_filter): how many rows hold it, and the record
+   time, load time and file of the latest version (UTC). Key parts are compared normalised. #}
+SELECT COUNT(*) AS row_count,
+       MAX_BY(record_ts, record_ts) AS record_ts,
+       MAX_BY(load_ts, record_ts) AS load_ts,
+       MAX_BY(file_name, record_ts) AS file_name
+FROM (
+  SELECT {{ record_expr }} AS record_ts,
+         {% if load_expr %}{{ load_expr }}{% else %}CAST(NULL AS TIMESTAMP){% endif %} AS load_ts,
+         {% if file_column %}regexp_extract({{ file_column }}, '([^/]+)$', 1){% else %}CAST(NULL AS STRING){% endif %} AS file_name
+  FROM {{ table }}
+  WHERE {% for column, value in match %}{{ column }} = {{ value }}{% if not loop.last %} AND {% endif %}{% endfor %}
+{% if feed_filter %}
+    AND ({{ feed_filter }})
+{% endif %}
+) key_rows

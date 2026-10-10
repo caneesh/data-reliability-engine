@@ -92,8 +92,10 @@ data-reliability-engine/
             hdfs.py          # listing landing folders, read-only, through the Hadoop FS API
             scheduler.py     # optional: scheduler history adapter (stub in release 1)
           notify/
-            email.py         # digest builder and sender
-          trace.py
+            digest.py        # digest builder: one digest per owner per run, from the dq store
+            digest.txt.j2    # the digest's plain-text layout
+            email.py         # sender (SMTP, standard library)
+          trace.py           # dre trace: one key along the upstream chain
   conf/
     defaults.yaml
     feeds/  datasets/  rules/
@@ -441,7 +443,7 @@ A filter rule is one `table_contains` parameter set under `filter_rules`: `table
 | `dre dry-run --feed F` | Runs preconditions and checks for one feed, prints results, writes nothing | 0 always, unless the command itself fails |
 | `dre install --print\|--apply\|--check [--conf DIR]` | `--print` renders the store DDL for the configured dq database; `--apply` creates missing tables and views (all IF NOT EXISTS, safe to rerun); `--check` compares the existing tables and views with the DDL | 0 done or matching, 1 differences found or apply failed, 3 the database does not exist |
 | `dre run [--feed F] [--execution-type NORMAL\|RERUN\|REPLAY]` | Scheduled every hour. Evaluates only feeds with something due: a cadence slot's deadline (slot + `sla_hours`) passed since the feed's last evaluated window, or new or changed landed files. `--feed F` evaluates F even when nothing is due. Then preconditions, checks, causes, append results, send email | 0 run completed (even with FAILED checks), 2 partial, 3 could not start (including: the store is not installed; the message names `dre install`) |
-| `dre trace --dataset D --key "k1,k2,..."` | Prints one line per layer along the `upstream` chain: present or not, record time, load time, file; ends with the first layer where the key is absent or older, then that hop's cause line | 0 |
+| `dre trace --dataset D --key "k1,k2,..."` | Prints one line per layer along the `upstream` chain: present or not, record time, load time, file; ends with the first layer where the key is absent or older, then that hop's cause line | 0, or 3 for an unknown dataset or a key with the wrong number of parts |
 | `dre watchdog` | Checks the last expected run exists and wrote every expected check; emails if not | 0 healthy, 1 alert sent |
 
 **Email digest**, one per run, plain text, in this order:
@@ -452,7 +454,19 @@ A filter rule is one `table_contains` parameter set under `filter_rules`: `table
 4. Proposed rules, under "report only"
 5. Passing checks, as a single count
 
-Recipients come from each owner (a feed's, a table-wide dataset's or a rule's): `recipients` in `defaults.yaml` maps each owner to its addresses.
+Recipients come from each owner (a feed's, a table-wide dataset's or a rule's): `recipients` in `defaults.yaml` maps each owner to its addresses. Each owner with results in a run gets one digest for that run, holding only its own results.
+
+Digest details:
+
+- "Changed since the last run" compares each result with the previous result of the same dataset, check and group. A first result that FAILED counts as changed; recovered checks (now PASSED after FAILED or DID\_NOT\_RUN) are listed too. Subject: `<n>` is the checks newly FAILED, `<m>` the checks DID\_NOT\_RUN; `all clear` only when nothing is failing or did not run.
+- The cause line is the spec's form, naming the fallback when not proven: `cause not proven (DROPPED): ruled out NOT_RUN, INVALID_KEY; not ready FILTERED`. A check with several failing things shows one line per distinct cause with a count.
+- When T1\_ON\_TIME and T1\_ZERO\_ROWS fail for the same loads of a dataset, one alert is shown (under T1\_ON\_TIME, with a note) and counted once.
+- Groups the check's previous run reported and this run did not are listed, for configured group columns only (the dataset's or the rule's `group_by`, and a hop's `upstream`); per-load groups such as T1\_VOLUME's slot change every run.
+- "Date first failed" is the first FAILED result since the last result that was not FAILED. Approved rules show their violations against the previous run (`3 violations (was 1)`; the first result is the `baseline`).
+- With `email_sample_keys: true`, a failing hop check lists up to 5 `key_hash` values flagged in the run; never the key itself.
+- `email` in `defaults.yaml` names the mail relay (`smtp_host`, `smtp_port`, `sender`). Unset, digests are built but not sent and the run says so. A failed send is reported and never stops the run.
+
+**Trace.** `dre trace` normalises the given key (in D's key order) with each layer's `key_normalise` and follows D's `key_map` upstream. One line per layer, most upstream first: `present, <n> rows; record <UTC>; loaded <UTC>; file <base name>` for the latest version, or `absent`. Then the first hop where the key is absent downstream (MISSING) or held at an older record time (STALE), or `no gap`; then that hop's latest HOP\_KEY\_CURRENCY cause line for the key, found by its `key_hash` (so it needs `hmac_secret_file`). The key itself is never printed. Exit 3 for an unknown dataset or a key with the wrong number of parts.
 
 **Scheduling.** `dre run` is scheduled hourly; there is no per-feed schedule. Each run decides which feeds are due (see the command table) and skips the rest, writing nothing for them; a skipped feed's window simply carries on to the next run that evaluates it. A feed's `check_delay_minutes` (default 0) moves its window end back, so a slot is judged only once its deadline plus the delay has passed. Table-wide datasets run when a due feed's dataset shares their table, and every run when no feed dataset covers their table.
 
@@ -497,7 +511,7 @@ All tests run on local-mode Spark against synthetic tables built by fixtures in 
 4. **One write path.** The DataFrame write APIs (`.write`, `.writeTo`, `.writeStream`, `insertInto`) are allowed only in `store/writer.py`. Any `.write` elsewhere is flagged, including `w = df.write` split across statements and plain file `.write(...)` calls. `append` selects columns in the table's order before `insertInto`; a test fails if a column lands out of order.
 5. **Retention.** ALTER TABLE `<dq>.<table>` DROP [IF EXISTS] PARTITION is allowed only in `store/retention.py`. That module refuses to drop any `run_date` partition on or after today minus the configured retention in months, and refuses a retention below one month; a test proves it.
 6. **Database creation.** CREATE DATABASE is allowed only for the dq database and only in `store/local_setup.py`. No other module under `src/` may reference `local_setup`, so `dre run` never creates the database.
-7. **Email.** Email text contains no `key_value`. Until the digest exists (step 9) the guard is static: nothing in `notify/` references `key_value`. Step 9 adds a test on the rendered email text.
+7. **Email.** Email text contains no `key_value`. Statically, nothing in `notify/` references `key_value`; and a test renders a digest from a store whose key events carry a synthetic `key_value`, with `email_sample_keys: true`, and checks that no part of it appears in the text (`tests/notify/test_digest.py`).
 8. **Store DDL only through `dre install`.** CREATE TABLE and CREATE [OR REPLACE] VIEW are allowed only on the dq store and only in `store/ddl.sql`. Only `store/install.py` (behind `dre install --apply`) and `store/local_setup.py` may reference `apply_ddl`, so `dre run` never creates the store.
 9. **Generic engine.** Engine code, the config schema, pattern YAML and SQL templates (everything under `src/`) must not contain source-specific words. The denylist lives in `tests/guard/test_generic_engine.py` (stopper, handoff, file\_date, sub\_id, rms) and grows whenever a source-specific name is found; such words may appear only in `conf/` and `tests/`.
 
@@ -529,6 +543,7 @@ Build in this order. Each step ends with its tests passing and is usable before 
 | Python version and packages on the cluster | Python 3.10+, dependencies shipped in a zip | Platform team |
 | Where it runs and is scheduled | `dre run` hourly (Control-M or cron); the watchdog hourly from a separate folder or host | Scheduling owner |
 | Database name and service account | `dq`, read-only account with write only to `dq` | Platform team |
+| Mail relay for the digest | `email.smtp_host`, `smtp_port`, `sender` in `defaults.yaml`; unset until confirmed (digests are built, not sent) | Platform team |
 | Use of AI coding tools on HCSC code | Only through HCSC-approved access | HCSC policy |
 
 **Decide before RMS goes live** (do not block the engine build)

@@ -30,7 +30,7 @@ include = ["hcsc.datalake.dre*"]
 namespaces = true
 
 [tool.setuptools.package-data]
-"hcsc.datalake.dre" = ["patterns/*.yaml", "checks/sql/*.j2", "store/*.sql"]
+"hcsc.datalake.dre" = ["patterns/*.yaml", "checks/sql/*.j2", "store/*.sql", "notify/*.j2"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
