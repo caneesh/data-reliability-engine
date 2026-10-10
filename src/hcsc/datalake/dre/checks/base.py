@@ -28,6 +28,7 @@ REASONS: dict[str, str] = {
     "partition_missing": "DATA_UNAVAILABLE",
     "landing_unreadable": "DATA_UNAVAILABLE",
     "empty_population": "DATA_UNAVAILABLE",
+    "window_gap": "DATA_UNAVAILABLE",  # a held span given up after max_window_hours: never checked
     "metastore_unavailable": "PLATFORM",
     "hdfs_unavailable": "PLATFORM",
     "query_failed": "PLATFORM",

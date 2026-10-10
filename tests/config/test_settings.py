@@ -19,7 +19,7 @@ GOLD = "datasets/gold_member_coverage.yaml"
 def test_lower_level_wins() -> None:
     top = SettingsOverride(sla_hours=8, email_sample_keys=False, min_rows_per_load=1,
                            volume_tolerance_pct=50, compute_budget_minutes=8, full_sweep_day="SUNDAY",
-                           settle_minutes=15, initial_lookback_hours=24)
+                           settle_minutes=15, initial_lookback_hours=24, max_window_hours=72)
     mid = SettingsOverride(volume_tolerance_pct=30, sla_hours=4)
     low = SettingsOverride(volume_tolerance_pct=20)
     resolved = resolve_settings(top, mid, low)
@@ -29,7 +29,7 @@ def test_lower_level_wins() -> None:
 def test_null_means_inherit() -> None:
     top = SettingsOverride(sla_hours=8, email_sample_keys=False, min_rows_per_load=1,
                            volume_tolerance_pct=50, compute_budget_minutes=8, full_sweep_day="SUNDAY",
-                           settle_minutes=15, initial_lookback_hours=24)
+                           settle_minutes=15, initial_lookback_hours=24, max_window_hours=72)
     assert resolve_settings(top, SettingsOverride(sla_hours=None)).sla_hours == 8
 
 

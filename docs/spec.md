@@ -164,7 +164,7 @@ compute_budget_minutes: 8
 
 **Table-wide datasets.** A dataset that no feed lists covers a whole table, for example to run gold rules across every source system. It must set `owner` (whose recipients get its results) and `expectation_version` (it has no feed to take one from), has no `feed_filter`, and takes its settings from `defaults.yaml`. It gets the checks in `patterns/table_wide.yaml`: T1\_SCHEMA\_DRIFT, T1\_KEY\_NULLS and T1\_KEY\_DUPLICATES only, plus gold rules. A dataset that a feed lists takes its owner and expectation version from the feed and must set neither. Each dataset is listed by at most one feed.
 
-**Defaults for time and windows** (in `defaults.yaml`, overridable per feed or dataset where noted): `timezone` (IANA name for time columns that do not set their own; not overridable), `settle_minutes` (default 15) and `initial_lookback_hours` (default 24), both used by event windows (section 4).
+**Defaults for time and windows** (in `defaults.yaml`, overridable per feed or dataset where noted): `timezone` (IANA name for time columns that do not set their own; not overridable), `settle_minutes` (default 15), `initial_lookback_hours` (default 24) and `max_window_hours` (default 72), all used by event windows (section 4), and `rule_run_at` (default `"06:00"`, local time in `timezone`; not overridable), when daily and weekly gold rules fall due.
 
 **Rule** (a gold rule from a template):
 
@@ -179,6 +179,7 @@ group_by: [src_sys_nm]
 owner: membership-gold
 status: proposed                  # proposed | approved | retired
 severity: high                    # high | medium | low
+frequency: daily                  # every_run | daily | weekly (default daily)
 ```
 
 Rule `params` shapes, where section 6 does not spell them out: `superseded_still_open.group_key` is a list of columns (a single column may be written as a string); `child_within_parent.join` maps each child column to its parent column, for example `{ sub_id: sub_id, mem_nbr: mem_nbr }`. `column_order`, `superseded_still_open` and `child_within_parent` take an optional `format` (a Spark date or timestamp format): when set, the time columns they compare are parsed with it first, so dates held as strings are never compared as strings. Join and key columns get the dataset's `key_normalise`.
@@ -195,7 +196,8 @@ Rule `params` shapes, where section 6 does not spell them out: `superseded_still
 **Evaluation event.** The thing a check evaluates. In release 1 there is one kind, a batch load event: one dataset, one load window, identified by `event_id = sha256(dataset + window_start + window_end)`. Streaming windows come later and must fit the same interface. Windows are UTC and half-open: they include `window_start` and exclude `window_end`. Each result row records its event's `window_start` and `window_end`.
 
 - `window_end` = the run's start minus `settle_minutes` (default 15), so rows still being written are left for the next run.
-- `window_start` = the latest `window_end` among the dataset's NORMAL events, skipping any event in which a check was DID\_NOT\_RUN for a PLATFORM, BUDGET or CONFIGURATION reason (that window is evaluated again). On a dataset's first run, `window_end` minus `initial_lookback_hours` (default 24).
+- `window_start` = the latest `window_end` among the dataset's NORMAL events, skipping any event in which a check was DID\_NOT\_RUN for a PLATFORM or BUDGET reason (that window is held: evaluated again). On a dataset's first run, `window_end` minus `initial_lookback_hours` (default 24). CONFIGURATION reasons never hold a window: those checks report DID\_NOT\_RUN on every run until the configuration is fixed. Gold rule results neither move nor hold a window (rules run on their own schedule over the whole table).
+- A hold lasts at most `max_window_hours` (default 72), counted from the end of the first held event. When a run finds the cap reached, the window advances: it starts where the last held event ended, and one result with `check_id` WINDOW\_GAP, DID\_NOT\_RUN / window\_gap, records the unchecked span as its window (`detail`: unchecked hours and the reason codes that held it). The gap is never evaluated again.
 - Both bounds are truncated to `load_time.granularity`, counted in the load time's zone. A window never runs backwards: if the previous end is later than this end, the window is empty.
 
 **Evaluation identity.** `evaluation_id = sha256(event_id + check_id + expectation_version + engine_version + group_values)`, with `group_values` written as `key=value` pairs sorted by key (empty for an ungrouped check), so each group row of a grouped check has its own id. A rerun of the same evaluation writes a new row with the same `evaluation_id` and `execution_type = RERUN`; it never overwrites. Values: NORMAL, RERUN, REPLAY.
@@ -212,7 +214,7 @@ Rule `params` shapes, where section 6 does not spell them out: `superseded_still
 
 | Category | Codes |
 | --- | --- |
-| DATA\_UNAVAILABLE | partition\_missing, landing\_unreadable, empty\_population |
+| DATA\_UNAVAILABLE | partition\_missing, landing\_unreadable, empty\_population, window\_gap |
 | PLATFORM | metastore\_unavailable, hdfs\_unavailable, query\_failed |
 | CONFIGURATION | table\_missing, column\_missing, incompatible\_type, invalid\_config |
 | BUDGET | budget\_exceeded |
@@ -312,7 +314,7 @@ Add `owned_columns` to the dataset config when HOP\_VALUE\_AGREEMENT is wanted, 
 Hop details:
 
 - **A hop** is this dataset and one upstream in its `key_map`; each hop check writes one result per upstream (group `upstream`). Keys on both sides are built from the mapped columns with each side's `key_normalise`, as one string (parts joined with `|`, null written as `<null>`). Each side's `feed_filter` applies. Both datasets need `record_time` and the upstream needs `load_time`; otherwise DID\_NOT\_RUN / invalid\_config.
-- **Keys judged.** An upstream key is judged once, in the window where its latest load time plus `sla_hours` falls (so a key younger than the SLA is never judged), plus every key still open in `v_open_keys`. On `full_sweep_day`, every upstream key past its deadline. HOP\_FILE\_COMPLETENESS judges files the same way, by each file's first upstream load time.
+- **Keys judged.** An upstream key is judged once, in the window where its latest load time plus `sla_hours` falls (so a key younger than the SLA is never judged); a key with a row in this dataset loaded in the window is judged again once its upstream deadline has passed, so a key that regresses here without any upstream change (for example overwritten with an older version) is caught; and every key still open in `v_open_keys`. On `full_sweep_day`, every upstream key past its deadline. HOP\_FILE\_COMPLETENESS judges files the same way, by each file's first upstream load time.
 - **Ties.** Every upstream row at a key's latest record time is kept. HOP\_VALUE\_AGREEMENT requires each of them to match this dataset's latest row, so tied upstream rows that disagree with each other always fail.
 - **Population.** HOP\_KEY\_CURRENCY: keys judged. HOP\_VALUE\_AGREEMENT: judged keys that are CURRENT. HOP\_FILE\_COMPLETENESS: files judged; `detail` lists the short files (up to 100).
 - **Key events.** HOP\_KEY\_CURRENCY appends to `dq_key_event`: FLAGGED (newly MISSING or STALE), STILL\_FLAGGED (open and still not CURRENT), CLEARED (open and now CURRENT; on the full sweep also open keys no longer upstream, with `state_detail` "no longer upstream"). `state_detail` holds MISSING, STALE or CURRENT. `key_hash` is computed in SQL by a function registered with the secret in its closure, so the secret never appears in SQL text or query plans. Without `hmac_secret_file` no events are written and a FAILED result says so in `detail`; a configured secret file that cannot be read, or is empty, stops `dre run` before it starts (exit 3).
@@ -329,7 +331,7 @@ Hop details:
 | value\_format | column, pattern | Non-null value not matching the regex |
 | null\_rate\_max | column, max\_rate | Group whose null rate exceeds `max_rate` |
 
-Each rule is one check: `check_id` is the rule id and results carry the rule's `severity`. It runs over the whole table after the dataset's `feed_filter` whenever its dataset is evaluated, one result per the rule's `group_by` group; `retired` rules do not run. Population: keys (max\_rows\_per\_key, max\_open\_rows\_per\_key), rows with both values (column\_order; every row when `nulls_fail`), rows matching `open_when` (superseded\_still\_open), child rows with at least one matching parent (child\_within\_parent), non-null values (value\_format), rows (null\_rate\_max). Rules with `status: proposed` run and record results but are listed as "report only" in the email. Only `approved` rules count toward alerts. The first result of a rule is its baseline; after that the email shows change from the previous run.
+Each rule is one check: `check_id` is the rule id and results carry the rule's `severity`. It runs over the whole table after the dataset's `feed_filter`, one result per the rule's `group_by` group, when its `frequency` makes it due, whether or not its feed is due: `every_run` on every run; `daily` on the first run at or after `rule_run_at` each day; `weekly` on the first run at or after `rule_run_at` on the dataset's `full_sweep_day`. A rule whose last result was held by a PLATFORM or BUDGET reason is tried again on the next run. `retired` rules do not run. Population: keys (max\_rows\_per\_key, max\_open\_rows\_per\_key), rows with both values (column\_order; every row when `nulls_fail`), rows matching `open_when` (superseded\_still\_open), child rows with at least one matching parent (child\_within\_parent), non-null values (value\_format), rows (null\_rate\_max). Rules with `status: proposed` run and record results but are listed as "report only" in the email. Only `approved` rules count toward alerts. The first result of a rule is its baseline; after that the email shows change from the previous run.
 
 Example template (`max_open_rows_per_key.sql.j2`):
 

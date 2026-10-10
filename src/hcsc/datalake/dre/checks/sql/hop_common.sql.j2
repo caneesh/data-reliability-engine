@@ -1,7 +1,8 @@
 {# Shared CTEs for hop checks. p: parameters from checks/hop/common.py.
    up / dn: each side's rows (canonical key k, record time, load time, owned columns as strings);
    up_top / dn_top: rows at each key's latest record time, ties kept;
-   judged: the keys judged in this window, with MISSING / STALE / CURRENT. #}
+   judged: the keys judged in this window, with MISSING / STALE / CURRENT: upstream keys at their
+   deadline, keys reloaded here in the window once their upstream deadline has passed, open keys. #}
 {% macro ctes(p) %}
 up AS (
   SELECT {{ p.up_key }} AS k, {{ p.up_record }} AS record_ts, {{ p.up_load }} AS load_ts
@@ -21,7 +22,8 @@ up_keys AS (
   SELECT k, MAX(record_ts) AS up_record_ts, MAX(load_ts) AS up_load_ts FROM up_top GROUP BY k
 ),
 dn AS (
-  SELECT {{ p.dn_key }} AS k, {{ p.dn_record }} AS record_ts
+  SELECT {{ p.dn_key }} AS k, {{ p.dn_record }} AS record_ts,
+         {% if p.dn_load %}{{ p.dn_load }}{% else %}CAST(NULL AS TIMESTAMP){% endif %} AS load_ts
 {% for c in p.owned %}
        , CAST({{ c.dn }} AS STRING) AS d_{{ loop.index }}
 {% endfor %}
@@ -35,7 +37,9 @@ dn_top AS (
   WHERE record_ts = top_ts OR top_ts IS NULL
 ),
 dn_keys AS (
-  SELECT k, MAX(record_ts) AS dn_record_ts FROM dn GROUP BY k
+  SELECT k, MAX(record_ts) AS dn_record_ts,
+         MAX(CASE WHEN load_ts >= {{ p.window_start }} AND load_ts < {{ p.window_end }} THEN 1 ELSE 0 END) AS dn_loaded
+  FROM dn GROUP BY k
 ),
 open_keys AS (
 {% if p.hashed %}
@@ -60,7 +64,9 @@ judged AS (
 {% if p.full_sweep %}
   WHERE u.up_load_ts < {{ p.deadline_end }} OR o.key_hash IS NOT NULL
 {% else %}
-  WHERE (u.up_load_ts >= {{ p.deadline_start }} AND u.up_load_ts < {{ p.deadline_end }}) OR o.key_hash IS NOT NULL
+  WHERE (u.up_load_ts >= {{ p.deadline_start }} AND u.up_load_ts < {{ p.deadline_end }})
+     OR (d.dn_loaded = 1 AND u.up_load_ts < {{ p.deadline_end }})
+     OR o.key_hash IS NOT NULL
 {% endif %}
 )
 {% endmacro %}

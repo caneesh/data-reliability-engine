@@ -128,6 +128,33 @@ def test_key_currency_takes_the_latest_upstream_version(spark) -> None:
     assert (r.state, r.observed) == ("FAILED", "0 missing and 1 stale of 1 keys")
 
 
+GOLD_LOAD = TimeColumn(column="gld_lcts", format="yyyy-MM-dd HH:mm:ss:SSSSSS", granularity="minute", timezone="UTC")
+
+
+def test_a_key_that_regresses_here_without_an_upstream_change_is_judged_again(spark) -> None:
+    # Curated last changed long ago; gold was overwritten in the window with an older version.
+    up, dn = tables(spark, "kc_regress", [curated_row(updated=BEFORE)],
+                    [gold_row(record=datetime(2026, 1, 9), loaded="2026-01-15 13:00:00:000000")])
+    [r] = run(spark, KeyCurrency(), gold(dn.table, dataset=dn.dataset, load_time=GOLD_LOAD), up)
+    assert (r.state, r.population, r.violations) == ("FAILED", 1, 1)
+    assert r.observed == "0 missing and 1 stale of 1 keys"
+    # Loaded here before the window: not judged again (it was judged when it happened).
+    create_table(spark, dn.table, GOLD_COLUMNS,
+                 [gold_row(record=datetime(2026, 1, 9), loaded="2026-01-12 13:00:00:000000")])
+    [r] = run(spark, KeyCurrency(), gold(dn.table, dataset=dn.dataset, load_time=GOLD_LOAD), up)
+    assert (r.state, r.reason_code) == ("DID_NOT_RUN", "empty_population")
+
+
+def test_a_reload_here_does_not_judge_a_key_before_its_upstream_deadline(spark) -> None:
+    # Upstream changed 1 hour before the window end (inside the 8-hour SLA): the key is not judged yet,
+    # even though gold reloaded it in the window.
+    recent = datetime(2026, 1, 16, 11, 0)
+    up, dn = tables(spark, "kc_early", [curated_row(updated=recent)],
+                    [gold_row(record=datetime(2026, 1, 9), loaded="2026-01-16 11:30:00:000000")])
+    [r] = run(spark, KeyCurrency(), gold(dn.table, dataset=dn.dataset, load_time=GOLD_LOAD), up)
+    assert (r.state, r.reason_code) == ("DID_NOT_RUN", "empty_population")
+
+
 def test_key_events_flagged_still_flagged_cleared(spark) -> None:
     up, dn = tables(spark, "kc_events", [curated_row(updated=IN_WINDOW)], [])
     expected_hash = hmac.new(SECRET, KEY.encode(), hashlib.sha256).hexdigest()

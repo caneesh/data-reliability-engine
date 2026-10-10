@@ -27,3 +27,5 @@ compute_budget_minutes: 8
 full_sweep_day: SUNDAY
 settle_minutes: 15            # a window ends this long before the run starts
 initial_lookback_hours: 24    # a dataset's first window covers this many hours
+max_window_hours: 72          # a window held by PLATFORM or BUDGET problems is released after this long
+rule_run_at: "06:00"          # daily gold rules run at the first run at or after this time; weekly ones on full_sweep_day

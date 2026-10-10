@@ -1,10 +1,13 @@
-"""Event windows: settle time, first-run lookback, truncation, and what moves the window on."""
+"""Event windows: settle time, first-run lookback, truncation, what moves the window on, and
+how a held window is released after max_window_hours."""
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
-from hcsc.datalake.dre.checks.events import Event, evaluation_id, previous_window_end, window_for
+from hcsc.datalake.dre.checks.events import (
+    Event, WindowHistory, evaluation_id, previous_window_end, release_hold, window_for, window_history,
+)
 from hcsc.datalake.dre.config.models import Dataset, TimeColumn
 from hcsc.datalake.dre.store.local_setup import create_store
 from tests.fixtures.settings import SETTINGS
@@ -64,11 +67,12 @@ def test_evaluation_id_includes_sorted_group_values() -> None:
 
 
 def _result(event_id: str, end_hour: int, state: str = "PASSED", category: str | None = None,
-            execution_type: str = "NORMAL") -> dict:
-    return {"evaluation_id": f"{event_id}-{state}", "run_id": event_id, "event_id": event_id,
+            execution_type: str = "NORMAL", check_id: str = "T1_KEY_DUPLICATES", code: str | None = None,
+            dataset: str = "gold") -> dict:
+    return {"evaluation_id": f"{event_id}-{state}-{check_id}", "run_id": event_id, "event_id": event_id,
             "window_start": datetime(2026, 1, 15, end_hour - 1), "window_end": datetime(2026, 1, 15, end_hour),
-            "execution_type": execution_type, "dataset": "gold", "check_id": "T1_KEY_DUPLICATES",
-            "state": state, "reason_category": category, "run_date": date(2026, 1, 15)}
+            "execution_type": execution_type, "dataset": dataset, "check_id": check_id,
+            "state": state, "reason_category": category, "reason_code": code, "run_date": date(2026, 1, 15)}
 
 
 def test_blocked_events_do_not_move_the_window(spark) -> None:
@@ -76,11 +80,52 @@ def test_blocked_events_do_not_move_the_window(spark) -> None:
     rows = [
         _result("e1", 1),                                                   # PASSED
         _result("e2", 2, "DID_NOT_RUN", "DATA_UNAVAILABLE"),                # empty population: counts
-        _result("e3", 3), _result("e3", 3, "DID_NOT_RUN", "CONFIGURATION"),  # one check blocked: skipped
-        _result("e4", 4, "DID_NOT_RUN", "PLATFORM"),                        # skipped
-        _result("e5", 5, "DID_NOT_RUN", "BUDGET"),                          # skipped
+        _result("e3", 3), _result("e3", 3, "DID_NOT_RUN", "CONFIGURATION"),  # CONFIGURATION never holds: counts
+        _result("e4", 4, "DID_NOT_RUN", "PLATFORM", code="query_failed"),   # held
+        _result("e5", 5, "DID_NOT_RUN", "BUDGET", code="budget_exceeded"),  # held
         _result("e6", 6, execution_type="REPLAY"),                          # replays never count
     ]
     append_rows(spark, "dq_windows", "dq_check_result", rows)
-    assert previous_window_end(spark, "dq_windows", "gold") == datetime(2026, 1, 15, 2, tzinfo=UTC)
+    assert previous_window_end(spark, "dq_windows", "gold") == datetime(2026, 1, 15, 3, tzinfo=UTC)
+    history = window_history(spark, "dq_windows", "gold")
+    assert history == WindowHistory(
+        previous_end=datetime(2026, 1, 15, 3, tzinfo=UTC), held_start=datetime(2026, 1, 15, 3, tzinfo=UTC),
+        first_held_end=datetime(2026, 1, 15, 4, tzinfo=UTC), last_held_end=datetime(2026, 1, 15, 5, tzinfo=UTC),
+        held_by=("budget_exceeded", "query_failed"))
     assert previous_window_end(spark, "dq_windows", "other") is None
+
+
+def test_rule_results_neither_move_nor_hold_a_window(spark) -> None:
+    create_store(spark, "dq_windows_rules")
+    append_rows(spark, "dq_windows_rules", "dq_check_result", [
+        _result("e1", 1),
+        _result("e2", 2, check_id="one_row_per_coverage"),                               # a rule: ignored
+        _result("e3", 3, "DID_NOT_RUN", "PLATFORM", check_id="one_row_per_coverage"),   # ignored too
+    ])
+    history = window_history(spark, "dq_windows_rules", "gold", exclude_checks=("one_row_per_coverage",))
+    assert history == WindowHistory(previous_end=datetime(2026, 1, 15, 1, tzinfo=UTC))
+
+
+HELD = WindowHistory(previous_end=datetime(2026, 1, 15, 3, tzinfo=UTC), held_start=datetime(2026, 1, 15, 3, tzinfo=UTC),
+                     first_held_end=datetime(2026, 1, 15, 4, tzinfo=UTC),
+                     last_held_end=datetime(2026, 1, 15, 9, tzinfo=UTC), held_by=("query_failed",))
+
+
+def test_a_held_window_is_evaluated_again_until_max_window_hours() -> None:
+    # 71 hours after the first held event ended: still held, the window starts at the last good end.
+    end = HELD.first_held_end + timedelta(hours=71)
+    assert release_hold(HELD, "gold", end, 72) == (HELD.previous_end, None)
+    # Nothing held: the window follows on.
+    assert release_hold(WindowHistory(previous_end=HELD.previous_end), "gold", end, 72) == (HELD.previous_end, None)
+
+
+def test_a_hold_past_max_window_hours_is_released_as_a_gap() -> None:
+    end = HELD.first_held_end + timedelta(hours=72)
+    start, gap = release_hold(HELD, "gold", end, 72)
+    assert start == HELD.last_held_end
+    assert gap == Event("gold", HELD.previous_end, HELD.last_held_end)
+    # A dataset held since its first run: the gap starts where the first held window started.
+    first = WindowHistory(held_start=datetime(2026, 1, 14, tzinfo=UTC), first_held_end=HELD.first_held_end,
+                          last_held_end=HELD.last_held_end)
+    assert release_hold(first, "gold", end, 72)[1] == Event("gold", datetime(2026, 1, 14, tzinfo=UTC),
+                                                            HELD.last_held_end)

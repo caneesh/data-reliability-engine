@@ -144,6 +144,7 @@ Template = Literal[
     "null_rate_max",
 ]
 RuleStatus = Literal["proposed", "approved", "retired"]
+RuleFrequency = Literal["every_run", "daily", "weekly"]
 Severity = Literal["high", "medium", "low"]
 
 
@@ -165,6 +166,7 @@ class SettingsOverride(Model):
     full_sweep_day: Weekday | None = None
     settle_minutes: int | None = Field(default=None, ge=0)
     initial_lookback_hours: float | None = Field(default=None, gt=0)
+    max_window_hours: float | None = Field(default=None, gt=0)
 
 
 SETTING_FIELDS: tuple[str, ...] = tuple(SettingsOverride.model_fields)
@@ -181,6 +183,7 @@ class Settings(Model):
     full_sweep_day: Weekday
     settle_minutes: int = Field(ge=0)
     initial_lookback_hours: float = Field(gt=0)
+    max_window_hours: float = Field(gt=0)
 
 
 # --- defaults.yaml ---
@@ -200,6 +203,10 @@ class Defaults(SettingsOverride):
     # Event windows (spec section 4).
     settle_minutes: int | None = Field(default=15, ge=0)
     initial_lookback_hours: float | None = Field(default=24, gt=0)
+    max_window_hours: float | None = Field(default=72, gt=0)  # longest a PLATFORM or BUDGET hold lasts
+    # Gold rules (spec section 6): daily rules run at the first run at or after this local time
+    # (defaults.yaml timezone); weekly rules on the dataset's full_sweep_day at this time.
+    rule_run_at: TimeOfDay = "06:00"
 
     @model_validator(mode="after")
     def _check(self) -> Defaults:
@@ -324,6 +331,7 @@ class Rule(Model):
     owner: NonEmptyStr
     status: RuleStatus
     severity: Severity
+    frequency: RuleFrequency = "daily"
 
 
 class MaxRowsPerKey(Model):

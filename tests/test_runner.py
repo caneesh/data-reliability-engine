@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import timedelta, timezone
+import json
+from datetime import datetime, timedelta, timezone
 
 from hcsc.datalake.dre.checks.events import Event, previous_window_end
 from hcsc.datalake.dre.cli import main
 from tests.fixtures.layers import CURATED_COLUMNS, GOLD_COLUMNS, create_table, curated_row, gold_row
 from tests.replay.conftest import replay_conf
+from tests.store.conftest import append_rows
 
 GOLD = "datasets/gold_member_coverage.yaml"
 
@@ -17,10 +19,9 @@ def counts(spark, dq: str) -> tuple[int, int]:
 
 
 def test_run_writes_results_and_windows_follow_on(spark, tmp_path, capsys) -> None:
-    # Curated needs a load time: without one gold's hop checks are DID_NOT_RUN / invalid_config,
-    # a CONFIGURATION reason, which keeps gold's window from moving on (spec section 4).
-    replay = replay_conf(spark, tmp_path, "runner_a", {"datasets/example_curated_enrollment.yaml": [
-        ("load_time: null ", "load_time: { column: sourcelastupdatets, granularity: minute } ")]})
+    # Curated has no load time in the sample config, so gold's hop checks are DID_NOT_RUN /
+    # invalid_config. A CONFIGURATION reason never holds a window (spec section 4): gold's moves on.
+    replay = replay_conf(spark, tmp_path, "runner_a")
     create_table(spark, replay.gold, GOLD_COLUMNS, [gold_row(), gold_row()])  # one duplicated key
     create_table(spark, replay.curated, CURATED_COLUMNS, [curated_row()])
 
@@ -57,6 +58,10 @@ def test_run_writes_results_and_windows_follow_on(spark, tmp_path, capsys) -> No
               if r.run_id != run1.run_id and r.dataset == "gold_member_coverage" and r.check_id == "T1_KEY_DUPLICATES"]
     assert [r.window_start for r in second] == [end]
     assert second[0].event_id != first.event_id
+    # The CONFIGURATION problem is reported again on every run.
+    hops = [(r.check_id, r.reason_code) for r in spark.table(f"{replay.dq}.dq_check_result").collect()
+            if r.run_id != run1.run_id and r.dataset == "gold_member_coverage" and r.check_id.startswith("HOP_")]
+    assert sorted(hops) == [("HOP_KEY_CURRENCY", "invalid_config"), ("HOP_VALUE_AGREEMENT", "invalid_config")]
 
 
 def test_replay_runs_do_not_move_the_window(spark, tmp_path) -> None:
@@ -170,3 +175,91 @@ def test_rules_are_planned_unless_retired(tmp_path) -> None:
     assert not any(check == "one_row_per_coverage" for _, check, _ in planned)
     only = {p.check.check_id for p in plan_rules(config, "provider_directory_merge")}
     assert only == {"provider_specialty_present"}
+
+
+def _held(dq_dataset: str, event: str, start: datetime, end: datetime, state: str = "PASSED",
+          category: str | None = None, code: str | None = None) -> dict:
+    return {"evaluation_id": f"{event}-{state}", "run_id": f"earlier-{event}", "event_id": event,
+            "window_start": start, "window_end": end, "execution_type": "NORMAL", "feed": "example_realtime",
+            "dataset": dq_dataset, "check_id": "T1_KEY_DUPLICATES", "state": state, "reason_category": category,
+            "reason_code": code, "run_date": start.date()}
+
+
+def _held_history(spark, dq: str, now: datetime, first_held_hours_ago: float) -> tuple[datetime, datetime]:
+    """A good window ending 100 hours ago, then two windows held by a PLATFORM problem, the
+    first ending first_held_hours_ago and the last 5 hours ago. Returns (good end, last held end)."""
+    good_end, first_held_end, last_held_end = (now - timedelta(hours=h) for h in (100, first_held_hours_ago, 5))
+    append_rows(spark, dq, "dq_check_result", [
+        _held("gold_member_coverage", "good", good_end - timedelta(hours=1), good_end),
+        _held("gold_member_coverage", "held1", good_end, first_held_end, "DID_NOT_RUN", "PLATFORM", "query_failed"),
+        _held("gold_member_coverage", "held2", good_end, last_held_end, "DID_NOT_RUN", "PLATFORM", "query_failed"),
+    ])
+    return good_end, last_held_end
+
+
+def _gold_windows(spark, dq: str) -> set[tuple]:
+    return {(r.window_start, r.window_end) for r in spark.table(f"{dq}.dq_check_result").collect()
+            if r.dataset == "gold_member_coverage" and r.check_id == "T1_KEY_DUPLICATES" and not r.run_id.startswith("earlier")}
+
+
+def test_a_platform_hold_keeps_the_window_until_max_window_hours(spark, tmp_path) -> None:
+    replay = replay_conf(spark, tmp_path, "runner_hold")
+    create_table(spark, replay.gold, GOLD_COLUMNS, [gold_row()])
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0, tzinfo=None)
+    good_end, _ = _held_history(spark, replay.dq, now, first_held_hours_ago=60)  # held for 60 hours: < 72
+
+    assert main(["run", "--conf", str(replay.conf), "--feed", "example_realtime"]) == 0
+    [(start, _)] = _gold_windows(spark, replay.dq)
+    assert start == good_end  # the held span is evaluated again
+    assert not [r for r in spark.table(f"{replay.dq}.dq_check_result").collect() if r.check_id == "WINDOW_GAP"]
+
+
+def test_a_hold_past_max_window_hours_is_released_with_a_window_gap(spark, tmp_path) -> None:
+    replay = replay_conf(spark, tmp_path, "runner_gap")
+    create_table(spark, replay.gold, GOLD_COLUMNS, [gold_row()])
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0, tzinfo=None)
+    good_end, last_held_end = _held_history(spark, replay.dq, now, first_held_hours_ago=90)  # 90 hours: > 72
+
+    assert main(["run", "--conf", str(replay.conf), "--feed", "example_realtime"]) == 0
+    [gap] = [r for r in spark.table(f"{replay.dq}.dq_check_result").collect() if r.check_id == "WINDOW_GAP"]
+    assert (gap.state, gap.reason_category, gap.reason_code) == ("DID_NOT_RUN", "DATA_UNAVAILABLE", "window_gap")
+    assert (gap.dataset, gap.feed, gap.window_start, gap.window_end) == (
+        "gold_member_coverage", "example_realtime", good_end, last_held_end)
+    assert json.loads(gap.detail) == {"unchecked_hours": 95.0, "held_by": ["query_failed"]}
+    # The checks evaluate from where the last held window ended; the gap is not evaluated again.
+    [(start, _)] = _gold_windows(spark, replay.dq)
+    assert start == last_held_end
+    assert previous_window_end(spark, replay.dq, "gold_member_coverage") > last_held_end.replace(tzinfo=timezone.utc)
+    [run] = spark.table(f"{replay.dq}.v_latest_run").collect()
+    assert run.status == "COMPLETED" and run.checks_written == run.checks_expected
+
+
+def test_rules_run_by_frequency_not_every_run(spark, tmp_path) -> None:
+    replay = replay_conf(spark, tmp_path, "runner_rules", {
+        "rules/one_row_per_coverage.yaml": [("severity: high", "severity: high\nfrequency: every_run")]})
+    create_table(spark, replay.gold, GOLD_COLUMNS, [gold_row()])
+
+    def rule_runs() -> dict[str, int]:
+        out: dict[str, int] = {}
+        for r in spark.table(f"{replay.dq}.dq_check_result").collect():
+            if r.check_id in ("one_row_per_coverage", "end_not_before_start"):
+                out[r.check_id] = out.get(r.check_id, 0) + 1
+        return out
+
+    assert main(["run", "--conf", str(replay.conf)]) == 0
+    assert rule_runs() == {"one_row_per_coverage": 1, "end_not_before_start": 1}
+    # An hour later (forced here): the every_run rule runs again, the daily one is not due.
+    assert main(["run", "--conf", str(replay.conf), "--feed", "example_realtime"]) == 0
+    assert rule_runs() == {"one_row_per_coverage": 2, "end_not_before_start": 1}
+
+
+def test_full_sweep_day_is_counted_in_the_default_timezone() -> None:
+    from hcsc.datalake.dre.config.loader import load
+    from hcsc.datalake.dre.runner import is_full_sweep
+    from tests.conftest import REPO_ROOT
+
+    config, _ = load(REPO_ROOT / "conf")  # full_sweep_day SUNDAY, timezone America/Chicago
+    assert is_full_sweep(config, "gold_member_coverage", datetime(2026, 1, 18, 12, tzinfo=timezone.utc))      # Sunday
+    assert not is_full_sweep(config, "gold_member_coverage", datetime(2026, 1, 17, 12, tzinfo=timezone.utc))  # Saturday
+    # Sunday 03:00 UTC is still Saturday evening in Chicago.
+    assert not is_full_sweep(config, "gold_member_coverage", datetime(2026, 1, 18, 3, tzinfo=timezone.utc))

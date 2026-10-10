@@ -3,8 +3,10 @@
 A hop is (this dataset, one upstream in its key_map). Keys are joined on the mapped key
 with each side's key_normalise, as one canonical string. Each side's feed_filter applies.
 Keys judged in a window: upstream keys whose latest load time + sla_hours falls in the
-window (judged once, at their deadline), plus keys still open in v_open_keys; on the
-full sweep day, every upstream key past its deadline.
+window (judged once, at their deadline); keys with a row here loaded in the window whose
+upstream deadline has passed (so a key that regresses here without an upstream change is
+judged again); and keys still open in v_open_keys. On the full sweep day, every upstream
+key past its deadline.
 """
 
 from __future__ import annotations
@@ -56,6 +58,8 @@ def hop_params(ctx: CheckContext, event: Event, up_id: str, up: Dataset | None) 
         "dn_table": ds.table, "dn_filter": ds.feed_filter,
         "dn_key": key_string([column_expr(ds, c) for c in ds.key]),
         "dn_record": utc_expr(ds.record_time, tz), "dn_file": ds.file_name_column,
+        "dn_load": utc_expr(ds.load_time, tz) if ds.load_time is not None else None,
+        "window_start": utc_literal(event.window_start), "window_end": utc_literal(event.window_end),
         "owned": owned,
         "deadline_start": utc_literal(event.window_start - sla), "deadline_end": utc_literal(event.window_end - sla),
         "full_sweep": ctx.full_sweep, "hashed": ctx.key_secret is not None, "hash_fn": HASH_FUNCTION,

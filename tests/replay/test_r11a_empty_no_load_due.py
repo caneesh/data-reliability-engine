@@ -30,13 +30,20 @@ def test_r11a_no_load_due_everything_did_not_run(spark, tmp_path) -> None:
     create_table(spark, replay.gold, GOLD_COLUMNS)
     create_table(spark, replay.curated, CURATED_COLUMNS)
 
-    # A scheduled run does not evaluate a feed with nothing due ...
+    # A scheduled run does not evaluate a feed's checks with nothing due; gold rules run on their
+    # own (daily) schedule, and on empty tables they too are DID_NOT_RUN ...
     assert main(["run", "--conf", str(replay.conf)]) == 0
-    assert not [r for r in spark.table(f"{replay.dq}.dq_check_result").collect() if r.feed == "example_realtime"]
+    first = [r for r in spark.table(f"{replay.dq}.dq_check_result").collect() if r.feed == "example_realtime"]
+    # (the table-wide dataset's rule coverage_end_date_format also ran; it has no feed)
+    assert sorted(r.check_id for r in first) == ["end_not_before_start", "older_coverage_still_open",
+                                                 "one_open_row_per_coverage", "one_row_per_coverage"]
+    assert {(r.state, r.reason_code) for r in first} == {("DID_NOT_RUN", "empty_population")}
     # ... so the scenario forces it, as an operator would with --feed.
     assert main(["run", "--conf", str(replay.conf), "--feed", "example_realtime"]) == 0
     rows = [row for (ds, _), group in latest(spark, replay).items() if ds in REALTIME_DATASETS for row in group]
-    assert len(rows) == 18  # gold: 6 Tier 1 + HOP_KEY_CURRENCY + HOP_VALUE_AGREEMENT + 4 rules = 12; curated 6 (--feed runs no table-wide datasets)
+    # gold: 6 Tier 1 + HOP_KEY_CURRENCY + HOP_VALUE_AGREEMENT + 4 rules = 12; curated 6; the table-wide
+    # dataset's rule from the first run (rules run on their own schedule) 1. --feed runs no table-wide checks.
+    assert len(rows) == 19
     for row in rows:
         assert row.state == "DID_NOT_RUN", row
         expected = "insufficient_history" if row.check_id == "T1_SCHEMA_DRIFT" else "empty_population"
