@@ -1,0 +1,66 @@
+{# Shared CTEs for hop checks. p: parameters from checks/hop/common.py.
+   up / dn: each side's rows (canonical key k, record time, load time, owned columns as strings);
+   up_top / dn_top: rows at each key's latest record time, ties kept;
+   judged: the keys judged in this window, with MISSING / STALE / CURRENT. #}
+{% macro ctes(p) %}
+up AS (
+  SELECT {{ p.up_key }} AS k, {{ p.up_record }} AS record_ts, {{ p.up_load }} AS load_ts
+{% for c in p.owned %}
+       , CAST({{ c.up }} AS STRING) AS u_{{ loop.index }}
+{% endfor %}
+  FROM {{ p.up_table }}
+{% if p.up_filter %}
+  WHERE {{ p.up_filter }}
+{% endif %}
+),
+up_top AS (
+  SELECT * FROM (SELECT up.*, MAX(record_ts) OVER (PARTITION BY k) AS top_ts FROM up) ranked_up
+  WHERE record_ts = top_ts
+),
+up_keys AS (
+  SELECT k, MAX(record_ts) AS up_record_ts, MAX(load_ts) AS up_load_ts FROM up_top GROUP BY k
+),
+dn AS (
+  SELECT {{ p.dn_key }} AS k, {{ p.dn_record }} AS record_ts
+{% for c in p.owned %}
+       , CAST({{ c.dn }} AS STRING) AS d_{{ loop.index }}
+{% endfor %}
+  FROM {{ p.dn_table }}
+{% if p.dn_filter %}
+  WHERE {{ p.dn_filter }}
+{% endif %}
+),
+dn_top AS (
+  SELECT * FROM (SELECT dn.*, MAX(record_ts) OVER (PARTITION BY k) AS top_ts FROM dn) ranked_dn
+  WHERE record_ts = top_ts OR top_ts IS NULL
+),
+dn_keys AS (
+  SELECT k, MAX(record_ts) AS dn_record_ts FROM dn GROUP BY k
+),
+open_keys AS (
+{% if p.hashed %}
+  SELECT DISTINCT key_hash FROM {{ p.dq_database }}.v_open_keys
+  WHERE dataset = '{{ p.dataset }}' AND check_id = 'HOP_KEY_CURRENCY'
+{% else %}
+  SELECT CAST(NULL AS STRING) AS key_hash WHERE 1 = 0
+{% endif %}
+),
+hashed_up AS (
+  SELECT u.*, {% if p.hashed %}{{ p.hash_fn }}(u.k){% else %}CAST(NULL AS STRING){% endif %} AS key_hash
+  FROM up_keys u
+),
+judged AS (
+  SELECT u.k, u.key_hash, u.up_record_ts, d.dn_record_ts,
+         CASE WHEN d.k IS NULL THEN 'MISSING'
+              WHEN d.dn_record_ts IS NULL OR d.dn_record_ts < u.up_record_ts THEN 'STALE'
+              ELSE 'CURRENT' END AS key_state
+  FROM hashed_up u
+  LEFT JOIN dn_keys d ON d.k = u.k
+  LEFT JOIN open_keys o ON o.key_hash = u.key_hash
+{% if p.full_sweep %}
+  WHERE u.up_load_ts < {{ p.deadline_end }} OR o.key_hash IS NOT NULL
+{% else %}
+  WHERE (u.up_load_ts >= {{ p.deadline_start }} AND u.up_load_ts < {{ p.deadline_end }}) OR o.key_hash IS NOT NULL
+{% endif %}
+)
+{% endmacro %}

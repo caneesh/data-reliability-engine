@@ -4,6 +4,7 @@ dataset: gold_member_coverage
 params:
   lower: mbr_mbrshp_covrg_eff_dt
   upper: mbr_mbrshp_covrg_end_dt
+  format: yyyy-MM-dd          # dates are strings in gold: parse, never compare as strings
 group_by: [src_sys_nm]
 owner: membership-gold
 status: proposed

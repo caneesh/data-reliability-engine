@@ -104,6 +104,17 @@ def _calendar(value: str) -> str:
     return value
 
 
+def _normaliser(value: Any) -> Any:
+    """strip_leading_zeros, or {parse_date: <Spark date format>} (a date string read as an ISO date)."""
+    if value == "strip_leading_zeros":
+        return value
+    if isinstance(value, dict) and set(value) == {"parse_date"} and isinstance(value["parse_date"], str) \
+            and value["parse_date"] and "'" not in value["parse_date"]:
+        return value
+    raise invalid(f"{value!r} is not allowed",
+                  "use strip_leading_zeros, or { parse_date: <format> } such as { parse_date: MM/dd/yyyy }")
+
+
 def _str_to_list(value: Any) -> Any:
     return [value] if isinstance(value, str) else value
 
@@ -121,7 +132,6 @@ Pattern = Literal["FILE_CYCLIC", "FILE_PERIODIC", "TABLE_MERGE"]
 FileFormat = Literal["sequence", "text", "xml", "csv", "parquet", "orc"]
 CadenceKind = Literal["times", "interval", "calendar_dates", "monthly"]
 Layer = Literal["RAW", "CURATED", "CDC", "GOLD"]
-Normaliser = Literal["strip_leading_zeros"]
 Granularity = Literal["second", "minute", "hour", "day"]
 Weekday = Literal["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"]
 Template = Literal[
@@ -287,7 +297,7 @@ class Dataset(SettingsOverride):
     upstream: list[Identifier] = []
     feed_filter: SqlFragment | None = None
     key: Annotated[list[Identifier], Field(min_length=1)]
-    key_normalise: dict[Identifier, Normaliser] = {}
+    key_normalise: dict[Identifier, Annotated[Any, AfterValidator(_normaliser)]] = {}
     owner: NonEmptyStr | None = None  # only for table-wide datasets that no feed lists
     expectation_version: int | None = Field(default=None, ge=1)  # only for table-wide datasets
     record_time: TimeColumn | None = None
@@ -329,12 +339,14 @@ class ColumnOrder(Model):
     lower: Identifier
     upper: Identifier
     nulls_fail: bool = False
+    format: NonEmptyStr | None = None  # parse both columns as times with this format (never compare as strings)
 
 
 class SupersededStillOpen(Model):
     group_key: Annotated[list[Identifier], Field(min_length=1), BeforeValidator(_str_to_list)]
     order_column: Identifier
     open_when: SqlFragment
+    format: NonEmptyStr | None = None  # parse order_column as a time with this format
 
 
 class ChildWithinParent(Model):
@@ -343,6 +355,7 @@ class ChildWithinParent(Model):
     child_start: Identifier
     parent_start: Identifier
     parent_end: Identifier
+    format: NonEmptyStr | None = None  # parse the three time columns with this format
 
 
 class ValueFormat(Model):

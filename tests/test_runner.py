@@ -17,7 +17,10 @@ def counts(spark, dq: str) -> tuple[int, int]:
 
 
 def test_run_writes_results_and_windows_follow_on(spark, tmp_path, capsys) -> None:
-    replay = replay_conf(spark, tmp_path, "runner_a")
+    # Curated needs a load time: without one gold's hop checks are DID_NOT_RUN / invalid_config,
+    # a CONFIGURATION reason, which keeps gold's window from moving on (spec section 4).
+    replay = replay_conf(spark, tmp_path, "runner_a", {"datasets/example_curated_enrollment.yaml": [
+        ("load_time: null ", "load_time: { column: sourcelastupdatets, granularity: minute } ")]})
     create_table(spark, replay.gold, GOLD_COLUMNS, [gold_row(), gold_row()])  # one duplicated key
     create_table(spark, replay.curated, CURATED_COLUMNS, [curated_row()])
 
@@ -41,13 +44,15 @@ def test_run_writes_results_and_windows_follow_on(spark, tmp_path, capsys) -> No
 
     # Every check on a dataset in one run shares the same event (the window is fixed before any write).
     gold_run1 = [r for r in spark.table(f"{replay.dq}.dq_check_result").collect() if r.dataset == "gold_member_coverage"]
-    assert len(gold_run1) == 5  # six checks; schema drift for this table runs under the table-wide dataset
+    # 12 checks (6 Tier 1, 2 hop, 4 rules); schema drift for this table runs under the table-wide dataset.
+    assert len(gold_run1) == 11
     assert {(r.event_id, r.window_start, r.window_end) for r in gold_run1} == {
         (first.event_id, first.window_start, first.window_end)}
 
     # The next run's window starts where the first one ended.
     assert previous_window_end(spark, replay.dq, "gold_member_coverage") == end.replace(tzinfo=timezone.utc)
-    assert main(["run", "--conf", str(replay.conf)]) == 0
+    # Seconds later nothing is due, so force the feed to see the next window.
+    assert main(["run", "--conf", str(replay.conf), "--feed", "example_realtime"]) == 0
     second = [r for r in spark.table(f"{replay.dq}.dq_check_result").collect()
               if r.run_id != run1.run_id and r.dataset == "gold_member_coverage" and r.check_id == "T1_KEY_DUPLICATES"]
     assert [r.window_start for r in second] == [end]
@@ -129,3 +134,39 @@ def test_schema_drift_runs_once_per_physical_table(spark, tmp_path) -> None:
     # With one feed named, the table-wide dataset is not planned, so the feed's dataset runs it.
     one_feed = [p.dataset.dataset for p in plan(config, "example_realtime") if p.check.check_id == "T1_SCHEMA_DRIFT"]
     assert sorted(one_feed) == ["example_curated_enrollment", "gold_member_coverage"]
+
+
+def test_run_refuses_to_start_with_an_unreadable_or_empty_secret(spark, tmp_path, capsys) -> None:
+    """Key events must not be lost quietly: a configured but unusable secret stops the run (exit 3)
+    before any row is written, and the message names the setting, never the secret."""
+    for name, content in (("runner_secret_missing", None), ("runner_secret_empty", b"  \n")):
+        secret = tmp_path / name / "hmac.secret"
+        secret.parent.mkdir()
+        if content is not None:
+            secret.write_bytes(content)
+        replay = replay_conf(spark, tmp_path / name, name, {"defaults.yaml": [
+            ("hmac_secret_file: null", f"hmac_secret_file: {secret}")]})
+        assert main(["run", "--conf", str(replay.conf)]) == 3
+        assert "cannot read hmac_secret_file" in capsys.readouterr().out
+        assert counts(spark, replay.dq) == (0, 0)
+
+
+def test_rules_are_planned_unless_retired(tmp_path) -> None:
+    import shutil
+
+    from hcsc.datalake.dre.config.loader import load
+    from hcsc.datalake.dre.runner import plan_rules
+    from tests.conftest import REPO_ROOT
+
+    conf = tmp_path / "conf"
+    shutil.copytree(REPO_ROOT / "conf", conf)
+    rule = conf / "rules" / "one_row_per_coverage.yaml"
+    rule.write_text(rule.read_text(encoding="utf-8").replace("status: proposed", "status: retired"), encoding="utf-8")
+    config, _ = load(conf)
+    planned = {(p.dataset.dataset, p.check.check_id, p.feed.feed if p.feed else None) for p in plan_rules(config)}
+    assert ("gold_member_coverage", "older_coverage_still_open", "example_realtime") in planned
+    assert ("gold_member_coverage_all", "coverage_end_date_format", None) in planned       # table-wide: no feed
+    assert ("provider_directory", "provider_specialty_present", "provider_directory_merge") in planned
+    assert not any(check == "one_row_per_coverage" for _, check, _ in planned)
+    only = {p.check.check_id for p in plan_rules(config, "provider_directory_merge")}
+    assert only == {"provider_specialty_present"}

@@ -23,7 +23,7 @@ def test_r11b_load_due_presence_checks_fail_row_checks_did_not_run(spark, tmp_pa
 
     assert main(["run", "--conf", str(replay.conf)]) == 0  # FAILED checks still complete the run
     rows = [row for (ds, _), group in latest(spark, replay).items() if ds in REALTIME_DATASETS for row in group]
-    assert len(rows) == 14
+    assert len(rows) == 21  # gold: 6 Tier 1 + HOP_KEY_CURRENCY + HOP_VALUE_AGREEMENT + 4 rules = 12; curated 6; table-wide 4; drift once per table
     for row in rows:
         assert row.state != "PASSED", row
         if row.check_id in PRESENCE:

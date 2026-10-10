@@ -1,0 +1,11 @@
+{# null_rate_max: per group, rows and null values of the column; the rule compares the rate. #}
+SELECT {% for g in group_by %}{{ g }} AS g_{{ loop.index }}, {% endfor %}
+       COUNT(*) AS population,
+       SUM(CASE WHEN {{ column }} IS NULL THEN 1 ELSE 0 END) AS nulls
+FROM {{ table }}
+{% if feed_filter %}
+WHERE {{ feed_filter }}
+{% endif %}
+{% if group_by %}
+GROUP BY {% for g in group_by %}{{ g }}{% if not loop.last %}, {% endif %}{% endfor %}
+{% endif %}

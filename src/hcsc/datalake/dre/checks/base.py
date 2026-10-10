@@ -11,10 +11,9 @@ from __future__ import annotations
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from importlib.resources import files
 from typing import TYPE_CHECKING, Any
 
-from jinja2 import Environment, StrictUndefined
+from jinja2 import Environment, PackageLoader, StrictUndefined
 
 if TYPE_CHECKING:
     from pyspark.sql import SparkSession
@@ -64,6 +63,9 @@ class CheckResult:
     reason_code: str | None = None
     group_values: dict[str, str | None] = field(default_factory=dict)
     detail: str | None = None
+    # Key events to append to dq_key_event (a DataFrame of key_hash, key_value, event, state_detail);
+    # written by the runner after the result, never by the check.
+    key_events: Any = field(default=None, compare=False, repr=False)
 
 
 def did_not_run(code: str, detail: str | None = None, group_values: dict[str, str | None] | None = None) -> CheckResult:
@@ -96,12 +98,16 @@ class CheckContext:
     default_timezone: str = "UTC"  # defaults.yaml timezone, for time columns without their own
     dq_database: str | None = None  # for checks that read their own history (T1_VOLUME, T1_SCHEMA_DRIFT)
     landing_problem: CheckResult | None = None  # the feed's landing roots could not be listed this run
+    upstreams: dict[str, Dataset] = field(default_factory=dict)  # datasets named in this dataset's key_map
+    key_secret: bytes | None = None  # HMAC secret for key_hash (from hmac_secret_file); None: no key events
+    full_sweep: bool = False  # today is full_sweep_day: hop checks read every key, not only changed ones
 
 
 class Check(ABC):
     """A check (spec section 6). Subclasses render SQL, run it and build results."""
 
     check_id: str
+    severity: str | None = None  # set for gold rules
 
     def applies_to(self, dataset: Dataset, pattern: str | None) -> bool:
         return True
@@ -129,12 +135,12 @@ def utc_literal(value) -> str:
     return "TIMESTAMP '" + as_utc(value).strftime("%Y-%m-%d %H:%M:%S.%f") + "'"
 
 
-_SQL = Environment(undefined=StrictUndefined, autoescape=False, trim_blocks=True, lstrip_blocks=True)
+_SQL = Environment(loader=PackageLoader("hcsc.datalake.dre.checks", "sql"), undefined=StrictUndefined,
+                   autoescape=False, trim_blocks=True, lstrip_blocks=True)
 
 
 def render_sql(template: str, **params: Any) -> str:
-    text = files("hcsc.datalake.dre.checks").joinpath("sql", template).read_text(encoding="utf-8")
-    return _SQL.from_string(text).render(**params)
+    return _SQL.get_template(template).render(**params)
 
 
 def group_values(row: Any, group_by: list[str]) -> dict[str, str | None]:

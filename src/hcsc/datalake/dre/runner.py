@@ -71,7 +71,45 @@ def plan(config: Config, feed_id: str | None = None) -> list[Planned]:
             for ds_id, ds in config.datasets.items() if ds_id not in listed
             for check in checks_for(ds, None)
         ]
+    work += plan_rules(config, feed_id)
     return once_per_table(work, "T1_SCHEMA_DRIFT")
+
+
+def plan_rules(config: Config, feed_id: str | None = None) -> list[Planned]:
+    """One check per gold rule that is not retired, on its dataset (with the dataset's feed, if any)."""
+    from hcsc.datalake.dre.checks.rules.rule_check import RuleCheck
+
+    planned = []
+    for rule in config.rules.values():
+        if rule.status == "retired" or rule.dataset not in config.datasets:
+            continue
+        feed = config.feed_of(rule.dataset)
+        if feed_id is not None and (feed is None or feed.feed != feed_id):
+            continue
+        parent_id = rule.params.get("parent_dataset") if rule.template == "child_within_parent" else None
+        check = RuleCheck(rule, config.datasets.get(parent_id) if parent_id else None)
+        planned.append(Planned(feed, config.datasets[rule.dataset], check))
+    return planned
+
+
+def read_key_secret(config: Config) -> bytes | None:
+    """The HMAC secret for key_hash, or None when hmac_secret_file is not set. Raises OSError if set
+    but unreadable or empty: a run must not quietly lose its key events."""
+    path = config.defaults.hmac_secret_file
+    if path is None:
+        return None
+    secret = Path(path).read_bytes().strip()
+    if not secret:
+        raise OSError("hmac_secret_file is empty")
+    return secret
+
+
+def is_full_sweep(config: Config, dataset_id: str, run_start: datetime) -> bool:
+    """Today (in the default time zone) is the dataset's full_sweep_day."""
+    from zoneinfo import ZoneInfo
+
+    day = run_start.astimezone(ZoneInfo(config.defaults.timezone)).strftime("%A").upper()
+    return day == config.dataset_settings(dataset_id).full_sweep_day
 
 
 def once_per_table(work: list[Planned], check_id: str) -> list[Planned]:
@@ -181,11 +219,17 @@ def refresh_landing(spark: SparkSession, config: Config, work: list[Planned], ru
 
 
 def evaluate(spark: SparkSession, config: Config, planned: Planned, event: Event,
-             landing_problems: dict[str, CheckResult] | None = None) -> Evaluation:
-    settings = config.dataset_settings(planned.dataset.dataset)
+             landing_problems: dict[str, CheckResult] | None = None, key_secret: bytes | None = None,
+             run_start: datetime | None = None) -> Evaluation:
+    ds = planned.dataset
+    settings = config.dataset_settings(ds.dataset)
     landing_problem = (landing_problems or {}).get(planned.feed.feed) if planned.feed else None
-    ctx = CheckContext(spark, planned.dataset, planned.feed, settings, config.defaults.timezone,
-                       config.defaults.dq_database, landing_problem)
+    ctx = CheckContext(
+        spark, ds, planned.feed, settings, config.defaults.timezone, config.defaults.dq_database, landing_problem,
+        upstreams={u: config.datasets[u] for u in ds.key_map if u in config.datasets},
+        key_secret=key_secret,
+        full_sweep=is_full_sweep(config, ds.dataset, run_start or event.window_end),
+    )
     results, duration_ms = run_check(planned.check, ctx, event)
     return Evaluation(planned, event, results, datetime.now(timezone.utc), duration_ms)
 
@@ -204,12 +248,22 @@ def result_rows(evaluation: Evaluation, run: runs.Run, execution_type: str) -> l
             "check_id": p.check.check_id, "expectation_version": p.expectation_version,
             "state": r.state, "reason_category": r.reason_category, "reason_code": r.reason_code,
             "population": r.population, "violations": r.violations, "observed": r.observed,
-            "expected": r.expected, "group_values": r.group_values, "severity": None,
+            "expected": r.expected, "group_values": r.group_values, "severity": p.check.severity,
             "evaluated_at": evaluation.evaluated_at, "duration_ms": evaluation.duration_ms,
             "detail": r.detail, "run_date": run.run_date,
         }
         for r in evaluation.results
     ]
+
+
+def write_key_events(db: str, evaluation: Evaluation, rows: list[dict[str, Any]], run: runs.Run) -> None:
+    """Append each result's key events (hop checks) with the result's evaluation id."""
+    from hcsc.datalake.dre.store.key_events import append_key_events
+
+    for result, row in zip(evaluation.results, rows):
+        if result.key_events is not None:
+            append_key_events(result.key_events, db, run.run_id, row["evaluation_id"], row["dataset"],
+                              row["check_id"], row["evaluated_at"], run.run_date)
 
 
 def describe(evaluation: Evaluation) -> list[str]:
@@ -250,6 +304,11 @@ def run(spark: SparkSession, conf: str, feed_id: str | None = None, execution_ty
               "Run dre install --apply once the platform team has created the database.")
         return EXIT_CANNOT_START
 
+    try:
+        key_secret = read_key_secret(config)
+    except OSError as exc:
+        print(f"dre run: cannot read hmac_secret_file ({type(exc).__name__}); key events need it")
+        return EXIT_CANNOT_START
     run_record = runs.start_run(spark, db, conf_dir=conf)
     planned_all = plan(config, feed_id)
     work: list[Planned] = []
@@ -263,10 +322,13 @@ def run(spark: SparkSession, conf: str, feed_id: str | None = None, execution_ty
         for skipped in sorted({p.feed.feed for p in planned_all if p.feed is not None} - due):
             print(f"{skipped}: nothing due (no slot deadline passed, no new files); not evaluated")
         for planned in work:
-            evaluation = evaluate(spark, config, planned, events[planned.dataset.dataset], landing)
+            evaluation = evaluate(spark, config, planned, events[planned.dataset.dataset], landing, key_secret,
+                                  run_record.started_at)
             try:
-                append_check_results(spark, db, result_rows(evaluation, run_record, execution_type))
+                rows = result_rows(evaluation, run_record, execution_type)
+                append_check_results(spark, db, rows)
                 written += 1
+                write_key_events(db, evaluation, rows, run_record)
             except Exception as exc:  # the run continues; the missing write makes it PARTIAL
                 log.error("could not write %s for %s: %s", planned.check.check_id, planned.dataset.dataset,
                           error_detail(exc))

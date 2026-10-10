@@ -8,6 +8,9 @@ checks:
   - T1_SCHEMA_DRIFT
   - T1_KEY_NULLS
   - T1_KEY_DUPLICATES
+  - HOP_FILE_COMPLETENESS
+  - HOP_KEY_CURRENCY
+  - HOP_VALUE_AGREEMENT
 
 # Cause checks per failure type, in order (spec section 7); see file_cyclic.yaml.
 causes:

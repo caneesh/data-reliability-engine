@@ -1,0 +1,36 @@
+{# HOP_FILE_COMPLETENESS: per upstream file (base name of file_name_column) whose first upstream
+   load + sla_hours falls in the window (every file past its deadline on the full sweep day),
+   rows here against rows upstream, each after its feed_filter. A file is a violation when it
+   has fewer rows here than upstream (none included). summary: population and violations;
+   otherwise the short files. #}
+WITH up_files AS (
+  SELECT regexp_extract({{ p.up_file }}, '([^/]+)$', 1) AS f, COUNT(*) AS up_rows, MIN({{ p.up_load }}) AS first_load
+  FROM {{ p.up_table }}
+{% if p.up_filter %}
+  WHERE {{ p.up_filter }}
+{% endif %}
+  GROUP BY regexp_extract({{ p.up_file }}, '([^/]+)$', 1)
+),
+dn_files AS (
+  SELECT regexp_extract({{ p.dn_file }}, '([^/]+)$', 1) AS f, COUNT(*) AS dn_rows
+  FROM {{ p.dn_table }}
+{% if p.dn_filter %}
+  WHERE {{ p.dn_filter }}
+{% endif %}
+  GROUP BY regexp_extract({{ p.dn_file }}, '([^/]+)$', 1)
+),
+judged AS (
+  SELECT u.f, u.up_rows, COALESCE(d.dn_rows, 0) AS dn_rows
+  FROM up_files u
+  LEFT JOIN dn_files d ON d.f = u.f
+{% if p.full_sweep %}
+  WHERE u.first_load < {{ p.deadline_end }}
+{% else %}
+  WHERE u.first_load >= {{ p.deadline_start }} AND u.first_load < {{ p.deadline_end }}
+{% endif %}
+)
+{% if summary %}
+SELECT COUNT(*) AS population, SUM(CASE WHEN dn_rows < up_rows THEN 1 ELSE 0 END) AS violations FROM judged
+{% else %}
+SELECT f, up_rows, dn_rows FROM judged WHERE dn_rows < up_rows ORDER BY f LIMIT {{ limit }}
+{% endif %}

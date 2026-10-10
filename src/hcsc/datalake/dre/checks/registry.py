@@ -10,6 +10,9 @@ from typing import TYPE_CHECKING
 import yaml
 
 from hcsc.datalake.dre.checks.base import Check
+from hcsc.datalake.dre.checks.hop.file_completeness import FileCompleteness
+from hcsc.datalake.dre.checks.hop.key_currency import KeyCurrency
+from hcsc.datalake.dre.checks.hop.value_agreement import ValueAgreement
 from hcsc.datalake.dre.checks.tier1.files_not_loaded import FilesNotLoaded
 from hcsc.datalake.dre.checks.tier1.key_duplicates import KeyDuplicates
 from hcsc.datalake.dre.checks.tier1.key_nulls import KeyNulls
@@ -23,7 +26,8 @@ if TYPE_CHECKING:
 
 CHECKS: dict[str, Check] = {
     check.check_id: check
-    for check in (OnTime(), ZeroRows(), Volume(), FilesNotLoaded(), SchemaDrift(), KeyNulls(), KeyDuplicates())
+    for check in (OnTime(), ZeroRows(), Volume(), FilesNotLoaded(), SchemaDrift(), KeyNulls(), KeyDuplicates(),
+                  FileCompleteness(), KeyCurrency(), ValueAgreement())
 }
 PATTERNS = ("FILE_CYCLIC", "FILE_PERIODIC", "TABLE_MERGE")
 TABLE_WIDE = "TABLE_WIDE"  # pseudo-pattern for datasets that no feed lists

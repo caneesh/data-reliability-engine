@@ -80,13 +80,25 @@ The engine field names chosen in step 2 are in spec section 3. The other assumpt
 4. **Genericity guard** (`tests/guard/test_generic_engine.py`): a denylist of source-specific words that must not appear under `src/`. Spec section 9, rule 9.
 5. **End-to-end CI job** (`e2e` in `.github/workflows/ci.yml`): builds synthetic tables and landing folders for both feeds, then runs `dre install --apply`, `dre run` and a verifier as separate processes against one local metastore.
 
+## Hop checks and gold rules (step 7, 2026-10-10)
+
+1. **Keys judged at their deadline.** The spec says "for each upstream key" and "older than `sla_hours`". A hop check judges an upstream key once, in the window where its latest upstream load time plus `sla_hours` falls, plus keys still open in `v_open_keys`; the full sweep judges every key past its deadline. This keeps each run's work to the keys that changed, and never judges a key the downstream layer still has time to load. HOP\_FILE\_COMPLETENESS judges each file the same way, by its first upstream load time.
+2. **Ties.** Every upstream row at a key's latest record time is kept; HOP\_VALUE\_AGREEMENT needs each of them to match this dataset's latest row (null-safe, compared as strings). So R06 (an open row and a termination tied) always fails agreement, whichever row gold kept. STALE means this dataset's latest record time for the key is older than upstream's, or null.
+3. **One result per upstream** (group `upstream`), so a dataset mapped to two upstreams gets a result for each hop.
+4. **The HMAC secret** is read once per run from `hmac_secret_file` (surrounding whitespace stripped). It is used in a Spark SQL function registered with the secret in its closure, never put in SQL text. Not set: no key events, and a FAILED HOP\_KEY\_CURRENCY says so in `detail`. Set but unreadable or empty: `dre run` exits 3 before writing anything, so key events are never lost quietly.
+5. **Key normaliser `parse_date`.** R04 needs raw dates (MM/dd/yyyy) to match curated ones (yyyy-MM-dd). `key_normalise` now also takes `{ parse_date: <format> }`, which reads the string with that format and writes it as yyyy-MM-dd. A generic capability, not per-source code.
+6. **Rule `format`.** `column_order`, `superseded_still_open` and `child_within_parent` take an optional `format` so string dates are parsed, not compared as strings (CLAUDE.md). The sample gold rules set `format: yyyy-MM-dd` (gold dates are YYYY-MM-DD, spec section 9).
+7. **Rules run over the whole table** (after `feed_filter`) every time their dataset is evaluated, not only over the event window: the rules describe the table's state. proposed and approved rules both run; the email (step 9) marks proposed ones report only.
+8. **Sample config: gold's window is held back until curated's `load_time` is confirmed.** Without it, gold's hop checks are DID\_NOT\_RUN / invalid\_config, a CONFIGURATION reason, so gold's window does not move on (spec section 4) and each run re-reads the same window from the first run's start. Correct by the spec, but worth knowing: **curated's load-time column is needed (spec section 11)**. Tests confirm it in their copy of the config.
+9. **R04 at check level** uses a synthetic raw dataset (test-only columns, with `msg_ts` as its record and load time), since the sample config has no raw dataset until its columns are confirmed.
+
 ## Notes for later steps
 
 - **Step 4:** done: `dre dry-run` parses SQL fragments (`config/fragments.py`).
 - **Step 5:** done: `LOAD_TIME_CHECKS` matches the Tier 1 checks that need `load_time`. No fallback to `partition_column` yet.
 - **Step 6:** done: T1\_FILES\_NOT\_LOADED is in `patterns/file_cyclic.yaml` and `patterns/file_periodic.yaml`.
 - **Step 6 (open):** a dataset with `partition_column` but no `load_time` may use the partition value as its load time, at the partition's granularity. Waiting on the developer to confirm whether the raw table has a load-time column; until then such a dataset's load-time checks stay DID\_NOT\_RUN / invalid\_config.
-- **Step 7:** during the full sweep (`full_sweep_day`), append CLEARED with `state_detail` "no longer upstream" for open keys (`v_open_keys`) that are no longer found upstream, so they do not stay open forever.
+- **Step 7:** done: on the full sweep, open keys no longer found upstream get CLEARED with `state_detail` "no longer upstream".
 - **Step 9:** when T1\_ON\_TIME and T1\_ZERO\_ROWS both fail for the same slot, the digest shows one alert, not two.
 - **Step 9:** the digest reports groups (`group_values`) that were present in the previous run and are missing now, since `v_latest_result` shows only the latest evaluation's groups.
 - **Step 10:** `dre retention` is a separate command, scheduled weekly. By default it lists the partitions it would drop under each table's `retention_months`; `--apply` drops them through `store/retention.py`.

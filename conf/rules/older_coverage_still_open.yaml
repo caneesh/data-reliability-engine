@@ -6,6 +6,7 @@ dataset: gold_member_coverage
 params:
   group_key: [sub_id, mem_nbr]
   order_column: mbr_mbrshp_covrg_eff_dt
+  format: yyyy-MM-dd
   open_when: "mbr_mbrshp_covrg_end_dt = '9999-12-31'"
 group_by: [src_sys_nm]
 owner: membership-gold

@@ -60,10 +60,12 @@ def raw_dataset_yaml(table: str) -> str:
 
 
 def gold_row(sub_id: str = "000123401", mem_nbr: str = "01", eff: str = "2026-01-01", agreement: str = "AGR-A",
-             end: str = "9999-12-31", source: str = "SRC_A", loaded: str = "2026-01-02 10:15:00:000000") -> dict[str, Any]:
+             end: str = "9999-12-31", source: str = "SRC_A", loaded: str = "2026-01-02 10:15:00:000000",
+             record: datetime = datetime(2026, 1, 2, 9, 0)) -> dict[str, Any]:
+    """record: src_lcts, the source version (Chicago wall time); loaded: gld_lcts as gold writes it."""
     return {"src_sys_nm": source, "sub_id": sub_id, "mem_nbr": mem_nbr, "mbr_mbrshp_covrg_eff_dt": eff,
             "covrg_agrmt_id": agreement, "mbr_mbrshp_covrg_end_dt": end,
-            "src_lcts": datetime(2026, 1, 2, 9, 0), "gld_lcts": loaded}
+            "src_lcts": record, "gld_lcts": loaded}
 
 
 def curated_row(sub_id: str = "123401", mem_nbr: str = "01", eff: str = "2026-01-01", agreement: str = "AGR-A",
@@ -106,7 +108,9 @@ def provider_raw_row(provider_id: str, loaded_at: datetime, source_file: str = "
             "source_file": source_file}
 
 
-def provider_gold_row(provider_id: str, merged_at: datetime) -> dict[str, Any]:
+def provider_gold_row(provider_id: str, merged_at: datetime, effective: datetime | None = None) -> dict[str, Any]:
+    """effective: the roster version merged (the raw row's roster_effective_ts); default two days before the merge."""
+    effective = effective if effective is not None else merged_at - timedelta(days=2)
     return {"provider_id": provider_id, "provider_name": f"Provider {provider_id}", "specialty": "general",
-            "roster_effective_ts": (merged_at - timedelta(days=2)).replace(tzinfo=None),
+            "roster_effective_ts": effective.replace(tzinfo=None),
             "merged_at": merged_at.replace(tzinfo=None)}

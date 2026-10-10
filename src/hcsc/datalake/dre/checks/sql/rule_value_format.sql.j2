@@ -1,0 +1,12 @@
+{# value_format: non-null values that do not match the regex (Spark/Java regex). population = non-null values. #}
+SELECT {% for g in group_by %}{{ g }} AS g_{{ loop.index }}, {% endfor %}
+       COUNT(*) AS population,
+       SUM(CASE WHEN CAST({{ column }} AS STRING) RLIKE {{ pattern }} THEN 0 ELSE 1 END) AS violations
+FROM {{ table }}
+WHERE {{ column }} IS NOT NULL
+{% if feed_filter %}
+  AND ({{ feed_filter }})
+{% endif %}
+{% if group_by %}
+GROUP BY {% for g in group_by %}{{ g }}{% if not loop.last %}, {% endif %}{% endfor %}
+{% endif %}

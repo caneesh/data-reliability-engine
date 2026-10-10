@@ -57,10 +57,12 @@ def main() -> None:
                  [curated_row(sub_id=f"1234{h:02d}", updated=curated_load_time(h, now)) for h in range(1, 48, 2)])
     # Second feed: the roster loaded daily for the last 40 days; the merge likewise.
     days = range(1, 40)
-    create_table(spark, "landing_db.provider_roster", PROVIDER_RAW_COLUMNS,
-                 [provider_raw_row(f"P{d:03d}", now - timedelta(days=d), "roster_latest.csv") for d in days])
+    roster = [provider_raw_row(f"P{d:03d}", now - timedelta(days=d), "roster_latest.csv") for d in days]
+    create_table(spark, "landing_db.provider_roster", PROVIDER_RAW_COLUMNS, roster)
+    # Each merge, 12 hours after its roster load, copies the roster's version: the hops are healthy.
     create_table(spark, "gold_db.provider_directory", PROVIDER_GOLD_COLUMNS,
-                 [provider_gold_row(f"P{d:03d}", now - timedelta(days=d) + timedelta(hours=12)) for d in days])
+                 [provider_gold_row(r["provider_id"], now - timedelta(days=d) + timedelta(hours=12),
+                                    effective=r["roster_effective_ts"]) for d, r in zip(days, roster)])
     spark.stop()
     print(f"e2e: synthetic tables, landing and conf ready in {work}")
 

@@ -65,7 +65,8 @@ data-reliability-engine/
             events.py        # batch load events, event_id and evaluation_id
             registry.py      # which checks run, from patterns/*.yaml
             tier1/           # one module per Tier 1 check
-            rules/           # gold rule templates
+            hop/             # hop checks: common.py (the two sides of a hop, judged keys, key_hash), one module per check
+            rules/           # rule_check.py: each gold rule as a check over its template
             sql/             # Jinja2 SQL templates
           causes/
             engine.py        # runs cause checks in order
@@ -77,6 +78,7 @@ data-reliability-engine/
             runs.py          # dq_run bookkeeping: STARTED row at start, final row at end
             writer.py        # append-only writes; the only DataFrame write path
             results.py       # appends check results through the writer
+            key_events.py    # appends hop key events to dq_key_event through the writer
             files.py         # dq_file registry: appends new and changed landed files
             retention.py     # drops expired run_date partitions; the only DROP PARTITION
             local_setup.py   # creates the dq database for tests and local runs only
@@ -139,7 +141,7 @@ layer: GOLD                       # RAW | CURATED | CDC | GOLD
 upstream: [rms_curated_enrollment]
 feed_filter: "src_sys_nm = 'RMS'" # rows belonging to this feed, when a table holds several
 key: [sub_id, mem_nbr, mbr_mbrshp_covrg_eff_dt, covrg_agrmt_id]
-key_normalise: { sub_id: strip_leading_zeros }
+key_normalise: { sub_id: strip_leading_zeros }   # strip_leading_zeros, or { parse_date: MM/dd/yyyy } (a date string read as yyyy-MM-dd)
 record_time: { column: src_lcts, format: null }  # same shape as load_time; format null when the column is DATE or TIMESTAMP
 load_time: { column: gld_lcts, format: "yyyy-MM-dd HH:mm:ss:SSSSSS", granularity: minute, timezone: America/Chicago }
                                   # timezone: IANA zone the values are written in; null uses defaults.yaml `timezone`
@@ -179,7 +181,7 @@ status: proposed                  # proposed | approved | retired
 severity: high                    # high | medium | low
 ```
 
-Rule `params` shapes, where section 6 does not spell them out: `superseded_still_open.group_key` is a list of columns (a single column may be written as a string); `child_within_parent.join` maps each child column to its parent column, for example `{ sub_id: sub_id, mem_nbr: mem_nbr }`.
+Rule `params` shapes, where section 6 does not spell them out: `superseded_still_open.group_key` is a list of columns (a single column may be written as a string); `child_within_parent.join` maps each child column to its parent column, for example `{ sub_id: sub_id, mem_nbr: mem_nbr }`. `column_order`, `superseded_still_open` and `child_within_parent` take an optional `format` (a Spark date or timestamp format): when set, the time columns they compare are parsed with it first, so dates held as strings are never compared as strings. Join and key columns get the dataset's `key_normalise`.
 
 **Validation**, in two stages:
 
@@ -307,19 +309,27 @@ T1\_ON\_TIME and T1\_ZERO\_ROWS count expected loads, not rows: with a load due 
 
 Add `owned_columns` to the dataset config when HOP\_VALUE\_AGREEMENT is wanted, for example `{enddate: mbr_mbrshp_covrg_end_dt}`.
 
+Hop details:
+
+- **A hop** is this dataset and one upstream in its `key_map`; each hop check writes one result per upstream (group `upstream`). Keys on both sides are built from the mapped columns with each side's `key_normalise`, as one string (parts joined with `|`, null written as `<null>`). Each side's `feed_filter` applies. Both datasets need `record_time` and the upstream needs `load_time`; otherwise DID\_NOT\_RUN / invalid\_config.
+- **Keys judged.** An upstream key is judged once, in the window where its latest load time plus `sla_hours` falls (so a key younger than the SLA is never judged), plus every key still open in `v_open_keys`. On `full_sweep_day`, every upstream key past its deadline. HOP\_FILE\_COMPLETENESS judges files the same way, by each file's first upstream load time.
+- **Ties.** Every upstream row at a key's latest record time is kept. HOP\_VALUE\_AGREEMENT requires each of them to match this dataset's latest row, so tied upstream rows that disagree with each other always fail.
+- **Population.** HOP\_KEY\_CURRENCY: keys judged. HOP\_VALUE\_AGREEMENT: judged keys that are CURRENT. HOP\_FILE\_COMPLETENESS: files judged; `detail` lists the short files (up to 100).
+- **Key events.** HOP\_KEY\_CURRENCY appends to `dq_key_event`: FLAGGED (newly MISSING or STALE), STILL\_FLAGGED (open and still not CURRENT), CLEARED (open and now CURRENT; on the full sweep also open keys no longer upstream, with `state_detail` "no longer upstream"). `state_detail` holds MISSING, STALE or CURRENT. `key_hash` is computed in SQL by a function registered with the secret in its closure, so the secret never appears in SQL text or query plans. Without `hmac_secret_file` no events are written and a FAILED result says so in `detail`; a configured secret file that cannot be read, or is empty, stops `dre run` before it starts (exit 3).
+
 **Gold rule templates** (one rule file per use):
 
 | Template | Params | Violation |
 | --- | --- | --- |
 | max\_rows\_per\_key | max | Key with more than `max` rows |
 | max\_open\_rows\_per\_key | open\_when, max | Key with more than `max` rows matching `open_when` |
-| column\_order | lower, upper | Row where `upper < lower` (nulls ignored unless `nulls_fail: true`) |
-| superseded\_still\_open | group\_key, order\_column, open\_when | Row matching `open_when` while a row in the same group has a later `order_column` |
-| child\_within\_parent | parent\_dataset, join, child\_start, parent\_start, parent\_end | Child row whose start falls outside its parent's window |
+| column\_order | lower, upper, format | Row where `upper < lower` (nulls ignored unless `nulls_fail: true`) |
+| superseded\_still\_open | group\_key, order\_column, open\_when, format | Row matching `open_when` while a row in the same group has a later `order_column` |
+| child\_within\_parent | parent\_dataset, join, child\_start, parent\_start, parent\_end, format | Child row whose start falls outside its parent's window |
 | value\_format | column, pattern | Non-null value not matching the regex |
 | null\_rate\_max | column, max\_rate | Group whose null rate exceeds `max_rate` |
 
-Rules with `status: proposed` run and record results but are listed as "report only" in the email. Only `approved` rules count toward alerts. The first result of a rule is its baseline; after that the email shows change from the previous run.
+Each rule is one check: `check_id` is the rule id and results carry the rule's `severity`. It runs over the whole table after the dataset's `feed_filter` whenever its dataset is evaluated, one result per the rule's `group_by` group; `retired` rules do not run. Population: keys (max\_rows\_per\_key, max\_open\_rows\_per\_key), rows with both values (column\_order; every row when `nulls_fail`), rows matching `open_when` (superseded\_still\_open), child rows with at least one matching parent (child\_within\_parent), non-null values (value\_format), rows (null\_rate\_max). Rules with `status: proposed` run and record results but are listed as "report only" in the email. Only `approved` rules count toward alerts. The first result of a rule is its baseline; after that the email shows change from the previous run.
 
 Example template (`max_open_rows_per_key.sql.j2`):
 

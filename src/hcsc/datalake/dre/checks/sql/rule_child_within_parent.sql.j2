@@ -1,0 +1,29 @@
+{# child_within_parent: child rows (with at least one matching parent row) whose start falls
+   outside every matching parent's [parent_start, parent_end] (a null end is open-ended).
+   population = child rows with a parent. #}
+SELECT {% for g in group_by %}g_{{ loop.index }}, {% endfor %}
+       COUNT(*) AS population,
+       SUM(CASE WHEN within = 0 THEN 1 ELSE 0 END) AS violations
+FROM (
+  SELECT c.row_id{% for g in group_by %}, c.g_{{ loop.index }}{% endfor %},
+         MAX(CASE WHEN c.start_v >= p.start_v AND (p.end_v IS NULL OR c.start_v <= p.end_v) THEN 1 ELSE 0 END) AS within
+  FROM (
+    SELECT monotonically_increasing_id() AS row_id{% for g in group_by %}, {{ g }} AS g_{{ loop.index }}{% endfor %},
+           {{ child_start }} AS start_v{% for c, _ in join %}, {{ c }} AS j_{{ loop.index }}{% endfor %}
+    FROM {{ table }}
+{% if feed_filter %}
+    WHERE {{ feed_filter }}
+{% endif %}
+  ) c
+  JOIN (
+    SELECT {{ parent_start }} AS start_v, {{ parent_end }} AS end_v{% for _, pc in join %}, {{ pc }} AS j_{{ loop.index }}{% endfor %}
+    FROM {{ parent_table }}
+{% if parent_filter %}
+    WHERE {{ parent_filter }}
+{% endif %}
+  ) p ON {% for _ in join %}c.j_{{ loop.index }} = p.j_{{ loop.index }}{% if not loop.last %} AND {% endif %}{% endfor %}
+  GROUP BY c.row_id{% for g in group_by %}, c.g_{{ loop.index }}{% endfor %}
+) children
+{% if group_by %}
+GROUP BY {% for g in group_by %}g_{{ loop.index }}{% if not loop.last %}, {% endif %}{% endfor %}
+{% endif %}

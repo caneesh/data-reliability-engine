@@ -1,0 +1,27 @@
+{# HOP_KEY_CURRENCY. mode summary: population (keys judged), violations (MISSING or STALE).
+   mode events: key events for dq_key_event: FLAGGED (newly MISSING or STALE), STILL_FLAGGED
+   (still open), CLEARED (open and now CURRENT; on the full sweep, open and no longer upstream). #}
+{% import "hop_common.sql.j2" as hop %}
+WITH {{ hop.ctes(p) }}
+{% if mode == "summary" %}
+SELECT COUNT(*) AS population,
+       SUM(CASE WHEN key_state <> 'CURRENT' THEN 1 ELSE 0 END) AS violations,
+       SUM(CASE WHEN key_state = 'MISSING' THEN 1 ELSE 0 END) AS missing,
+       SUM(CASE WHEN key_state = 'STALE' THEN 1 ELSE 0 END) AS stale
+FROM judged
+{% else %}
+SELECT j.key_hash, j.k AS key_value,
+       CASE WHEN j.key_state = 'CURRENT' THEN 'CLEARED'
+            WHEN o.key_hash IS NOT NULL THEN 'STILL_FLAGGED'
+            ELSE 'FLAGGED' END AS event,
+       j.key_state AS state_detail
+FROM judged j
+LEFT JOIN open_keys o ON o.key_hash = j.key_hash
+WHERE j.key_state <> 'CURRENT' OR o.key_hash IS NOT NULL
+{% if p.full_sweep %}
+UNION ALL
+SELECT o.key_hash, CAST(NULL AS STRING) AS key_value, 'CLEARED' AS event, 'no longer upstream' AS state_detail
+FROM open_keys o
+LEFT ANTI JOIN hashed_up u ON u.key_hash = o.key_hash
+{% endif %}
+{% endif %}

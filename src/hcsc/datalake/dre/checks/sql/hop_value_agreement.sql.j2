@@ -1,0 +1,14 @@
+{# HOP_VALUE_AGREEMENT: for CURRENT keys judged in the window, every upstream row at the latest
+   record time (ties kept) must agree with this dataset's latest row on each owned column
+   (null-safe, compared as strings). population = CURRENT keys; violations = keys with a mismatch. #}
+{% import "hop_common.sql.j2" as hop %}
+WITH {{ hop.ctes(p) }},
+per_key AS (
+  SELECT u.k,
+         MAX(CASE WHEN {% for c in p.owned %}NOT (u.u_{{ loop.index }} <=> d.d_{{ loop.index }}){% if not loop.last %} OR {% endif %}{% endfor %} THEN 1 ELSE 0 END) AS mismatch
+  FROM up_top u
+  JOIN dn_top d ON d.k = u.k
+  JOIN judged j ON j.k = u.k AND j.key_state = 'CURRENT'
+  GROUP BY u.k
+)
+SELECT COUNT(*) AS population, SUM(mismatch) AS violations FROM per_key

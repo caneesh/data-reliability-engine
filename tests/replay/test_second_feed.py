@@ -1,6 +1,7 @@
 """Replay scenarios on the second synthetic feed, which looks nothing like the first: a monthly
 CSV (FILE_PERIODIC, flat folder, no partitions, UTC, single-column key) and the TABLE_MERGE gold
-table built from it. Applicable scenarios: R01, R02, R03, R08, R09, R11a, R11b (at check level).
+table built from it. Applicable scenarios: R01, R02, R03, R08, R09, R11a, R11b, and the hop checks
+(R05's missing key and R06's disagreement) with a rule, at check level.
 """
 
 from __future__ import annotations
@@ -145,3 +146,27 @@ def test_r11b_load_due_presence_checks_fail_row_checks_did_not_run(spark, tmp_pa
         assert by_check[check].state == "FAILED", check
     for check in ("T1_VOLUME", "T1_KEY_NULLS", "T1_KEY_DUPLICATES", "T1_FILES_NOT_LOADED"):
         assert (by_check[check].state, by_check[check].reason_code) == ("DID_NOT_RUN", "empty_population"), check
+
+
+def test_hops_on_the_merge_table_flag_missing_and_disagreeing_providers(spark, tmp_path) -> None:
+    """Hop checks and a rule on the second feed: raw roster to the merged directory."""
+    replay, _ = setup(spark, tmp_path, "p_hop")
+    loaded = datetime.now(UTC) - timedelta(hours=30)  # past the feed's 24-hour SLA, so judged
+    raw = [provider_raw_row(p, loaded) for p in ("P001", "P002", "P003")]
+    create_table(spark, replay.provider_raw, PROVIDER_RAW_COLUMNS, raw)
+    merged = loaded + timedelta(hours=1)
+    gold = [{**provider_gold_row(p, merged), "roster_effective_ts": r["roster_effective_ts"]}
+            for p, r in zip(("P001", "P002"), raw)]            # P003 never merged
+    gold[1]["specialty"] = "cardiology"                         # P002 disagrees with the roster
+    create_table(spark, replay.provider_gold, PROVIDER_GOLD_COLUMNS, gold)
+
+    assert run_feed(replay, GOLD_FEED) == 0
+    results = latest(spark, replay)
+    [currency] = results[(GOLD, "HOP_KEY_CURRENCY")]
+    assert (currency.state, currency.population, currency.violations) == ("FAILED", 3, 1)
+    assert currency.observed == "1 missing and 0 stale of 3 keys"
+    [agreement] = results[(GOLD, "HOP_VALUE_AGREEMENT")]
+    assert (agreement.state, agreement.population, agreement.violations) == ("FAILED", 2, 1)
+    assert agreement.group_values == {"upstream": RAW}
+    [specialty] = results[(GOLD, "provider_specialty_present")]
+    assert (specialty.state, specialty.population, specialty.violations) == ("PASSED", 2, 0)
