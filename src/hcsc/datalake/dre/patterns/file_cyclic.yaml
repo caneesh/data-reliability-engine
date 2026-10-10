@@ -1,5 +1,4 @@
 # Checks for pattern FILE_CYCLIC, in run order (spec sections 6 and 7).
-# Step 8 adds the cause checks.
 pattern: FILE_CYCLIC
 checks:
   - T1_ON_TIME
@@ -9,3 +8,44 @@ checks:
   - T1_SCHEMA_DRIFT
   - T1_KEY_NULLS
   - T1_KEY_DUPLICATES
+
+# Cause checks per failure type, in order (spec section 7). The first CONFIRMED is the
+# cause; the fallback names an unproven failure. `probe` is a generic probe type and
+# `params` the feed's `probes:` key that supplies its parameters (missing or null:
+# NOT_READY). `builtin` probes need no configuration. Probes run from build step 8.
+causes:
+  file_not_loaded:
+    checks: [T1_FILES_NOT_LOADED, T1_ON_TIME]
+    order:
+      - {code: RAW_LOAD_HELD, probe: file_exists, params: load_hold_marker}
+      - {code: PIPELINE_STALLED, probe: builtin}
+      - {code: SKIPPED_BEHIND_CURSOR, probe: file_value_compare, params: partition_cursor}
+      - {code: INCOMPLETE_AT_LOAD, probe: size_changed}
+      - {code: UNREADABLE, probe: builtin}
+      - {code: LOAD_ERROR, probe: log_contains, params: load_log}
+      - {code: PASSED_OVER, fallback: true}
+  rows_missing_between_layers:
+    checks: [HOP_FILE_COMPLETENESS]
+    order:
+      - {code: NOT_RUN, probe: builtin}
+      - {code: FILE_SKIPPED, probe: builtin}
+      - {code: INVALID_KEY, probe: builtin}
+      - {code: FILTERED, probe: table_contains, params: filter_rules}
+      - {code: REJECTED, probe: table_contains, params: rejects}
+      - {code: DROPPED, fallback: true}
+  key_missing_or_stale:
+    checks: [HOP_KEY_CURRENCY, HOP_VALUE_AGREEMENT]
+    order:
+      - {code: NOT_RUN, probe: builtin}
+      - {code: KEY_MISMATCH, probe: builtin}
+      - {code: TIE_RESOLVED_BY_RULE, probe: builtin}
+      - {code: OLDER_VERSION_WRITTEN_LATER, probe: builtin}
+      - {code: FILTERED, probe: table_contains, params: filter_rules}
+      - {code: REJECTED, probe: table_contains, params: rejects}
+      - {code: MERGE_NOT_APPLIED, fallback: true}
+  load_wrote_nothing:
+    checks: [T1_ZERO_ROWS]
+    order:
+      - {code: NO_UPSTREAM_DATA, probe: builtin}
+      - {code: WRONG_PARTITION, probe: file_value_compare, params: partition_cursor}
+      - {code: EMPTY_LOAD, fallback: true}

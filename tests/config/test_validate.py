@@ -31,9 +31,10 @@ LANDING = 'landing:\n  roots: [/data/landing/example_feed]\n  file_format: seque
 def test_sample_config_is_valid() -> None:
     config, errors, warnings = validate_conf(SAMPLE_CONF)
     assert errors == []
-    assert set(config.feeds) == {"example_realtime"}
-    assert set(config.datasets) == {"example_curated_enrollment", "gold_member_coverage", "gold_member_coverage_all"}
-    assert len(config.rules) == 5
+    assert set(config.feeds) == {"example_realtime", "provider_roster_monthly", "provider_directory_merge"}
+    assert set(config.datasets) == {"example_curated_enrollment", "gold_member_coverage", "gold_member_coverage_all",
+                                    "provider_roster_raw", "provider_directory"}
+    assert len(config.rules) == 6
     # The curated load time column is not confirmed yet: reported, not an error.
     # Not confirmed yet, so reported, not errors: the curated load time column, and the raw dataset.
     assert [(Path(w.file).name, w.field) for w in warnings] == [

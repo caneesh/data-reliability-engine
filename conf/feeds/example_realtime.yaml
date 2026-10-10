@@ -15,10 +15,11 @@ cadence:
   calendar: EVERYDAY
 sla_hours: 8
 datasets: [example_curated_enrollment, gold_member_coverage]
-cause_inputs:                 # not yet confirmed (spec section 11): cause checks that need them return NOT_READY
-  stopper_file: null
-  partition_handoff_file: null
-  job_log_path: null
-  rejects_table: null
-  filter_rules: null
+probes:                       # cause-check inputs (spec section 7); not yet confirmed (spec section 11),
+                              # so the causes that use them return NOT_READY
+  load_hold_marker: { path: null }                      # file_exists
+  partition_cursor: { path: null, extract_regex: null, compare_to: partition }  # file_value_compare
+  load_log: { path_glob: null, pattern: null }          # log_contains
+  filter_rules: null                                    # table_contains, one entry per filter rule
+  rejects: { table: null, condition: null }             # table_contains
 email_sample_keys: false

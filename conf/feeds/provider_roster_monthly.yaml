@@ -1,0 +1,20 @@
+# Synthetic second feed, deliberately unlike the first: a monthly CSV file dropped in
+# a flat folder (no partitions), UTC times, a single-column key.
+feed: provider_roster_monthly
+expectation_version: 1
+pattern: FILE_PERIODIC
+owner: provider-data
+landing:
+  roots: [/data/landing/provider_roster]
+  file_format: csv
+  file_name_pattern: "*.csv"
+cadence:
+  kind: monthly
+  days_of_month: [1]
+  times: ["06:00"]
+  timezone: UTC
+sla_hours: 48
+initial_lookback_hours: 840   # 35 days, so a first window holds a monthly load
+datasets: [provider_roster_raw]
+probes:
+  load_log: { path_glob: /data/logs/provider_roster/*.log, pattern: "ERROR" }

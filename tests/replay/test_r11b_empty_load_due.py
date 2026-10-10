@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from hcsc.datalake.dre.cli import main
 from tests.fixtures.layers import CURATED_COLUMNS, GOLD_COLUMNS, create_table
-from tests.replay.conftest import latest, replay_conf
+from tests.replay.conftest import REALTIME_DATASETS, latest, replay_conf
 
 CURATED = "datasets/example_curated_enrollment.yaml"
 CURATED_LOAD_TIME = ("load_time: null ", "load_time: { column: sourcelastupdatets, granularity: minute } ")
@@ -22,7 +22,7 @@ def test_r11b_load_due_presence_checks_fail_row_checks_did_not_run(spark, tmp_pa
     create_table(spark, replay.curated, CURATED_COLUMNS)
 
     assert main(["run", "--conf", str(replay.conf)]) == 0  # FAILED checks still complete the run
-    rows = [row for group in latest(spark, replay).values() for row in group]
+    rows = [row for (ds, _), group in latest(spark, replay).items() if ds in REALTIME_DATASETS for row in group]
     assert len(rows) == 14
     for row in rows:
         assert row.state != "PASSED", row

@@ -109,4 +109,6 @@ def test_files_not_loaded_not_planned_without_a_raw_dataset(spark, tmp_path) -> 
     replay = replay_conf(spark, tmp_path, "r01_noraw")
     config, errors, _ = validate_conf(replay.conf)
     assert errors == []
-    assert not [p for p in plan(config) if p.check.check_id == "T1_FILES_NOT_LOADED"]
+    planned = [p for p in plan(config) if p.check.check_id == "T1_FILES_NOT_LOADED"]
+    # Only the second synthetic feed has a raw dataset with a file_name_column.
+    assert [(p.feed.feed, p.dataset.dataset) for p in planned] == [("provider_roster_monthly", "provider_roster_raw")]

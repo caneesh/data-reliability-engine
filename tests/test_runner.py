@@ -102,16 +102,16 @@ def test_fragment_checks_cover_open_when_and_filter_rule_syntax(spark, tmp_path)
     replay = replay_conf(spark, tmp_path, "runner_e", {
         "rules/one_open_row_per_coverage.yaml": [("mbr_mbrshp_covrg_end_dt = '9999-12-31'", "no_such_col = 1")],
         "feeds/example_realtime.yaml": [("  filter_rules: null", "  filter_rules:\n    - id: drop_tests\n"
-                                         "      condition: \"src = 'X' AND (\"\n      code_ref: example.sql:1\n"
-                                         "      owner: membership-gold\n      expected_daily_volume: 0")],
+                                         "      table: curated_db.enrollment\n"
+                                         "      condition: \"src = 'X' AND (\"\n      code_ref: example.sql:1")],
     })
     create_table(spark, replay.gold, GOLD_COLUMNS, [gold_row()])
     config, errors, _ = validate_conf(replay.conf)
     assert errors == []
     problems = {p.field: p for p in check_fragments(spark, config, "example_realtime")}
-    assert set(problems) == {"params.open_when", "cause_inputs.filter_rules[0].condition"}
+    assert set(problems) == {"params.open_when", "probes.filter_rules[0].condition"}
     assert problems["params.open_when"].file.endswith("one_open_row_per_coverage.yaml")
-    assert "ParseException" in problems["cause_inputs.filter_rules[0].condition"].problem
+    assert "ParseException" in problems["probes.filter_rules[0].condition"].problem
 
 
 def test_schema_drift_runs_once_per_physical_table(spark, tmp_path) -> None:
@@ -123,7 +123,9 @@ def test_schema_drift_runs_once_per_physical_table(spark, tmp_path) -> None:
     assert errors == []
     drift = [(p.dataset.dataset, p.dataset.table) for p in plan(config) if p.check.check_id == "T1_SCHEMA_DRIFT"]
     # Two physical tables; gold's drift runs under the table-wide dataset, not gold_member_coverage.
-    assert sorted(drift) == [("example_curated_enrollment", replay.curated), ("gold_member_coverage_all", replay.gold)]
+    assert sorted(drift) == [("example_curated_enrollment", replay.curated), ("gold_member_coverage_all", replay.gold),
+                             ("provider_directory", replay.provider_gold),
+                             ("provider_roster_raw", replay.provider_raw)]
     # With one feed named, the table-wide dataset is not planned, so the feed's dataset runs it.
     one_feed = [p.dataset.dataset for p in plan(config, "example_realtime") if p.check.check_id == "T1_SCHEMA_DRIFT"]
     assert sorted(one_feed) == ["example_curated_enrollment", "gold_member_coverage"]

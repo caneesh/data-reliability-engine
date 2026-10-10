@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from hcsc.datalake.dre.cli import main
 from tests.fixtures.layers import CURATED_COLUMNS, GOLD_COLUMNS, create_table, gold_row
-from tests.replay.conftest import latest, replay_conf
+from tests.replay.conftest import REALTIME_DATASETS, latest, replay_conf
 
 FEED = "feeds/example_realtime.yaml"
 CURATED = "datasets/example_curated_enrollment.yaml"
@@ -30,9 +30,13 @@ def test_r11a_no_load_due_everything_did_not_run(spark, tmp_path) -> None:
     create_table(spark, replay.gold, GOLD_COLUMNS)
     create_table(spark, replay.curated, CURATED_COLUMNS)
 
+    # A scheduled run does not evaluate a feed with nothing due ...
     assert main(["run", "--conf", str(replay.conf)]) == 0
-    rows = [row for group in latest(spark, replay).values() for row in group]
-    assert len(rows) == 14
+    assert not [r for r in spark.table(f"{replay.dq}.dq_check_result").collect() if r.feed == "example_realtime"]
+    # ... so the scenario forces it, as an operator would with --feed.
+    assert main(["run", "--conf", str(replay.conf), "--feed", "example_realtime"]) == 0
+    rows = [row for (ds, _), group in latest(spark, replay).items() if ds in REALTIME_DATASETS for row in group]
+    assert len(rows) == 12  # gold 6 + curated 6 (--feed runs no table-wide datasets)
     for row in rows:
         assert row.state == "DID_NOT_RUN", row
         expected = "insufficient_history" if row.check_id == "T1_SCHEMA_DRIFT" else "empty_population"
@@ -46,6 +50,6 @@ def test_r11a_rows_outside_the_feed_filter_are_an_empty_population(spark, tmp_pa
     create_table(spark, replay.gold, GOLD_COLUMNS, [gold_row(source="SRC_B")])
     create_table(spark, replay.curated, CURATED_COLUMNS)
 
-    assert main(["run", "--conf", str(replay.conf)]) == 0
+    assert main(["run", "--conf", str(replay.conf), "--feed", "example_realtime"]) == 0
     [gold] = latest(spark, replay)[("gold_member_coverage", "T1_KEY_DUPLICATES")]
     assert (gold.state, gold.reason_code) == ("DID_NOT_RUN", "empty_population")

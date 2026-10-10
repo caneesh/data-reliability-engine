@@ -16,6 +16,7 @@ retention_months:             # spec section 5: results and events 7 years, file
 
 recipients:                   # feed owner -> email addresses (spec section 8)
   membership-gold: [dre-alerts@example.com]
+  provider-data: [provider-data-alerts@example.com]
 
 # Settings
 sla_hours: 8

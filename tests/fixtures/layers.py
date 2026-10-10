@@ -85,3 +85,28 @@ def create_table(spark, table: str, columns: list[tuple[str, str]], rows: list[d
         data = [tuple(row.get(name) for name, _ in columns) for row in rows]
         schema = ", ".join(f"{n} {k}" for n, k in cols)
         spark.createDataFrame(data, schema).write.insertInto(table)
+
+
+# Second synthetic feed: a monthly provider roster (CSV, flat folder, UTC, single-column key).
+PROVIDER_RAW_COLUMNS = [
+    ("provider_id", "STRING"), ("provider_name", "STRING"), ("specialty", "STRING"),
+    ("roster_effective_ts", "TIMESTAMP"), ("loaded_at", "TIMESTAMP"), ("source_file", "STRING"),
+]
+PROVIDER_GOLD_COLUMNS = [
+    ("provider_id", "STRING"), ("provider_name", "STRING"), ("specialty", "STRING"),
+    ("roster_effective_ts", "TIMESTAMP"), ("merged_at", "TIMESTAMP"),
+]
+
+
+def provider_raw_row(provider_id: str, loaded_at: datetime, source_file: str = "roster_2026_01.csv") -> dict[str, Any]:
+    """UTC times (naive values are UTC in the test session)."""
+    return {"provider_id": provider_id, "provider_name": f"Provider {provider_id}", "specialty": "general",
+            "roster_effective_ts": (loaded_at - timedelta(days=1)).replace(tzinfo=None),
+            "loaded_at": loaded_at.replace(tzinfo=None),
+            "source_file": source_file}
+
+
+def provider_gold_row(provider_id: str, merged_at: datetime) -> dict[str, Any]:
+    return {"provider_id": provider_id, "provider_name": f"Provider {provider_id}", "specialty": "general",
+            "roster_effective_ts": (merged_at - timedelta(days=2)).replace(tzinfo=None),
+            "merged_at": merged_at.replace(tzinfo=None)}

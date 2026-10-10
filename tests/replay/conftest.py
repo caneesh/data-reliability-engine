@@ -16,15 +16,20 @@ class Replay:
     dq: str
     gold: str
     curated: str
+    provider_raw: str = ""
+    provider_gold: str = ""
 
 
 def replay_conf(spark, tmp_path: Path, name: str, edits: dict[str, list[tuple[str, str]]] | None = None) -> Replay:
     """Copy conf/, rename its tables and dq database for this scenario, apply edits, create the store."""
-    replay = Replay(tmp_path / "conf", f"dq_{name}", f"{name}_gold.member_coverage", f"{name}_curated.enrollment")
+    replay = Replay(tmp_path / "conf", f"dq_{name}", f"{name}_gold.member_coverage", f"{name}_curated.enrollment",
+                    f"{name}_landing.provider_roster", f"{name}_gold.provider_directory")
     shutil.copytree(REPO_ROOT / "conf", replay.conf)
     for path in replay.conf.rglob("*.yaml"):
         text = path.read_text(encoding="utf-8")
         text = text.replace("gold_db.member_coverage", replay.gold).replace("curated_db.enrollment", replay.curated)
+        text = text.replace("landing_db.provider_roster", replay.provider_raw)
+        text = text.replace("gold_db.provider_directory", replay.provider_gold)
         text = text.replace("dq_database: dq\n", f"dq_database: {replay.dq}\n")
         path.write_text(text, encoding="utf-8")
     for rel, pairs in (edits or {}).items():
@@ -36,6 +41,10 @@ def replay_conf(spark, tmp_path: Path, name: str, edits: dict[str, list[tuple[st
         path.write_text(text, encoding="utf-8")
     create_store(spark, replay.dq)
     return replay
+
+
+# The first synthetic feed's datasets (feed example_realtime, plus the table-wide one over its gold table).
+REALTIME_DATASETS = {"gold_member_coverage", "example_curated_enrollment", "gold_member_coverage_all"}
 
 
 def latest(spark, replay: Replay) -> dict[tuple[str, str], list]:

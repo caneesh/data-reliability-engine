@@ -111,19 +111,22 @@ landing:
   file_format: sequence           # sequence | text | xml | csv | parquet | orc
   file_name_pattern: "*"
 cadence:
-  kind: times                     # times | interval | calendar_dates
+  kind: times                     # times | interval | calendar_dates | monthly
   times: ["00:30", "04:00", "08:00", "12:00", "16:00", "20:00"]  # kind times: quoted HH:MM
   # kind interval:       interval_minutes: 60
-  # kind calendar_dates: dates: [2026-01-05, 2026-02-02]
+  # kind calendar_dates: dates: [2026-01-05, 2026-02-02]   (times optional, default 00:00)
+  # kind monthly:        days_of_month: [1, 15], times: ["06:00"]   (a day past the month's end is skipped)
   timezone: America/Chicago
   calendar: EVERYDAY              # EVERYDAY | WEEKDAYS (named calendar files: not in release 1; dre validate rejects them)
 sla_hours: 8
 datasets: [rms_raw_enrollment, rms_curated_enrollment, gold_member_coverage]
-cause_inputs:                     # optional; empty means NOT_READY for checks that need it
-  stopper_file: null
-  partition_handoff_file: null
-  job_log_path: null
-  rejects_table: null
+check_delay_minutes: 0            # evaluate a slot this long after its deadline (default 0)
+probes:                           # cause probe parameters by key (section 7); missing or null: NOT_READY
+  load_hold_marker: { path: null }
+  partition_cursor: { path: null, extract_regex: null, compare_to: partition }
+  load_log: { path_glob: null, pattern: null }
+  filter_rules: null
+  rejects: { table: null, condition: null }
 email_sample_keys: false
 ```
 
@@ -338,52 +341,76 @@ FROM (
 
 ## 7. Cause checks
 
-When a check FAILS, the cause engine runs every cause check listed for that failure type, in order, and writes one `dq_cause_result` row per cause check. The cause is the first CONFIRMED. If none is confirmed, the cause is "not proven" and the email lists what was ruled out and what was NOT\_READY. A cause check whose config input is empty returns NOT\_READY, never RULED\_OUT. Cause checks are listed per pattern in `patterns/*.yaml`, so adding one never touches the engine.
+When a check FAILS, the cause engine runs every cause check listed for that failure type, in order, and writes one `dq_cause_result` row per cause check. The cause is the first CONFIRMED. If none is confirmed, the cause is "not proven" and the email lists what was ruled out and what was NOT\_READY. A cause check whose parameters are missing or null returns NOT\_READY, never RULED\_OUT.
+
+**Generic probes.** Every cause check is a probe. The engine knows a fixed set of generic probe types and nothing about any source:
+
+| Probe | Parameters | Confirmed when |
+| --- | --- | --- |
+| `file_exists` | `path` | The file exists |
+| `file_value_compare` | `path`, `extract_regex`, `compare_to: partition \| window` | The value read from the file (first regex group) is later than the failing file's partition, or outside the event window |
+| `log_contains` | `path_glob`, `pattern` | A log file matching the glob has a line matching the pattern that names the failure (file or key) |
+| `table_contains` | `table`, `condition` (optional `id`, `code_ref`) | The table has rows matching the condition for the failure's file or key |
+| `size_changed` | none | The file's size changed after it was first seen (`dq_file`) |
+| `builtin` | none | Engine logic over DRE's own evidence (tables, `dq_file`, dataset config) |
+
+Each pattern's YAML lists, per failure type, the checks it covers and the cause entries in order: `{code, probe, params}`, where `params` names a key in the feed's `probes:` that supplies the parameters, and the last entry is the fallback. A feed configures its probes by key; a key may hold one parameter set or a list (any one confirming confirms the cause). `dre validate` checks every key against the feed's pattern and the probe type's parameters. Adding a cause never touches the engine; a new kind of evidence is a new generic probe type.
+
+```yaml
+# feed config
+probes:
+  load_hold_marker: { path: /data/ctl/example_feed/hold.flag }
+  partition_cursor: { path: /data/ctl/example_feed/cursor.prm, extract_regex: "(\\d{8})", compare_to: partition }
+  load_log: { path_glob: /data/logs/example_feed/*.log, pattern: "ERROR" }
+  filter_rules:
+    - { table: curated_db.enrollment, condition: "status = 'TEST'", id: drop_test_members, code_ref: "load.sql:120" }
+  rejects: { table: ops_db.rejects, condition: "reason IS NOT NULL" }
+```
 
 **File not loaded** (T1\_FILES\_NOT\_LOADED, T1\_ON\_TIME on file patterns)
 
-| Order | Cause code | Confirmed when | Needs |
+| Order | Cause code | Confirmed when | Probe (`params` key) |
 | --- | --- | --- | --- |
-| 1 | RAW\_LOAD\_HELD | The stopper file exists | `cause_inputs.stopper_file` |
-| 2 | PIPELINE\_STALLED | No file first seen after this one has rows in raw either | nothing |
-| 3 | SKIPPED\_BEHIND\_CURSOR | The partition named in the handoff file is later than this file's folder | `cause_inputs.partition_handoff_file` |
-| 4 | INCOMPLETE\_AT\_LOAD | The file's size changed after it was first seen | nothing |
-| 5 | UNREADABLE | The file's header can't be read with the reader for `file_format` | nothing |
-| 6 | LOAD\_ERROR | The job log mentions the file with an error | `cause_inputs.job_log_path` |
+| 1 | RAW\_LOAD\_HELD | A load-hold marker file exists | `file_exists` (`load_hold_marker`) |
+| 2 | PIPELINE\_STALLED | No file first seen after this one has rows in raw either | `builtin` |
+| 3 | SKIPPED\_BEHIND\_CURSOR | The partition named in the cursor file is later than this file's folder | `file_value_compare`, `compare_to: partition` (`partition_cursor`) |
+| 4 | INCOMPLETE\_AT\_LOAD | The file's size changed after it was first seen | `size_changed` |
+| 5 | UNREADABLE | The file's header can't be read with the reader for `file_format` | `builtin` |
+| 6 | LOAD\_ERROR | The job log mentions the file with an error | `log_contains` (`load_log`) |
 | fallback | PASSED\_OVER | Later files loaded; no cause confirmed |  |
 
 **Rows missing between layers** (HOP\_FILE\_COMPLETENESS)
 
-| Order | Cause code | Confirmed when | Needs |
+| Order | Cause code | Confirmed when | Probe (`params` key) |
 | --- | --- | --- | --- |
-| 1 | NOT\_RUN | Nothing loaded into this dataset after the upstream rows arrived | nothing |
-| 2 | FILE\_SKIPPED | No rows from that file here at all, while later files did load | nothing |
-| 3 | INVALID\_KEY | The upstream row has a null or unparseable key column | nothing |
-| 4 | FILTERED | The upstream row matches a configured filter rule | `cause_inputs.filter_rules` |
-| 5 | REJECTED | The row is in the rejects table | `cause_inputs.rejects_table` |
+| 1 | NOT\_RUN | Nothing loaded into this dataset after the upstream rows arrived | `builtin` |
+| 2 | FILE\_SKIPPED | No rows from that file here at all, while later files did load (file patterns) | `builtin` |
+| 3 | INVALID\_KEY | The upstream row has a null or unparseable key column | `builtin` |
+| 4 | FILTERED | The upstream row matches a configured filter rule | `table_contains` (`filter_rules`) |
+| 5 | REJECTED | The row is in the rejects table | `table_contains` (`rejects`) |
 | fallback | DROPPED | No cause confirmed |  |
 
 **Key missing or stale** (HOP\_KEY\_CURRENCY, HOP\_VALUE\_AGREEMENT)
 
-| Order | Cause code | Confirmed when | Needs |
+| Order | Cause code | Confirmed when | Probe (`params` key) |
 | --- | --- | --- | --- |
-| 1 | NOT\_RUN | No row in this dataset has a load time after the upstream record's load time | nothing |
-| 2 | KEY\_MISMATCH | The key matches once a column in `mismatch_probe_drop` is ignored | `mismatch_probe_drop` on the dataset |
-| 3 | TIE\_RESOLVED\_BY\_RULE | Several upstream rows share the latest record time, and applying `winner_rule` picks a row other than the one expected (for example the open row over a termination) | `winner_rule` |
-| 4 | OLDER\_VERSION\_WRITTEN\_LATER | STALE only: this row's load time is later than the newer upstream record's load time, compared at `load_time.granularity` | nothing |
-| 5 | FILTERED | Matches a configured filter rule | `cause_inputs.filter_rules` |
-| 6 | REJECTED | In the rejects table | `cause_inputs.rejects_table` |
+| 1 | NOT\_RUN | No row in this dataset has a load time after the upstream record's load time | `builtin` |
+| 2 | KEY\_MISMATCH | The key matches once a column in `mismatch_probe_drop` is ignored | `builtin` (NOT\_READY without `mismatch_probe_drop` on the dataset) |
+| 3 | TIE\_RESOLVED\_BY\_RULE | Several upstream rows share the latest record time, and applying `winner_rule` picks a row other than the one expected (for example the open row over a termination) | `builtin` (NOT\_READY without `winner_rule`) |
+| 4 | OLDER\_VERSION\_WRITTEN\_LATER | STALE only: this row's load time is later than the newer upstream record's load time, compared at `load_time.granularity` | `builtin` |
+| 5 | FILTERED | Matches a configured filter rule | `table_contains` (`filter_rules`) |
+| 6 | REJECTED | In the rejects table | `table_contains` (`rejects`) |
 | fallback | MERGE\_NOT\_APPLIED | No cause confirmed |  |
 
 **Load wrote nothing** (T1\_ZERO\_ROWS)
 
-| Order | Cause code | Confirmed when | Needs |
+| Order | Cause code | Confirmed when | Probe (`params` key) |
 | --- | --- | --- | --- |
-| 1 | NO\_UPSTREAM\_DATA | The upstream dataset also had zero rows in the window | upstream configured |
-| 2 | WRONG\_PARTITION | Rows were written to a partition other than the one expected from the handoff file | `cause_inputs.partition_handoff_file` |
+| 1 | NO\_UPSTREAM\_DATA | The upstream dataset also had zero rows in the window | `builtin` (needs `upstream`) |
+| 2 | WRONG\_PARTITION | Rows were written to a partition other than the one named in the cursor file | `file_value_compare`, `compare_to: partition` (`partition_cursor`) |
 | fallback | EMPTY\_LOAD | No cause confirmed |  |
 
-A filter rule in `cause_inputs.filter_rules` has `id`, `condition` (SQL), `code_ref` (file and line or commit), `owner` and `expected_daily_volume`.
+A filter rule is one `table_contains` parameter set under `filter_rules`: `table` and `condition` (SQL), with optional `id` and `code_ref` (file and line, or commit).
 
 ## 8. Command line, email and watchdog
 
@@ -392,7 +419,7 @@ A filter rule in `cause_inputs.filter_rules` has `id`, `condition` (SQL), `code_
 | `dre validate [--conf DIR]` | Static validation of all config | 0 valid, 1 errors |
 | `dre dry-run --feed F` | Runs preconditions and checks for one feed, prints results, writes nothing | 0 always, unless the command itself fails |
 | `dre install --print\|--apply\|--check [--conf DIR]` | `--print` renders the store DDL for the configured dq database; `--apply` creates missing tables and views (all IF NOT EXISTS, safe to rerun); `--check` compares the existing tables and views with the DDL | 0 done or matching, 1 differences found or apply failed, 3 the database does not exist |
-| `dre run [--feed F] [--execution-type NORMAL\|RERUN\|REPLAY]` | Full run: preconditions, checks, causes, append results, send email | 0 run completed (even with FAILED checks), 2 partial, 3 could not start (including: the store is not installed; the message names `dre install`) |
+| `dre run [--feed F] [--execution-type NORMAL\|RERUN\|REPLAY]` | Scheduled every hour. Evaluates only feeds with something due: a cadence slot's deadline (slot + `sla_hours`) passed since the feed's last evaluated window, or new or changed landed files. `--feed F` evaluates F even when nothing is due. Then preconditions, checks, causes, append results, send email | 0 run completed (even with FAILED checks), 2 partial, 3 could not start (including: the store is not installed; the message names `dre install`) |
 | `dre trace --dataset D --key "k1,k2,..."` | Prints one line per layer along the `upstream` chain: present or not, record time, load time, file; ends with the first layer where the key is absent or older, then that hop's cause line | 0 |
 | `dre watchdog` | Checks the last expected run exists and wrote every expected check; emails if not | 0 healthy, 1 alert sent |
 
@@ -406,7 +433,9 @@ A filter rule in `cause_inputs.filter_rules` has `id`, `condition` (SQL), `code_
 
 Recipients come from each owner (a feed's, a table-wide dataset's or a rule's): `recipients` in `defaults.yaml` maps each owner to its addresses.
 
-**Watchdog.** A separate entry point with no dependency on the main run's code beyond the store schema. It alerts when no `dq_run` row exists for an expected run time plus grace, when a run's latest row is still STARTED after the grace, or when `checks_written < checks_expected`. Schedule it separately from the main run (a different scheduler folder or host), so one scheduling failure doesn't stop both.
+**Scheduling.** `dre run` is scheduled hourly; there is no per-feed schedule. Each run decides which feeds are due (see the command table) and skips the rest, writing nothing for them; a skipped feed's window simply carries on to the next run that evaluates it. A feed's `check_delay_minutes` (default 0) moves its window end back, so a slot is judged only once its deadline plus the delay has passed. Table-wide datasets run when a due feed's dataset shares their table, and every run when no feed dataset covers their table.
+
+**Watchdog.** A separate entry point with no dependency on the main run's code beyond the store schema. The expected run times are every hour. It alerts when no `dq_run` row exists for an expected hour plus grace, when a run's latest row is still STARTED after the grace, or when `checks_written < checks_expected`. Schedule it separately from the main run (a different scheduler folder or host), so one scheduling failure doesn't stop both.
 
 **Compute budget.** Each dataset has `compute_budget_minutes`. Before running, estimate the scan size from partition statistics; if a check exceeds its budget, cancel it and record DID\_NOT\_RUN / budget\_exceeded. Hop checks read only keys changed in the window, plus a full sweep on the day set by `full_sweep_day` (default Sunday).
 
@@ -421,7 +450,7 @@ All tests run on local-mode Spark against synthetic tables built by fixtures in 
 - one raw table holding two feeds, told apart by file name
 - landing files as small local files, including a sequence file
 
-**Replay scenarios.** Each is a test that builds the situation, runs `dre run`, and asserts the check state and the cause. Each is the shape of a real past incident, with no real data.
+**Replay scenarios.** Each is a test that builds the situation, runs `dre run`, and asserts the check state and the cause. Each is the shape of a real past incident, with no real data. Every scenario that applies also runs against the second synthetic feed (`provider_roster_monthly` and `provider_directory_merge` in `conf/`), which looks nothing like the first: monthly CSV in a flat folder, no partitions, UTC times, a single-column key, and a TABLE\_MERGE gold table. CI also runs `dre install` and `dre run` end to end, as separate processes, against both synthetic feeds (`tests/e2e/`).
 
 | ID | Situation built | Expected check | Expected cause |
 | --- | --- | --- | --- |
@@ -449,6 +478,7 @@ All tests run on local-mode Spark against synthetic tables built by fixtures in 
 6. **Database creation.** CREATE DATABASE is allowed only for the dq database and only in `store/local_setup.py`. No other module under `src/` may reference `local_setup`, so `dre run` never creates the database.
 7. **Email.** Email text contains no `key_value`. Until the digest exists (step 9) the guard is static: nothing in `notify/` references `key_value`. Step 9 adds a test on the rendered email text.
 8. **Store DDL only through `dre install`.** CREATE TABLE and CREATE [OR REPLACE] VIEW are allowed only on the dq store and only in `store/ddl.sql`. Only `store/install.py` (behind `dre install --apply`) and `store/local_setup.py` may reference `apply_ddl`, so `dre run` never creates the store.
+9. **Generic engine.** Engine code, the config schema, pattern YAML and SQL templates (everything under `src/`) must not contain source-specific words. The denylist lives in `tests/guard/test_generic_engine.py` (stopper, handoff, file\_date, sub\_id, rms) and grows whenever a source-specific name is found; such words may appear only in `conf/` and `tests/`.
 
 ## 10. Build order
 
@@ -476,7 +506,7 @@ Build in this order. Each step ends with its tests passing and is usable before 
 | --- | --- | --- |
 | Language | PySpark 3.5.1 | Team: what you can maintain; platform: whether Python jobs can be submitted |
 | Python version and packages on the cluster | Python 3.10+, dependencies shipped in a zip | Platform team |
-| Where it runs and is scheduled | Control-M for the main run, a separate folder or cron for the watchdog | Scheduling owner |
+| Where it runs and is scheduled | `dre run` hourly (Control-M or cron); the watchdog hourly from a separate folder or host | Scheduling owner |
 | Database name and service account | `dq`, read-only account with write only to `dq` | Platform team |
 | Use of AI coding tools on HCSC code | Only through HCSC-approved access | HCSC policy |
 
@@ -496,6 +526,10 @@ Build in this order. Each step ends with its tests passing and is usable before 
 
 The real RMS values (landing path, stopper and handoff file names, database and table names) are kept with the deployed instance's configuration, not in this repository. The shape the engine must support:
 
-- One feed, pattern FILE\_CYCLIC: sequence files; six runs a day on an every-day calendar; a stopper file that holds the raw load; a handoff file naming the partition passed between phases.
+- One feed, pattern FILE\_CYCLIC: sequence files; six loads a day on an every-day calendar. Its source-specific cause inputs are probe configs (section 7), with the real paths kept in the deployed config:
+  - the stopper file that holds the raw load: `probes.load_hold_marker: { path: <stopper file> }` (`file_exists`, for RAW\_LOAD\_HELD);
+  - the handoff file naming the partition passed between phases: `probes.partition_cursor: { path: <handoff file>, extract_regex: <partition pattern>, compare_to: partition }` (`file_value_compare`, for SKIPPED\_BEHIND\_CURSOR and WRONG\_PARTITION);
+  - the job log: `probes.load_log: { path_glob: <log glob>, pattern: <error pattern> }` (`log_contains`, for LOAD\_ERROR);
+  - filter rules and the rejects table: `probes.filter_rules` and `probes.rejects` (`table_contains`, for FILTERED and REJECTED), once developer question 6 is answered.
 - Three datasets: raw (dates MM/DD/YYYY, partitioned by file date, real-time rows told apart by file name); curated (several versions per key, its own load time and record time); gold (four-part key with a zero-padded subscriber id, minute-granular load time, `feed_filter` on source system).
 - Three rules: `one_row_per_coverage` (max\_rows\_per\_key), `end_not_before_start` (column\_order), `older_coverage_still_open` (superseded\_still\_open, grouped by source system).

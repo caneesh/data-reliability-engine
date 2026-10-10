@@ -4,7 +4,7 @@ Release 1 has one kind of event, a batch load event: one dataset and one load
 window [window_start, window_end) in UTC, including its start and excluding
 its end.
 
-- window_end = the run's start minus settle_minutes.
+- window_end = the run's start minus settle_minutes and the feed's check_delay_minutes.
 - window_start = the latest window_end among the dataset's NORMAL events,
   skipping events that had any check DID_NOT_RUN for a PLATFORM, BUDGET or
   CONFIGURATION reason (those windows are evaluated again); on a dataset's
@@ -58,9 +58,11 @@ def evaluation_id(event_id: str, check_id: str, expectation_version: int, engine
 
 
 def window_for(dataset: Dataset, run_start: datetime, previous_end: datetime | None,
-               settings: Settings, default_tz: str) -> Event:
-    """The dataset's event for a run starting at run_start, given its previous window end."""
-    end = as_utc(run_start) - timedelta(minutes=settings.settle_minutes)
+               settings: Settings, default_tz: str, check_delay_minutes: int = 0) -> Event:
+    """The dataset's event for a run starting at run_start, given its previous window end.
+    The feed's check_delay_minutes moves the end back further, so a slot is judged only once
+    its deadline plus the delay has passed."""
+    end = as_utc(run_start) - timedelta(minutes=settings.settle_minutes + check_delay_minutes)
     previous = previous_end
     start = as_utc(previous) if previous is not None else end - timedelta(hours=settings.initial_lookback_hours)
     if dataset.load_time is not None:

@@ -23,6 +23,7 @@ from hcsc.datalake.dre.config.loader import (
     load,
 )
 from hcsc.datalake.dre.config.models import TEMPLATE_PARAMS
+from hcsc.datalake.dre.config.probes import PROBE_PARAMS, parameter_sets
 
 # Checks whose evaluation window is defined by load time (spec section 6).
 LOAD_TIME_CHECKS = ("T1_ON_TIME", "T1_ZERO_ROWS", "T1_VOLUME", "T1_KEY_NULLS")
@@ -83,6 +84,7 @@ def cross_check(config: Config, feeds_complete: bool = True) -> list[ConfigError
             else:
                 member_of[ds] = feed_id
         check_owner("feed", feed_id, feed.owner)
+        errors.extend(_check_probes(config, feed_id))
         if feed.pattern in ("FILE_CYCLIC", "FILE_PERIODIC") and not any(
             datasets[d].layer == "RAW" and datasets[d].file_name_column for d in feed.datasets if d in datasets
         ):
@@ -202,6 +204,34 @@ def cross_check(config: Config, feeds_complete: bool = True) -> list[ConfigError
                 f"add datasets/{parent}.yaml or fix parent_dataset")
 
     return errors
+
+
+def _check_probes(config: Config, feed_id: str) -> list[ConfigError]:
+    """Each `probes:` key must be one the feed's pattern uses, with parameters for its probe type."""
+    from hcsc.datalake.dre.checks.registry import probe_keys
+
+    feed = config.feeds[feed_id]
+    source = config.sources[("feed", feed_id)]
+    keys = probe_keys(feed.pattern)
+    found: list[ConfigError] = []
+    for key, raw in feed.probes.items():
+        if key not in keys:
+            file, line = config.locate("feed", feed_id, ("probes", key))
+            found.append(ConfigError(file, line, f"probes.{key}",
+                                     f"pattern {feed.pattern} has no cause that uses probe key {key!r}",
+                                     f"use one of {sorted(keys)}, or remove it"))
+            continue
+        model = PROBE_PARAMS.get(keys[key])
+        if model is None:
+            continue
+        many = isinstance(raw, list)
+        for i, params in enumerate(parameter_sets(raw)):
+            try:
+                model.model_validate(params)
+            except ValidationError as exc:
+                prefix = ("probes", key, i) if many else ("probes", key)
+                found.extend(errors_from_validation(exc, source.file, source.node, prefix=prefix))
+    return found
 
 
 def _git_root(start: Path) -> Path | None:

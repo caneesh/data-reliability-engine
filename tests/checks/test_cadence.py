@@ -57,3 +57,11 @@ def test_named_calendar_is_rejected_by_config_and_guarded_here() -> None:
 
 def test_slot_label_is_local_time_of_day() -> None:
     assert slot_label(cadence(), datetime(2026, 1, 15, 6, 30, tzinfo=UTC)) == "00:30"
+
+
+def test_monthly_days_and_short_months() -> None:
+    monthly = cadence(kind="monthly", days_of_month=[1, 31], times=["06:00"], timezone="UTC")
+    found = slots(monthly, datetime(2026, 1, 15, tzinfo=UTC), datetime(2026, 4, 15, tzinfo=UTC))
+    assert found == [datetime(2026, 1, 31, 6, tzinfo=UTC), datetime(2026, 2, 1, 6, tzinfo=UTC),
+                     datetime(2026, 3, 1, 6, tzinfo=UTC), datetime(2026, 3, 31, 6, tzinfo=UTC),
+                     datetime(2026, 4, 1, 6, tzinfo=UTC)]  # no 31 February

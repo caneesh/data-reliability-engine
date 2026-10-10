@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from hcsc.datalake.dre.cli import main
 from tests.fixtures.layers import CURATED_COLUMNS, GOLD_COLUMNS, create_table, curated_row, gold_row
-from tests.replay.conftest import latest, replay_conf
+from tests.replay.conftest import REALTIME_DATASETS, latest, replay_conf
 
 CURATED = "datasets/example_curated_enrollment.yaml"
 
@@ -41,6 +41,7 @@ def test_r09_renamed_column_is_column_missing_and_run_continues(spark, tmp_path,
     assert (curated.state, curated.population, curated.violations) == ("PASSED", 2, 0)
 
     [run] = spark.table(f"{replay.dq}.v_latest_run").collect()
-    # gold 6 + curated 6 + table-wide 3, less one: schema drift runs once per physical table.
-    assert (run.status, run.checks_expected, run.checks_written) == ("COMPLETED", 14, 14)
+    assert run.status == "COMPLETED" and run.checks_written == run.checks_expected
+    # This feed: gold 6 + curated 6 + table-wide 3, less one: schema drift runs once per physical table.
+    assert len([k for k in results if k[0] in REALTIME_DATASETS]) == 14
     assert "dre run: COMPLETED" in capsys.readouterr().out

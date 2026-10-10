@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -102,16 +102,59 @@ def events_for(spark: SparkSession, config: Config, work: list[Planned], run_sta
             if read_store:
                 raise
             previous = None
+        delay = planned.feed.check_delay_minutes if planned.feed else 0
         events[ds.dataset] = window_for(ds, run_start, previous, config.dataset_settings(ds.dataset),
-                                        config.defaults.timezone)
+                                        config.defaults.timezone, delay)
     return events
 
 
+def due_feeds(config: Config, work: list[Planned], events: dict[str, Event], changed_files: dict[str, int],
+              forced: set[str]) -> set[str]:
+    """Feeds with something due (spec section 8): a cadence slot's deadline (slot + sla_hours)
+    fell in one of the feed's dataset windows, i.e. passed since its last evaluation, or new or
+    changed landed files were registered this run. Feeds in `forced` are always due."""
+    from hcsc.datalake.dre.checks.cadence import UnsupportedCalendar, slots
+
+    due = set(forced)
+    for p in work:
+        feed = p.feed
+        if feed is None or feed.feed in due:
+            continue
+        if changed_files.get(feed.feed, 0) > 0:
+            due.add(feed.feed)
+            continue
+        event = events[p.dataset.dataset]
+        sla = timedelta(hours=config.dataset_settings(p.dataset.dataset).sla_hours)
+        try:
+            if slots(feed.cadence, event.window_start - sla, event.window_end - sla):
+                due.add(feed.feed)
+        except UnsupportedCalendar:
+            due.add(feed.feed)  # let the checks report invalid_config
+    return due
+
+
+def only_due(work: list[Planned], due: set[str]) -> list[Planned]:
+    """Due feeds' work, plus table-wide datasets on a table that a due feed's dataset shares, or
+    on a table no feed dataset covers (those run every time)."""
+    feed_tables: dict[str, set[str]] = {}
+    for p in work:
+        if p.feed is not None:
+            feed_tables.setdefault(p.dataset.table, set()).add(p.feed.feed)
+    kept = []
+    for p in work:
+        if p.feed is not None:
+            if p.feed.feed in due:
+                kept.append(p)
+        elif not feed_tables.get(p.dataset.table) or feed_tables[p.dataset.table] & due:
+            kept.append(p)
+    return kept
+
+
 def refresh_landing(spark: SparkSession, config: Config, work: list[Planned], run: runs.Run | None,
-                    now: datetime) -> dict[str, CheckResult]:
+                    now: datetime, changed: dict[str, int] | None = None) -> dict[str, CheckResult]:
     """List the landing roots of every file-pattern feed in the plan and, on a real run (run given),
-    register new and changed files in dq_file. Returns feed id -> DID_NOT_RUN result for feeds whose
-    landing could not be listed or registered."""
+    register new and changed files in dq_file, counting them per feed in `changed`. Returns feed
+    id -> DID_NOT_RUN result for feeds whose landing could not be listed or registered."""
     from hcsc.datalake.dre.sources.hdfs import LandingError, list_landing
     from hcsc.datalake.dre.store.files import register_files
 
@@ -128,6 +171,8 @@ def refresh_landing(spark: SparkSession, config: Config, work: list[Planned], ru
             continue
         try:
             added = register_files(spark, config.defaults.dq_database, feed_id, files, run, now)
+            if changed is not None:
+                changed[feed_id] = added
             print(f"{feed_id}: {len(files)} landed files listed, {added} new or changed")
         except Exception as exc:
             log.error("could not register landed files for %s: %s", feed_id, error_detail(exc))
@@ -189,6 +234,7 @@ def _load(conf: str, command: str) -> Config | None:
 
 
 def run(spark: SparkSession, conf: str, feed_id: str | None = None, execution_type: str = "NORMAL") -> int:
+    """One scheduled (hourly) run: only feeds with something due are evaluated; --feed forces one."""
     from hcsc.datalake.dre.store.install import missing_objects
 
     config = _load(conf, "run")
@@ -205,11 +251,17 @@ def run(spark: SparkSession, conf: str, feed_id: str | None = None, execution_ty
         return EXIT_CANNOT_START
 
     run_record = runs.start_run(spark, db, conf_dir=conf)
-    work = plan(config, feed_id)
+    planned_all = plan(config, feed_id)
+    work: list[Planned] = []
     written = 0
     try:
-        events = events_for(spark, config, work, run_record.started_at)
-        landing = refresh_landing(spark, config, work, run_record, run_record.started_at)
+        events = events_for(spark, config, planned_all, run_record.started_at)
+        changed: dict[str, int] = {}
+        landing = refresh_landing(spark, config, planned_all, run_record, run_record.started_at, changed)
+        due = due_feeds(config, planned_all, events, changed, forced={feed_id} if feed_id else set())
+        work = only_due(planned_all, due)
+        for skipped in sorted({p.feed.feed for p in planned_all if p.feed is not None} - due):
+            print(f"{skipped}: nothing due (no slot deadline passed, no new files); not evaluated")
         for planned in work:
             evaluation = evaluate(spark, config, planned, events[planned.dataset.dataset], landing)
             try:

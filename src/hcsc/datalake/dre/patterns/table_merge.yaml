@@ -1,5 +1,5 @@
 # Checks for pattern TABLE_MERGE, in run order (spec sections 6 and 7).
-# T1_FILES_NOT_LOADED is for file patterns only. Step 8 adds the cause checks.
+# T1_FILES_NOT_LOADED is for file patterns only.
 pattern: TABLE_MERGE
 checks:
   - T1_ON_TIME
@@ -8,3 +8,30 @@ checks:
   - T1_SCHEMA_DRIFT
   - T1_KEY_NULLS
   - T1_KEY_DUPLICATES
+
+# Cause checks per failure type, in order (spec section 7); see file_cyclic.yaml.
+causes:
+  rows_missing_between_layers:
+    checks: [HOP_FILE_COMPLETENESS]
+    order:
+      - {code: NOT_RUN, probe: builtin}
+      - {code: INVALID_KEY, probe: builtin}
+      - {code: FILTERED, probe: table_contains, params: filter_rules}
+      - {code: REJECTED, probe: table_contains, params: rejects}
+      - {code: DROPPED, fallback: true}
+  key_missing_or_stale:
+    checks: [HOP_KEY_CURRENCY, HOP_VALUE_AGREEMENT]
+    order:
+      - {code: NOT_RUN, probe: builtin}
+      - {code: KEY_MISMATCH, probe: builtin}
+      - {code: TIE_RESOLVED_BY_RULE, probe: builtin}
+      - {code: OLDER_VERSION_WRITTEN_LATER, probe: builtin}
+      - {code: FILTERED, probe: table_contains, params: filter_rules}
+      - {code: REJECTED, probe: table_contains, params: rejects}
+      - {code: MERGE_NOT_APPLIED, fallback: true}
+  load_wrote_nothing:
+    checks: [T1_ZERO_ROWS]
+    order:
+      - {code: NO_UPSTREAM_DATA, probe: builtin}
+      - {code: WRONG_PARTITION, probe: file_value_compare, params: partition_cursor}
+      - {code: EMPTY_LOAD, fallback: true}

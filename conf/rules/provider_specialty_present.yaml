@@ -1,0 +1,9 @@
+rule: provider_specialty_present
+template: null_rate_max
+dataset: provider_directory
+params:
+  column: specialty
+  max_rate: 0.05
+owner: provider-data
+status: proposed
+severity: low

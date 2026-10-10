@@ -119,7 +119,7 @@ NonEmptyStr = Annotated[str, Field(min_length=1)]
 
 Pattern = Literal["FILE_CYCLIC", "FILE_PERIODIC", "TABLE_MERGE"]
 FileFormat = Literal["sequence", "text", "xml", "csv", "parquet", "orc"]
-CadenceKind = Literal["times", "interval", "calendar_dates"]
+CadenceKind = Literal["times", "interval", "calendar_dates", "monthly"]
 Layer = Literal["RAW", "CURATED", "CDC", "GOLD"]
 Normaliser = Literal["strip_leading_zeros"]
 Granularity = Literal["second", "minute", "hour", "day"]
@@ -224,33 +224,17 @@ class Cadence(Model):
     times: list[TimeOfDay] | None = None
     interval_minutes: int | None = Field(default=None, gt=0)
     dates: list[date] | None = None
+    days_of_month: list[Annotated[int, Field(ge=1, le=31)]] | None = None  # kind monthly
     timezone: TimeZone
     calendar: Annotated[str, AfterValidator(_calendar)] = "EVERYDAY"  # EVERYDAY | WEEKDAYS (named files: not in release 1)
 
     @model_validator(mode="after")
     def _check(self) -> Cadence:
-        needs = {"times": "times", "interval": "interval_minutes", "calendar_dates": "dates"}[self.kind]
+        needs = {"times": "times", "interval": "interval_minutes", "calendar_dates": "dates",
+                 "monthly": "days_of_month"}[self.kind]
         if not getattr(self, needs):
             raise invalid(f"cadence kind {self.kind} needs `{needs}`", f"add `{needs}` under cadence")
         return self
-
-
-class FilterRule(Model):
-    id: Identifier
-    condition: SqlFragment
-    code_ref: NonEmptyStr
-    owner: NonEmptyStr
-    expected_daily_volume: int = Field(ge=0)
-
-
-class CauseInputs(Model):
-    """Optional inputs for cause checks; null means NOT_READY (spec section 7)."""
-
-    stopper_file: str | None = None
-    partition_handoff_file: str | None = None
-    job_log_path: str | None = None
-    rejects_table: TableName | None = None
-    filter_rules: list[FilterRule] | None = None
 
 
 class Feed(SettingsOverride):
@@ -261,7 +245,9 @@ class Feed(SettingsOverride):
     landing: Landing | None = None
     cadence: Cadence
     datasets: Annotated[list[Identifier], Field(min_length=1)]
-    cause_inputs: CauseInputs = CauseInputs()
+    check_delay_minutes: int = Field(default=0, ge=0)  # evaluate a slot this long after its deadline
+    # Cause probe parameters by config key (spec section 7; checked against the pattern by validate).
+    probes: dict[Identifier, dict[str, Any] | list[dict[str, Any]] | None] = {}
 
     @model_validator(mode="after")
     def _check(self) -> Feed:

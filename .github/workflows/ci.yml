@@ -24,3 +24,26 @@ jobs:
         run: dre validate --conf conf/
       - name: All tests
         run: pytest
+
+  e2e:
+    # dre install and dre run end to end, as separate processes, on both synthetic feeds.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Install
+        run: pip install -e .
+      - name: Build synthetic tables and landing
+        run: mkdir e2e && cd e2e && python ../tests/e2e/build_synthetic.py
+      - name: dre install
+        run: cd e2e && dre install --conf conf --apply
+      - name: dre run
+        run: cd e2e && dre run --conf conf
+      - name: Verify results
+        run: cd e2e && python ../tests/e2e/verify.py

@@ -1,8 +1,8 @@
 """Parse SQL fragments from config against Spark (`dre dry-run`).
 
 `dre validate` only rejects `;`. Here `feed_filter` and rule `open_when` are
-resolved against their dataset's table (columns must exist), and filter rule
-conditions are parsed for syntax (their table is not configured). Nothing is
+resolved against their dataset's table (columns must exist), and probe
+conditions (`table_contains`) are parsed for syntax. Nothing is
 executed: Spark analyses each query when it is built. Problems are reported
 with file, line and field, like validate errors.
 """
@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 from hcsc.datalake.dre.checks.base import error_detail
 from hcsc.datalake.dre.config.loader import Config, ConfigError, format_loc
+from hcsc.datalake.dre.config.probes import parameter_sets
 
 if TYPE_CHECKING:
     from pyspark.sql import SparkSession
@@ -55,9 +56,15 @@ def check_fragments(spark: SparkSession, config: Config, feed_id: str | None = N
             except Exception as exc:
                 report("rule", rule_id, ("params", "open_when"), "open_when", exc)
     for feed in feeds:
-        for i, filter_rule in enumerate(feed.cause_inputs.filter_rules or []):
-            try:
-                F.expr(filter_rule.condition)
-            except Exception as exc:
-                report("feed", feed.feed, ("cause_inputs", "filter_rules", i, "condition"), "condition", exc)
+        for key, raw in feed.probes.items():
+            many = isinstance(raw, list)
+            for i, params in enumerate(parameter_sets(raw)):
+                condition = params.get("condition") if isinstance(params, dict) else None
+                if not condition:
+                    continue
+                try:
+                    F.expr(condition)
+                except Exception as exc:
+                    loc = ("probes", key, i, "condition") if many else ("probes", key, "condition")
+                    report("feed", feed.feed, loc, "condition", exc)
     return problems

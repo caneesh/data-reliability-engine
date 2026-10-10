@@ -1,7 +1,9 @@
 """Cadence slots: when loads are expected (spec section 3, feed `cadence`).
 
-Slots are local times in the cadence's time zone, converted to UTC. Calendars:
-EVERYDAY and WEEKDAYS; a named calendar file is not supported yet.
+Slots are local times in the cadence's time zone, converted to UTC. Kinds: times
+(every day at each time), interval (every N minutes from local midnight),
+calendar_dates (listed dates), monthly (listed days of the month; a day past the
+month's end is skipped). Calendars, for times and interval: EVERYDAY and WEEKDAYS.
 """
 
 from __future__ import annotations
@@ -45,11 +47,14 @@ def slots(cadence: Cadence, start: datetime, end: datetime) -> list[datetime]:
     last_day = end.astimezone(zone).date() + timedelta(days=1)
     if cadence.kind == "calendar_dates":
         days = sorted(d for d in (cadence.dates or []) if first_day <= d <= last_day)
+    elif cadence.kind == "monthly":
+        days = [first_day + timedelta(days=i) for i in range((last_day - first_day).days + 1)]
+        days = [d for d in days if d.day in set(cadence.days_of_month or [])]
     else:
         days = [first_day + timedelta(days=i) for i in range((last_day - first_day).days + 1)]
     found = []
     for day in days:
-        if cadence.kind != "calendar_dates" and not _runs_on(day, cadence.calendar):
+        if cadence.kind in ("times", "interval") and not _runs_on(day, cadence.calendar):
             continue
         for local in _local_times(cadence):
             slot = datetime.combine(day, local, tzinfo=zone).astimezone(timezone.utc)

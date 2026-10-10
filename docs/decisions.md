@@ -6,7 +6,7 @@ Answers to the open decisions in spec section 11. Fill in **Answer** before buil
 | --- | --- | --- | --- |
 | Language | PySpark 3.5.1 | | |
 | Python version and packages on the cluster | Python 3.10+, dependencies shipped in a zip | | |
-| Where it runs and is scheduled | Control-M for the main run; a separate folder or cron for the watchdog | | |
+| Where it runs and is scheduled | `dre run` hourly (Control-M or cron); the watchdog hourly from a separate folder or host | Hourly run, due feeds only (genericity review) | Aneesh Chan, 2026-10-10 |
 | Database name and service account | `dq`; a read-only account with write access only to `dq` | | |
 | Use of AI coding tools on HCSC code | Only through HCSC-approved access | | |
 | Code repository location | (not in spec) | Approved by HCSC: the repo is hosted on Aneesh Chan's GitHub (`caneesh/data-reliability-engine`) | HCSC, 2026-10-09 |
@@ -71,6 +71,14 @@ The engine field names chosen in step 2 are in spec section 3. The other assumpt
 3. **Matching raw rows.** Files are matched to raw rows on the base file name: the last path component on both sides. This assumes the raw `file_name_column` holds the landed file's name (with or without a path). **To confirm with the developer.**
 4. **Which files are judged.** Every file in the feed's registry first seen more than `sla_hours` before the window end, so a file that never loads keeps failing until it does. That assumes raw keeps rows for at least as long as the registry keeps files (13 months by default); otherwise files whose raw rows were purged would show as not loaded. **To confirm with the developer.**
 5. **Validation.** `dre validate` warns (does not fail) when a file-pattern feed has no RAW dataset with a `file_name_column`, since T1\_FILES\_NOT\_LOADED cannot run for it. The sample config gets this warning until the raw dataset's columns are confirmed. Tests use a synthetic raw dataset.
+
+## Genericity review (after step 6, 2026-10-10)
+
+1. **Hourly run, due feeds only** (replaces the spec default of a scheduled main run per feed). `dre run` is scheduled every hour. Each run evaluates only feeds with something due: a cadence slot's deadline passed in the feed's window since its last evaluation, or new or changed landed files were registered. A skipped feed writes nothing, so its window carries over. `--feed F` forces F. `check_delay_minutes` (feed, default 0) moves the feed's window end back by that much, so slots are judged only once deadline plus delay has passed. Table-wide datasets run when a due feed's dataset shares their table, otherwise every run (**my choice; flag if hourly table-wide checks are too heavy**). The watchdog expects a run every hour plus grace. R11a now forces its feed with `--feed`, since a plain run correctly skips a feed with no load due.
+2. **Generic cause probes** replace the named cause inputs. Probe types: `file_exists`, `file_value_compare`, `log_contains`, `table_contains`, `size_changed`, plus `builtin` for engine logic over DRE's own evidence. Pattern YAML lists, per failure type, `{code, probe, params}`; the feed's `probes:` supplies parameters by key; missing or null parameters mean NOT\_READY. Filter rules are `table_contains` parameter sets (`table`, `condition`, optional `id`, `code_ref`); the old `owner` and `expected_daily_volume` fields are dropped. Probe execution comes with the cause engine in step 8.
+3. **Second synthetic feed** in `conf/`: `provider_roster_monthly` (FILE\_PERIODIC, monthly CSV, flat folder, no partitions, UTC, key `provider_id`) and `provider_directory_merge` (TABLE\_MERGE gold table). It needed one new generic capability: cadence `kind: monthly` with `days_of_month`. Its `initial_lookback_hours` is 840 (35 days) so a first window holds a monthly load. Replays R01, R02, R03, R08, R09, R11a and R11b run against it (`tests/replay/test_second_feed.py`).
+4. **Genericity guard** (`tests/guard/test_generic_engine.py`): a denylist of source-specific words that must not appear under `src/`. Spec section 9, rule 9.
+5. **End-to-end CI job** (`e2e` in `.github/workflows/ci.yml`): builds synthetic tables and landing folders for both feeds, then runs `dre install --apply`, `dre run` and a verifier as separate processes against one local metastore.
 
 ## Notes for later steps
 
