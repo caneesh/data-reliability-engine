@@ -1,4 +1,4 @@
-"""R04 to R07 at check level (build step 7): hop checks through dre run. Causes come in step 8.
+"""R04 to R07: hop checks through dre run, with their causes (spec section 9).
 
 Each scenario confirms curated's load time (spec section 11 leaves it open in the sample
 config) and gives the run an HMAC secret, so key events are written.
@@ -15,7 +15,7 @@ from tests.fixtures.layers import (
     CURATED_COLUMNS, GOLD_COLUMNS, RAW_COLUMNS, create_table, curated_load_time, curated_row, gold_load_time,
     gold_row, raw_dataset_yaml, raw_row,
 )
-from tests.replay.conftest import latest, replay_conf
+from tests.replay.conftest import cause_rows, causes, latest, replay_conf
 
 CURATED = "datasets/example_curated_enrollment.yaml"
 CURATED_LOAD_TIME = ("load_time: null ", "load_time: { column: sourcelastupdatets, granularity: minute } ")
@@ -37,6 +37,11 @@ def hop(spark, replay, check: str):
     [result] = latest(spark, replay)[("gold_member_coverage", check)]
     assert result.group_values == {"upstream": "example_curated_enrollment"}
     return result
+
+
+def cause(spark, replay, check: str, dataset: str = "gold_member_coverage"):
+    [line] = causes(spark, replay, dataset, check, "FILE_CYCLIC").values()
+    return line
 
 
 def key_events(spark, replay) -> list[tuple[str, str, str]]:
@@ -81,6 +86,11 @@ def test_r04_a_raw_message_missing_from_curated_is_file_completeness_failed(spar
     assert result.group_values == {"upstream": "example_raw_enrollment"}
     assert json.loads(result.detail) == {"short_files": [
         {"file": "rt_0001.seq", "upstream_rows": 3, "rows_here": 2}]}
+    # Cause: curated ran after the file arrived and loaded its other rows; not proven.
+    line = cause(spark, replay, "HOP_FILE_COMPLETENESS", "example_curated_enrollment")
+    assert (line.code, line.proven) == ("DROPPED", False)
+    assert line.ruled_out == ("NOT_RUN", "FILE_SKIPPED", "INVALID_KEY")
+    assert line.not_ready == ("FILTERED", "REJECTED")
     # The same hop, key by key: the missing message's key is MISSING in curated.
     [currency] = latest(spark, replay)[("example_curated_enrollment", "HOP_KEY_CURRENCY")]
     assert (currency.state, currency.population, currency.violations) == ("FAILED", 3, 1)
@@ -102,6 +112,29 @@ def test_r05_curated_latest_is_a_termination_gold_older_is_key_currency_stale(sp
     assert (open_key.dataset, open_key.check_id) == ("gold_member_coverage", "HOP_KEY_CURRENCY")
     # A stale key is not CURRENT, so value agreement has nothing to compare.
     assert hop(spark, replay, "HOP_VALUE_AGREEMENT").reason_code == "empty_population"
+    # Cause: gold has not loaded anything since the termination reached curated.
+    assert (cause(spark, replay, "HOP_KEY_CURRENCY").code, cause(spark, replay, "HOP_KEY_CURRENCY").proven) == (
+        "NOT_RUN", True)
+
+
+def test_r05_gold_ran_but_did_not_apply_the_termination_is_merge_not_applied(spark, tmp_path) -> None:
+    replay = setup(spark, tmp_path, "r05_merge")
+    opened, terminated = curated_load_time(30), curated_load_time(12)
+    create_table(spark, replay.curated, CURATED_COLUMNS,
+                 [curated_row(updated=opened), curated_row(end="2026-06-30", updated=terminated)])
+    # Gold loaded another key two hours ago, after the termination; this key kept its old version.
+    create_table(spark, replay.gold, GOLD_COLUMNS, [
+        gold_row(record=opened, loaded=gold_load_time(29)),
+        gold_row(sub_id="000999901", record=curated_load_time(40), loaded=gold_load_time(2)),
+    ])
+
+    assert main(["run", "--conf", str(replay.conf)]) == 0
+    currency = hop(spark, replay, "HOP_KEY_CURRENCY")
+    assert (currency.state, currency.observed) == ("FAILED", "0 missing and 1 stale of 1 keys")
+    line = cause(spark, replay, "HOP_KEY_CURRENCY")
+    assert (line.code, line.proven) == ("MERGE_NOT_APPLIED", False)
+    assert line.ruled_out == ("NOT_RUN", "TIE_RESOLVED_BY_RULE", "OLDER_VERSION_WRITTEN_LATER")
+    assert line.not_ready == ("KEY_MISMATCH", "FILTERED", "REJECTED")
 
 
 def test_r06_tied_open_and_terminated_rows_is_value_agreement_failed(spark, tmp_path) -> None:
@@ -117,6 +150,9 @@ def test_r06_tied_open_and_terminated_rows_is_value_agreement_failed(spark, tmp_
     currency = hop(spark, replay, "HOP_KEY_CURRENCY")
     assert (currency.state, currency.violations) == ("PASSED", 0)  # gold has the latest record time
     assert key_events(spark, replay) == []
+    # Cause: the winner rule (sourcelastupdatets DESC, enddate DESC) picks the open row.
+    line = cause(spark, replay, "HOP_VALUE_AGREEMENT")
+    assert (line.code, line.proven) == ("TIE_RESOLVED_BY_RULE", True)
 
 
 def test_r07_older_version_loaded_after_a_newer_one_reached_curated_is_stale(spark, tmp_path) -> None:
@@ -132,6 +168,12 @@ def test_r07_older_version_loaded_after_a_newer_one_reached_curated_is_stale(spa
     assert (currency.state, currency.population, currency.violations) == ("FAILED", 1, 1)
     assert currency.observed == "0 missing and 1 stale of 1 keys"
     assert key_events(spark, replay) == [(key_hash(SECRET, KEY), "FLAGGED", "STALE")]
+    line = cause(spark, replay, "HOP_KEY_CURRENCY")
+    assert (line.code, line.proven) == ("OLDER_VERSION_WRITTEN_LATER", True)
+    # Every cause check ran and was recorded, in order: gold did run after the newer version.
+    states = [(r.cause_code, r.state) for r in cause_rows(spark, replay, "gold_member_coverage", "HOP_KEY_CURRENCY")]
+    assert states == [("NOT_RUN", "RULED_OUT"), ("KEY_MISMATCH", "NOT_READY"), ("TIE_RESOLVED_BY_RULE", "RULED_OUT"),
+                      ("OLDER_VERSION_WRITTEN_LATER", "CONFIRMED"), ("FILTERED", "NOT_READY"), ("REJECTED", "NOT_READY")]
 
 
 def test_hops_pass_when_gold_is_current_and_agrees(spark, tmp_path) -> None:

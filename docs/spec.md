@@ -58,6 +58,7 @@ data-reliability-engine/
             table_merge.yaml
             table_wide.yaml  # checks for table-wide datasets (no feed)
           checks/
+            rules/schedule.py  # when a gold rule is due (frequency)
             base.py          # Check interface, result building, denominator rule, preconditions, run_check
             keys.py          # key expressions with key_normalise applied
             times.py         # time columns to UTC; window bounds truncated to granularity
@@ -69,8 +70,11 @@ data-reliability-engine/
             rules/           # rule_check.py: each gold rule as a check over its template
             sql/             # Jinja2 SQL templates
           causes/
-            engine.py        # runs cause checks in order
-            landing.py merge.py  # cause checks by hop type
+            engine.py        # runs cause checks in order, writes dq_cause_result rows, resolves the cause
+            base.py          # outcomes, failures and the cause context
+            failures.py      # the failing things of a FAILED check (files, slots, keys)
+            probes.py        # the generic probe types
+            landing.py merge.py  # builtin cause checks by hop type
           store/
             ddl.sql          # dq tables and views
             schema.py        # renders ddl.sql for the configured dq database; parses the objects it creates
@@ -79,6 +83,7 @@ data-reliability-engine/
             writer.py        # append-only writes; the only DataFrame write path
             results.py       # appends check results through the writer
             key_events.py    # appends hop key events to dq_key_event through the writer
+            causes.py        # appends cause results to dq_cause_result through the writer
             files.py         # dq_file registry: appends new and changed landed files
             retention.py     # drops expired run_date partitions; the only DROP PARTITION
             local_setup.py   # creates the dq database for tests and local runs only
@@ -125,7 +130,7 @@ datasets: [rms_raw_enrollment, rms_curated_enrollment, gold_member_coverage]
 check_delay_minutes: 0            # evaluate a slot this long after its deadline (default 0)
 probes:                           # cause probe parameters by key (section 7); missing or null: NOT_READY
   load_hold_marker: { path: null }
-  partition_cursor: { path: null, extract_regex: null, compare_to: partition }
+  partition_cursor: { path: null, extract_regex: null, format: null, compare_to: partition }
   load_log: { path_glob: null, pattern: null }
   filter_rules: null
   rejects: { table: null, condition: null }
@@ -360,7 +365,7 @@ When a check FAILS, the cause engine runs every cause check listed for that fail
 | Probe | Parameters | Confirmed when |
 | --- | --- | --- |
 | `file_exists` | `path` | The file exists |
-| `file_value_compare` | `path`, `extract_regex`, `compare_to: partition \| window` | The value read from the file (first regex group) is later than the failing file's partition, or outside the event window |
+| `file_value_compare` | `path`, `extract_regex`, `format`, `compare_to: partition \| window` | The value read from the file (first regex group), parsed with `format` (a Spark datetime pattern), is later than the failing file's partition (the same regex applied to the file's folder name, parsed the same way; for a slot, the slot's date in the feed's time zone), or outside the event window |
 | `log_contains` | `path_glob`, `pattern` | A log file matching the glob has a line matching the pattern that names the failure (file or key) |
 | `table_contains` | `table`, `condition` (optional `id`, `code_ref`) | The table has rows matching the condition for the failure's file or key |
 | `size_changed` | none | The file's size changed after it was first seen (`dq_file`) |
@@ -372,7 +377,7 @@ Each pattern's YAML lists, per failure type, the checks it covers and the cause 
 # feed config
 probes:
   load_hold_marker: { path: /data/ctl/example_feed/hold.flag }
-  partition_cursor: { path: /data/ctl/example_feed/cursor.prm, extract_regex: "(\\d{8})", compare_to: partition }
+  partition_cursor: { path: /data/ctl/example_feed/cursor.prm, extract_regex: "(\\d{8})", format: yyyyMMdd, compare_to: partition }
   load_log: { path_glob: /data/logs/example_feed/*.log, pattern: "ERROR" }
   filter_rules:
     - { table: curated_db.enrollment, condition: "status = 'TEST'", id: drop_test_members, code_ref: "load.sql:120" }
@@ -422,7 +427,11 @@ probes:
 | 2 | WRONG\_PARTITION | Rows were written to a partition other than the one named in the cursor file | `file_value_compare`, `compare_to: partition` (`partition_cursor`) |
 | fallback | EMPTY\_LOAD | No cause confirmed |  |
 
-A filter rule is one `table_contains` parameter set under `filter_rules`: `table` and `condition` (SQL), with optional `id` and `code_ref` (file and line, or commit).
+A filter rule is one `table_contains` parameter set under `filter_rules`: `table` and `condition` (SQL), with optional `id` and `code_ref` (file and line, or commit). The table is matched on the hop's upstream columns: the base name of its `file_name_column` for a file, its mapped key columns (with its `key_normalise`) for a key.
+
+**What a cause explains.** Each failing thing of a FAILED check is explained on its own, and its rows share a `failure_ref`: a not-loaded file's path (T1\_FILES\_NOT\_LOADED), a missed or short slot in UTC (T1\_ON\_TIME, T1\_ZERO\_ROWS, which list their failing slots in `detail`), a short upstream file's base name (HOP\_FILE\_COMPLETENESS), or a failing key's `key_hash` (HOP\_KEY\_CURRENCY: MISSING or STALE keys; HOP\_VALUE\_AGREEMENT: CURRENT keys that disagree). At most 100 per evaluation. Without `hmac_secret_file` keys cannot be referenced: one set of rows with no `failure_ref`, all NOT\_READY. For a missed slot on a file pattern, the file probes look at the files first seen since the slot that have no raw rows. PIPELINE\_STALLED counts the files first seen with or after the failing one (or since the slot), not the file itself; with no such file it is RULED\_OUT. NO\_UPSTREAM\_DATA counts upstream rows loaded in the event window.
+
+**Rows.** One `dq_cause_result` row per cause check per failure, the fallback excluded: `cause_check_id` is the probe and its params key (`file_exists:load_hold_marker`) or `builtin`; `order_no` its place in the pattern's order; `hop` the hop explained (`<upstream>-><dataset>`, `landing-><raw dataset>`); `evidence` JSON with times, counts, paths and table names only, never key values, log lines or file contents. The cause of a failure is read from its rows: the first CONFIRMED by `order_no`, otherwise the pattern's fallback, not proven. A probe that raises is ERROR (its evidence is the exception type); if the failing things cannot be listed, every cause check is written as ERROR.
 
 ## 8. Command line, email and watchdog
 
@@ -540,7 +549,7 @@ The real RMS values (landing path, stopper and handoff file names, database and 
 
 - One feed, pattern FILE\_CYCLIC: sequence files; six loads a day on an every-day calendar. Its source-specific cause inputs are probe configs (section 7), with the real paths kept in the deployed config:
   - the stopper file that holds the raw load: `probes.load_hold_marker: { path: <stopper file> }` (`file_exists`, for RAW\_LOAD\_HELD);
-  - the handoff file naming the partition passed between phases: `probes.partition_cursor: { path: <handoff file>, extract_regex: <partition pattern>, compare_to: partition }` (`file_value_compare`, for SKIPPED\_BEHIND\_CURSOR and WRONG\_PARTITION);
+  - the handoff file naming the partition passed between phases: `probes.partition_cursor: { path: <handoff file>, extract_regex: <partition pattern>, format: <its date format>, compare_to: partition }` (`file_value_compare`, for SKIPPED\_BEHIND\_CURSOR and WRONG\_PARTITION);
   - the job log: `probes.load_log: { path_glob: <log glob>, pattern: <error pattern> }` (`log_contains`, for LOAD\_ERROR);
   - filter rules and the rejects table: `probes.filter_rules` and `probes.rejects` (`table_contains`, for FILTERED and REJECTED), once developer question 6 is answered.
 - Three datasets: raw (dates MM/DD/YYYY, partitioned by file date, real-time rows told apart by file name); curated (several versions per key, its own load time and record time); gold (four-part key with a zero-padded subscriber id, minute-granular load time, `feed_filter` on source system).

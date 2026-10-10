@@ -35,7 +35,8 @@ class ValueAgreement(Check):
             if isinstance(params, CheckResult):
                 results.append(params)
                 continue
-            params["hashed"] = False  # open keys belong to HOP_KEY_CURRENCY; agreement judges by deadline only
+            # open keys belong to HOP_KEY_CURRENCY; agreement judges by deadline (and reloads) only
+            params["hashed"] = params["use_open"] = False
             row = ctx.spark.sql(render_sql("hop_value_agreement.sql.j2", p=params)).collect()[0]
             columns = ", ".join(f"{u}->{d}" for u, d in ctx.dataset.owned_columns.items())
             results.append(from_counts(

@@ -1,0 +1,18 @@
+{# KEY_MISMATCH: of the failing keys (hashes), those that match a key in this dataset once
+   the key column {{ dropped }} is left out on both sides. #}
+SELECT DISTINCT r.key_hash
+FROM (
+  SELECT {{ p.hash_fn }}({{ p.up_key }}) AS key_hash, {{ up_key_without }} AS k_without
+  FROM {{ p.up_table }}
+{% if p.up_filter %}
+  WHERE {{ p.up_filter }}
+{% endif %}
+) r
+JOIN (
+  SELECT DISTINCT {{ dn_key_without }} AS k_without
+  FROM {{ p.dn_table }}
+{% if p.dn_filter %}
+  WHERE {{ p.dn_filter }}
+{% endif %}
+) d ON d.k_without = r.k_without
+WHERE r.key_hash IN ({{ hashes | join(', ') }})

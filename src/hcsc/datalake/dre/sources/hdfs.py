@@ -68,3 +68,24 @@ def list_landing(spark: SparkSession, roots: list[str], pattern: str = "*") -> l
         except Exception as exc:
             raise LandingError(_code(exc), f"cannot list landing root {root}: {type(exc).__name__}") from None
     return sorted(found, key=lambda f: f.path)
+
+
+# Read-only helpers for cause probes (spec section 7): existence and glob. Probes read
+# text files with spark.read.text.
+
+def _fs(spark: SparkSession, path_text: str):
+    jvm = spark.sparkContext._jvm
+    path = jvm.org.apache.hadoop.fs.Path(path_text)
+    return path, path.getFileSystem(spark.sparkContext._jsc.hadoopConfiguration())
+
+
+def path_exists(spark: SparkSession, path_text: str) -> bool:
+    path, fs = _fs(spark, path_text)
+    return bool(fs.exists(path))
+
+
+def glob_files(spark: SparkSession, pattern: str) -> list[str]:
+    """Files (not directories) matching a glob, sorted."""
+    path, fs = _fs(spark, pattern)
+    statuses = fs.globStatus(path) or []
+    return sorted(s.getPath().toString() for s in statuses if s.isFile())

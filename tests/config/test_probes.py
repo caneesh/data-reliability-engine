@@ -48,7 +48,10 @@ def test_malformed_cause_lists_are_rejected(monkeypatch, yaml_text: str, message
 def test_null_parameters_are_not_ready() -> None:
     assert not is_ready(None)
     assert not is_ready(FileValueCompare(path="/data/ctl/cursor.txt", extract_regex=r"(\d{8})", compare_to=None))
-    assert is_ready(FileValueCompare(path="/data/ctl/cursor.txt", extract_regex=r"(\d{8})", compare_to="partition"))
+    # format is required too: partition values are parsed, never compared as strings.
+    assert not is_ready(FileValueCompare(path="/data/ctl/cursor.txt", extract_regex=r"(\d{8})", compare_to="partition"))
+    assert is_ready(FileValueCompare(path="/data/ctl/cursor.txt", extract_regex=r"(\d{8})", format="yyyyMMdd",
+                                     compare_to="partition"))
     assert is_ready(TableContains(table="ops_db.rejects", condition="reason IS NOT NULL"))  # id, code_ref optional
     assert is_ready(PROBE_PARAMS["size_changed"]())  # needs no parameters
 

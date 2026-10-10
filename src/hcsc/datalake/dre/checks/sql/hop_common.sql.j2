@@ -37,12 +37,12 @@ dn_top AS (
   WHERE record_ts = top_ts OR top_ts IS NULL
 ),
 dn_keys AS (
-  SELECT k, MAX(record_ts) AS dn_record_ts,
+  SELECT k, MAX(record_ts) AS dn_record_ts, MAX(load_ts) AS dn_load_ts,
          MAX(CASE WHEN load_ts >= {{ p.window_start }} AND load_ts < {{ p.window_end }} THEN 1 ELSE 0 END) AS dn_loaded
   FROM dn GROUP BY k
 ),
 open_keys AS (
-{% if p.hashed %}
+{% if p.use_open %}
   SELECT DISTINCT key_hash FROM {{ p.dq_database }}.v_open_keys
   WHERE dataset = '{{ p.dataset }}' AND check_id = 'HOP_KEY_CURRENCY'
 {% else %}
@@ -68,5 +68,18 @@ judged AS (
      OR (d.dn_loaded = 1 AND u.up_load_ts < {{ p.deadline_end }})
      OR o.key_hash IS NOT NULL
 {% endif %}
+)
+{% endmacro %}
+
+{# Keys judged CURRENT whose owned columns disagree with any upstream row at the latest record
+   time (null-safe, as strings): mismatch = 1. #}
+{% macro mismatches(p) %}
+per_key AS (
+  SELECT u.k,
+         MAX(CASE WHEN {% for c in p.owned %}NOT (u.u_{{ loop.index }} <=> d.d_{{ loop.index }}){% if not loop.last %} OR {% endif %}{% endfor %} THEN 1 ELSE 0 END) AS mismatch
+  FROM up_top u
+  JOIN dn_top d ON d.k = u.k
+  JOIN judged j ON j.k = u.k AND j.key_state = 'CURRENT'
+  GROUP BY u.k
 )
 {% endmacro %}

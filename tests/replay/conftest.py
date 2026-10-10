@@ -53,3 +53,19 @@ def latest(spark, replay: Replay) -> dict[tuple[str, str], list]:
     for row in spark.table(f"{replay.dq}.v_latest_result").collect():
         out.setdefault((row.dataset, row.check_id), []).append(row)
     return out
+
+
+def causes(spark, replay: Replay, dataset: str, check_id: str, pattern: str) -> dict:
+    """failure_ref -> resolved CauseLine, for the latest evaluation(s) of (dataset, check_id)."""
+    from hcsc.datalake.dre.causes.engine import failure_type, summarise
+
+    evaluations = {r.evaluation_id for r in latest(spark, replay).get((dataset, check_id), [])}
+    rows = [r.asDict() for r in spark.table(f"{replay.dq}.dq_cause_result").collect()
+            if r.evaluation_id in evaluations]
+    return summarise(rows, failure_type(pattern, check_id))
+
+
+def cause_rows(spark, replay: Replay, dataset: str, check_id: str) -> list:
+    evaluations = {r.evaluation_id for r in latest(spark, replay).get((dataset, check_id), [])}
+    return sorted((r for r in spark.table(f"{replay.dq}.dq_cause_result").collect() if r.evaluation_id in evaluations),
+                  key=lambda r: (r.failure_ref or "", r.order_no))

@@ -62,7 +62,9 @@ def hop_params(ctx: CheckContext, event: Event, up_id: str, up: Dataset | None) 
         "window_start": utc_literal(event.window_start), "window_end": utc_literal(event.window_end),
         "owned": owned,
         "deadline_start": utc_literal(event.window_start - sla), "deadline_end": utc_literal(event.window_end - sla),
-        "full_sweep": ctx.full_sweep, "hashed": ctx.key_secret is not None, "hash_fn": HASH_FUNCTION,
+        "full_sweep": ctx.full_sweep, "hash_fn": HASH_FUNCTION,
+        # hashed: compute key_hash with the secret; use_open: also judge keys open in v_open_keys
+        "hashed": ctx.key_secret is not None, "use_open": ctx.key_secret is not None,
         "dq_database": ctx.dq_database, "dataset": ds.dataset,
     }
 

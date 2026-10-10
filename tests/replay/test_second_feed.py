@@ -19,7 +19,7 @@ from hcsc.datalake.dre.store.runs import new_run
 from tests.fixtures.layers import (
     PROVIDER_GOLD_COLUMNS, PROVIDER_RAW_COLUMNS, create_table, provider_gold_row, provider_raw_row,
 )
-from tests.replay.conftest import latest, replay_conf
+from tests.replay.conftest import causes, latest, replay_conf
 
 UTC = timezone.utc
 RAW_FEED, GOLD_FEED = "provider_roster_monthly", "provider_directory_merge"
@@ -39,7 +39,7 @@ def judged_slot(conf: Path, feed_id: str) -> datetime:
 def setup(spark, tmp_path: Path, name: str, edits=None, landing: Path | None = None):
     landing = landing or tmp_path / "landing"
     landing.mkdir(parents=True, exist_ok=True)
-    edits = dict(edits or {})
+    edits = {rel: list(pairs) for rel, pairs in (edits or {}).items()}
     edits.setdefault(RAW_FILE, []).append(("roots: [/data/landing/provider_roster]", f"roots: [{landing}]"))
     return replay_conf(spark, tmp_path, name, edits), landing
 
@@ -62,6 +62,32 @@ def test_r01_monthly_csv_not_loaded_while_a_later_file_loaded(spark, tmp_path) -
     [result] = latest(spark, replay)[(RAW, "T1_FILES_NOT_LOADED")]
     assert (result.state, result.population, result.violations) == ("FAILED", 2, 1)
     assert [Path(p).name for p in json.loads(result.detail)["not_loaded"]] == ["roster_2026_06.csv"]
+    # Cause: July's file loaded, the CSV header reads, its size never changed, and the job log
+    # configured for this feed is not there: not proven.
+    [line] = causes(spark, replay, RAW, "T1_FILES_NOT_LOADED", "FILE_PERIODIC").values()
+    assert (line.code, line.proven) == ("PASSED_OVER", False)
+    assert line.ruled_out == ("PIPELINE_STALLED", "INCOMPLETE_AT_LOAD", "UNREADABLE", "LOAD_ERROR")
+    assert line.not_ready == ("RAW_LOAD_HELD", "SKIPPED_BEHIND_CURSOR")
+
+
+def test_r01_monthly_csv_with_an_error_in_the_job_log_is_load_error(spark, tmp_path) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "loader_20260701.log").write_text(
+        "INFO starting roster load\nERROR rejected roster_2026_06.csv: bad header\nINFO done\n", encoding="utf-8")
+    (logs / "loader_20260801.log").write_text("ERROR something else entirely\n", encoding="utf-8")
+    replay, landing = setup(spark, tmp_path, "p_r01_log", {RAW_FILE: [
+        ("path_glob: /data/logs/provider_roster/*.log", f"path_glob: {logs}/*.log")]})
+    for name in ("roster_2026_06.csv", "roster_2026_07.csv"):
+        (landing / name).write_text("provider_id,provider_name\n", encoding="utf-8")
+    when = datetime.now(UTC) - timedelta(days=60)
+    register_files(spark, replay.dq, RAW_FEED, list_landing(spark, [str(landing)], "*.csv"), new_run(now=when), when)
+    create_table(spark, replay.provider_raw, PROVIDER_RAW_COLUMNS,
+                 [provider_raw_row("P001", datetime.now(UTC) - timedelta(days=30), "roster_2026_07.csv")])
+
+    assert run_feed(replay, RAW_FEED) == 0
+    [line] = causes(spark, replay, RAW, "T1_FILES_NOT_LOADED", "FILE_PERIODIC").values()
+    assert (line.code, line.proven) == ("LOAD_ERROR", True)
 
 
 def test_r02_monthly_file_late_is_on_time_failed(spark, tmp_path) -> None:
@@ -73,6 +99,22 @@ def test_r02_monthly_file_late_is_on_time_failed(spark, tmp_path) -> None:
     assert run_feed(replay, RAW_FEED) == 0
     [on_time] = latest(spark, replay)[(RAW, "T1_ON_TIME")]
     assert on_time.state == "FAILED" and on_time.violations == on_time.population >= 1
+    # Cause: nothing landed since the slot, so nothing shows a stalled pipeline: not proven.
+    lines = set(causes(spark, replay, RAW, "T1_ON_TIME", "FILE_PERIODIC").values())
+    assert {(line.code, line.proven) for line in lines} == {("PASSED_OVER", False)}
+    assert all("PIPELINE_STALLED" in line.ruled_out for line in lines)
+
+
+def test_r02_monthly_file_landed_but_never_loaded_is_pipeline_stalled(spark, tmp_path) -> None:
+    replay, landing = setup(spark, tmp_path, "p_r02_stalled")
+    slot = judged_slot(replay.conf, RAW_FEED)
+    (landing / "roster_latest.csv").write_text("provider_id,provider_name\n", encoding="utf-8")  # seen this run
+    create_table(spark, replay.provider_raw, PROVIDER_RAW_COLUMNS,
+                 [provider_raw_row("P001", slot - timedelta(days=20), "roster_previous.csv")])
+
+    assert run_feed(replay, RAW_FEED) == 0
+    lines = set(causes(spark, replay, RAW, "T1_ON_TIME", "FILE_PERIODIC").values())
+    assert {(line.code, line.proven) for line in lines} == {("PIPELINE_STALLED", True)}
 
 
 def test_r03_merge_wrote_nothing_while_the_roster_loaded(spark, tmp_path) -> None:
@@ -90,6 +132,10 @@ def test_r03_merge_wrote_nothing_while_the_roster_loaded(spark, tmp_path) -> Non
     assert gold.state == "FAILED" and gold.violations == gold.population >= 1
     [raw] = results[(RAW, "T1_ZERO_ROWS")]
     assert raw.state == "PASSED"  # the roster did load: the gap is at the merge
+    # Cause: the roster had rows in the window; no partition cursor (flat folder): not proven.
+    lines = set(causes(spark, replay, GOLD, "T1_ZERO_ROWS", "TABLE_MERGE").values())
+    assert {(line.code, line.proven, line.ruled_out, line.not_ready) for line in lines} == {
+        ("EMPTY_LOAD", False, ("NO_UPSTREAM_DATA",), ("WRONG_PARTITION",))}
 
 
 def test_r08_duplicate_provider_in_gold(spark, tmp_path) -> None:
@@ -150,7 +196,9 @@ def test_r11b_load_due_presence_checks_fail_row_checks_did_not_run(spark, tmp_pa
 
 def test_hops_on_the_merge_table_flag_missing_and_disagreeing_providers(spark, tmp_path) -> None:
     """Hop checks and a rule on the second feed: raw roster to the merged directory."""
-    replay, _ = setup(spark, tmp_path, "p_hop")
+    secret = tmp_path / "hmac.secret"
+    secret.write_bytes(b"synthetic-provider-secret")
+    replay, _ = setup(spark, tmp_path, "p_hop", {"defaults.yaml": [("hmac_secret_file: null", f"hmac_secret_file: {secret}")]})
     loaded = datetime.now(UTC) - timedelta(hours=30)  # past the feed's 24-hour SLA, so judged
     raw = [provider_raw_row(p, loaded) for p in ("P001", "P002", "P003")]
     create_table(spark, replay.provider_raw, PROVIDER_RAW_COLUMNS, raw)
@@ -170,3 +218,8 @@ def test_hops_on_the_merge_table_flag_missing_and_disagreeing_providers(spark, t
     assert agreement.group_values == {"upstream": RAW}
     [specialty] = results[(GOLD, "provider_specialty_present")]
     assert (specialty.state, specialty.population, specialty.violations) == ("PASSED", 2, 0)
+    # Causes: the merge ran after the roster loaded, so not NOT_RUN; nothing else confirms.
+    for check in ("HOP_KEY_CURRENCY", "HOP_VALUE_AGREEMENT"):
+        [line] = causes(spark, replay, GOLD, check, "TABLE_MERGE").values()
+        assert (line.code, line.proven) == ("MERGE_NOT_APPLIED", False), check
+        assert line.ruled_out[0] == "NOT_RUN" and "TIE_RESOLVED_BY_RULE" in line.not_ready  # no winner_rule

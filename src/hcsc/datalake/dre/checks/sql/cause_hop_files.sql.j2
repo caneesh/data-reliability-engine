@@ -1,0 +1,24 @@
+{# Causes of HOP_FILE_COMPLETENESS: per upstream file (base name), its first upstream load,
+   its rows upstream, its rows with a null, empty or unparseable key column (INVALID_KEY),
+   and its rows here, each side after its feed_filter. #}
+WITH up_files AS (
+  SELECT regexp_extract({{ p.up_file }}, '([^/]+)$', 1) AS f, MIN({{ p.up_load }}) AS first_load,
+         COUNT(*) AS up_rows,
+         SUM(CASE WHEN {% for c in key_columns %}{{ c.raw }} IS NULL OR trim(CAST({{ c.raw }} AS STRING)) = '' OR {{ c.normalised }} IS NULL{% if not loop.last %} OR {% endif %}{% endfor %} THEN 1 ELSE 0 END) AS invalid_rows
+  FROM {{ p.up_table }}
+{% if p.up_filter %}
+  WHERE {{ p.up_filter }}
+{% endif %}
+  GROUP BY regexp_extract({{ p.up_file }}, '([^/]+)$', 1)
+),
+dn_files AS (
+  SELECT regexp_extract({{ p.dn_file }}, '([^/]+)$', 1) AS f, COUNT(*) AS dn_rows
+  FROM {{ p.dn_table }}
+{% if p.dn_filter %}
+  WHERE {{ p.dn_filter }}
+{% endif %}
+  GROUP BY regexp_extract({{ p.dn_file }}, '([^/]+)$', 1)
+)
+SELECT u.f, u.first_load, u.up_rows, u.invalid_rows, COALESCE(d.dn_rows, 0) AS rows_here
+FROM up_files u
+LEFT JOIN dn_files d ON d.f = u.f

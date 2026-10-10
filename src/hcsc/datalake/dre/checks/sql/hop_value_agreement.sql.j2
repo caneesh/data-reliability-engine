@@ -3,12 +3,5 @@
    (null-safe, compared as strings). population = CURRENT keys; violations = keys with a mismatch. #}
 {% import "hop_common.sql.j2" as hop %}
 WITH {{ hop.ctes(p) }},
-per_key AS (
-  SELECT u.k,
-         MAX(CASE WHEN {% for c in p.owned %}NOT (u.u_{{ loop.index }} <=> d.d_{{ loop.index }}){% if not loop.last %} OR {% endif %}{% endfor %} THEN 1 ELSE 0 END) AS mismatch
-  FROM up_top u
-  JOIN dn_top d ON d.k = u.k
-  JOIN judged j ON j.k = u.k AND j.key_state = 'CURRENT'
-  GROUP BY u.k
-)
+{{ hop.mismatches(p) }}
 SELECT COUNT(*) AS population, SUM(mismatch) AS violations FROM per_key

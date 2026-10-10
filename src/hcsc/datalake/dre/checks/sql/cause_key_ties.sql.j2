@@ -1,0 +1,32 @@
+{# TIE_RESOLVED_BY_RULE: for each failing key (hash) with several upstream rows at its latest
+   record time: how many rows are tied, how many different owned-column values they carry,
+   and whether this dataset's latest row matches the row the winner rule ranks first. #}
+{% import "hop_common.sql.j2" as hop %}
+WITH {{ hop.ctes(p) }},
+up_rows AS (
+  SELECT {{ p.up_key }} AS k__, {{ p.up_record }} AS record_ts__,
+{% for c in p.owned %}
+         CAST({{ c.up }} AS STRING) AS w__{{ loop.index }},
+{% endfor %}
+         t.*
+  FROM {{ p.up_table }} t
+{% if p.up_filter %}
+  WHERE {{ p.up_filter }}
+{% endif %}
+),
+top_rows AS (
+  SELECT * FROM (SELECT up_rows.*, MAX(record_ts__) OVER (PARTITION BY k__) AS top__ FROM up_rows) latest
+  WHERE record_ts__ = top__
+),
+ranked AS (
+  SELECT top_rows.*, ROW_NUMBER() OVER (PARTITION BY k__ ORDER BY {{ order_by }}) AS rn__,
+         COUNT(*) OVER (PARTITION BY k__) AS tied__
+  FROM top_rows
+)
+SELECT {{ p.hash_fn }}(r.k__) AS key_hash, MAX(r.tied__) AS tied,
+       COUNT(DISTINCT concat_ws('|'{% for c in p.owned %}, coalesce(r.w__{{ loop.index }}, '<null>'){% endfor %})) AS variants,
+       MAX(CASE WHEN r.rn__ = 1{% for c in p.owned %} AND r.w__{{ loop.index }} <=> d.d_{{ loop.index }}{% endfor %} THEN 1 ELSE 0 END) AS winner_here
+FROM ranked r
+LEFT JOIN dn_top d ON d.k = r.k__
+WHERE r.tied__ > 1 AND {{ p.hash_fn }}(r.k__) IN ({{ hashes | join(', ') }})
+GROUP BY r.k__

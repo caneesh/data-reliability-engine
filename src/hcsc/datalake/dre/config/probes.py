@@ -7,9 +7,10 @@ probe whose parameters are missing or null is NOT_READY, never RULED_OUT.
 
 Probe types:
 - file_exists{path}: CONFIRMED when the file exists.
-- file_value_compare{path, extract_regex, compare_to}: reads a value from a file
-  (first regex group) and compares it with the failing file's partition or the
-  event window.
+- file_value_compare{path, extract_regex, format, compare_to}: reads a value from a
+  file (first regex group), parses it with format (a Spark datetime pattern; never
+  compared as a string) and compares it with the failing file's partition (the same
+  regex applied to the file's folder name) or the event window.
 - log_contains{path_glob, pattern}: a log file matching the glob contains a line
   matching the pattern (and the failure's reference).
 - table_contains{table, condition}: the table has rows matching the condition for
@@ -46,6 +47,7 @@ class FileExists(Model):
 class FileValueCompare(Model):
     path: NonEmptyStr | None = None
     extract_regex: Regex | None = None
+    format: NonEmptyStr | None = None  # Spark datetime pattern for the extracted value, e.g. yyyyMMdd
     compare_to: Literal["partition", "window"] | None = None
 
 

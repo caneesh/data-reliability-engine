@@ -55,6 +55,7 @@ class Evaluation:
     results: list[CheckResult]
     evaluated_at: datetime
     duration_ms: int
+    ctx: CheckContext | None = None
 
 
 def plan(config: Config, feed_id: str | None = None) -> list[Planned]:
@@ -280,7 +281,7 @@ def evaluate(spark: SparkSession, config: Config, planned: Planned, event: Event
         full_sweep=is_full_sweep(config, ds.dataset, run_start or event.window_end),
     )
     results, duration_ms = run_check(planned.check, ctx, event)
-    return Evaluation(planned, event, results, datetime.now(timezone.utc), duration_ms)
+    return Evaluation(planned, event, results, datetime.now(timezone.utc), duration_ms, ctx)
 
 
 def result_rows(evaluation: Evaluation, run: runs.Run, execution_type: str) -> list[dict[str, Any]]:
@@ -313,6 +314,38 @@ def write_key_events(db: str, evaluation: Evaluation, rows: list[dict[str, Any]]
         if result.key_events is not None:
             append_key_events(result.key_events, db, run.run_id, row["evaluation_id"], row["dataset"],
                               row["check_id"], row["evaluated_at"], run.run_date)
+
+
+def explain_failures(spark: SparkSession, config: Config, evaluation: Evaluation, rows: list[dict[str, Any]],
+                     run: runs.Run) -> list[str]:
+    """Run the cause engine for each FAILED result, append its dq_cause_result rows, and return
+    one line per resolved cause (codes and counts only, hard rule 6)."""
+    from collections import Counter
+
+    from hcsc.datalake.dre.causes.base import CauseContext
+    from hcsc.datalake.dre.causes.engine import explain, failure_type, summarise
+    from hcsc.datalake.dre.store.causes import append_cause_results
+
+    p = evaluation.planned
+    ft = failure_type(p.feed.pattern if p.feed else None, p.check.check_id)
+    if ft is None or evaluation.ctx is None:
+        return []
+    lines = []
+    for result, row in zip(evaluation.results, rows):
+        if result.state != "FAILED":
+            continue
+        upstream = result.group_values.get("upstream") if p.check.check_id.startswith("HOP_") else None
+        cx = CauseContext(evaluation.ctx, evaluation.event, config, p.check.check_id, upstream)
+        try:
+            cause_rows = explain(cx, result, row["evaluation_id"], run.run_id, run.run_date,
+                                 datetime.now(timezone.utc))
+            append_cause_results(spark, config.defaults.dq_database, cause_rows)
+        except Exception as exc:  # causes never stop the run
+            log.error("could not explain %s for %s: %s", p.check.check_id, p.dataset.dataset, error_detail(exc))
+            continue
+        counts = Counter(line.text() for line in summarise(cause_rows, ft).values())
+        lines += [f"  {text} [{n} failing]" for text, n in sorted(counts.items())]
+    return lines
 
 
 def describe(evaluation: Evaluation) -> list[str]:
@@ -392,7 +425,8 @@ def run(spark: SparkSession, conf: str, feed_id: str | None = None, execution_ty
             except Exception as exc:  # the run continues; the missing write makes it PARTIAL
                 log.error("could not write %s for %s: %s", planned.check.check_id, planned.dataset.dataset,
                           error_detail(exc))
-            for line in describe(evaluation):
+                rows = []
+            for line in describe(evaluation) + explain_failures(spark, config, evaluation, rows, run_record):
                 print(line)
     except Exception as exc:
         log.error("run %s failed: %s", run_record.run_id, error_detail(exc))
