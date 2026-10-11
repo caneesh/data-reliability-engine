@@ -5,6 +5,7 @@ The Data Reliability Engine (DRE) is a read-only engine for data quality checks 
 - Build spec: [`docs/spec.md`](docs/spec.md) (source of truth)
 - Working rules for Claude Code: [`CLAUDE.md`](CLAUDE.md)
 - Open decisions and defaults taken: [`docs/decisions.md`](docs/decisions.md)
+- Where the build stands and what is waiting: [`docs/handoff.md`](docs/handoff.md)
 
 ## Development
 
