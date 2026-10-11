@@ -263,6 +263,66 @@ def test_file_skipped_and_invalid_key(spark) -> None:
     assert merge.not_run(cx, skipped).state == "RULED_OUT"  # curated loaded after 08:00
 
 
+def test_cause_checks_tolerate_null_load_times(spark) -> None:
+    """Review finding 16: null or unparseable load times give RULED_OUT, never a crash (ERROR)."""
+    files = {"rt_0001.seq": SimpleNamespace(first_load=None, rows_here=0, up_rows=2, invalid_rows=0),
+             "rt_0002.seq": SimpleNamespace(first_load=datetime(2026, 1, 15, 9, tzinfo=UTC), rows_here=1, up_rows=1,
+                                            invalid_rows=0),
+             "rt_0003.seq": SimpleNamespace(first_load=datetime(2026, 1, 15, 8, tzinfo=UTC), rows_here=0, up_rows=1,
+                                            invalid_rows=0)}
+    cx = context(spark, gold("causes.unused", load_time=GOLD_LOAD), "HOP_FILE_COMPLETENESS")
+    cx.cache["hop_files"] = files  # as hop_files would read them
+    assert merge.file_skipped(cx, Failure("rt_0001.seq", file_name="rt_0001.seq")).evidence == {
+        "reason": "no upstream load time for the file"}
+    assert merge.file_skipped(cx, Failure("rt_0003.seq", file_name="rt_0003.seq")).evidence == {
+        "later_files_loaded": 1}  # the file with no load time is left out of the order
+    stale = {"key_state": "STALE", "dn_load_ts": datetime(2026, 1, 15, 10), "up_load_ts": None}
+    cx = context(spark, gold("causes.unused", load_time=GOLD_LOAD), "HOP_KEY_CURRENCY")
+    assert merge.older_version_written_later(cx, Failure("h", key=stale)).evidence == {
+        "reason": "no upstream load time for the key"}
+
+
+def test_key_mismatch_with_a_single_column_key_is_not_ready(spark) -> None:
+    """Review finding 16: dropping the only key column leaves nothing to match on (it was a SQL error)."""
+    single = Dataset(dataset="gold", table="causes.unused", layer="GOLD", key=["sub_id"], upstream=["up"],
+                     key_map={"up": {"sub_id": "subscriberidnumber"}}, mismatch_probe_drop=["sub_id"])
+    cx = context(spark, single, "HOP_KEY_CURRENCY")
+    outcome = merge.key_mismatch(cx, Failure("h", key={"key_state": "MISSING"}))
+    assert (outcome.state, outcome.evidence) == ("NOT_READY", {"reason": "mismatch_probe_drop leaves no key column to match on"})
+
+
+def test_probes_read_their_files_once_per_evaluation(spark, tmp_path) -> None:
+    """Review finding 21: log files and value files are read once, not once per failure."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "load_1.log").write_text("ERROR rt_0001.seq: header\nERROR rt_0002.seq: header\n", encoding="utf-8")
+    cursor = _cursor(tmp_path, "20261002")
+    cx = context(spark, gold("causes.unused"), "T1_FILES_NOT_LOADED")
+    params = LogContains(path_glob=f"{logs}/*.log", pattern="ERROR")
+    value = FileValueCompare(path=cursor, extract_regex=r"(\d{8})", format="yyyyMMdd", compare_to="partition")
+    first = Failure("f1", files=("file:/landing/20261001/rt_0001.seq",))
+    second = Failure("f2", files=("file:/landing/20261001/rt_0002.seq",))
+    assert log_contains(cx, params, first).state == "CONFIRMED"
+    assert file_value_compare(cx, value, first).state == "CONFIRMED"
+    (logs / "load_1.log").unlink()
+    Path(cursor).unlink()
+    assert log_contains(cx, params, second).state == "CONFIRMED"     # from what the first failure read
+    assert file_value_compare(cx, value, second).state == "CONFIRMED"
+
+
+def test_the_winner_rule_orders_time_columns_as_times(spark) -> None:
+    """Review finding 27: enddate written MM/dd/yyyy is ordered as a date (02/01/2026 after
+    12/31/2025), not as a string; the record time column uses its own configured reading."""
+    rows = [curated_row(end="12/31/2025", updated=IN_WINDOW), curated_row(end="02/01/2026", updated=IN_WINDOW)]
+    up, dn = _hop(spark, "wr", rows, [], winner_rule={"order_by": ["sourcelastupdatets DESC", "enddate DESC"],
+                                                      "formats": {"enddate": "MM/dd/yyyy"}})
+    cx = context(spark, dn, "HOP_VALUE_AGREEMENT", upstream=up)
+    order = merge.winner_order(cx)
+    assert "to_timestamp(enddate, 'MM/dd/yyyy') DESC" in order and "to_utc_timestamp" in order
+    [first] = spark.sql(f"SELECT enddate FROM {up.table} ORDER BY {order} LIMIT 1").collect()
+    assert first.enddate == "02/01/2026"
+
+
 def test_no_upstream_data(spark) -> None:
     up, dn = _hop(spark, "nu", [curated_row(updated=datetime(2026, 1, 10))], [])
     up = curated(up.table)
@@ -284,8 +344,20 @@ def test_any_parameter_set_confirming_confirms(spark, tmp_path) -> None:
     entry = CauseEntry("RAW_LOAD_HELD", "file_exists", "load_hold_marker")
     cx = context(spark, gold("causes.unused"), "T1_ON_TIME", the_feed)
     assert run_entry(cx, entry, Failure("s")).state == "CONFIRMED"
+    both = feed(load_hold_marker=[{"path": str(tmp_path / "first.flag")}, {"path": str(tmp_path / "third.flag")}])
+    assert run_entry(context(spark, gold("causes.unused"), "T1_ON_TIME", both), entry, Failure("s")).state == "RULED_OUT"
+
+
+def test_a_parameter_set_not_configured_is_not_ready_never_ruled_out(spark, tmp_path) -> None:
+    """Review finding 13 (spec section 7: missing or null parameters are NOT_READY, never RULED_OUT):
+    one set is ruled out, the other was never checked, so the cause is not ruled out."""
+    entry = CauseEntry("RAW_LOAD_HELD", "file_exists", "load_hold_marker")
     one = feed(load_hold_marker=[{"path": str(tmp_path / "first.flag")}, {"path": None}])
-    assert run_entry(context(spark, gold("causes.unused"), "T1_ON_TIME", one), entry, Failure("s")).state == "RULED_OUT"
+    outcome = run_entry(context(spark, gold("causes.unused"), "T1_ON_TIME", one), entry, Failure("s"))
+    assert (outcome.state, outcome.evidence) == (
+        "NOT_READY", {"reason": "1 of 2 parameter sets of probes.load_hold_marker are not configured"})
+    (tmp_path / "first.flag").write_text("", encoding="utf-8")  # a ready set that confirms still confirms
+    assert run_entry(context(spark, gold("causes.unused"), "T1_ON_TIME", one), entry, Failure("s")).state == "CONFIRMED"
 
 
 def test_key_causes_without_a_secret_are_not_ready(spark) -> None:

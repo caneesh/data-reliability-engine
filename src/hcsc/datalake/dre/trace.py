@@ -94,26 +94,38 @@ def _gap(layers: list[Layer]) -> tuple[Layer, Layer, str] | None:
     return None
 
 
-def cause_line(spark: SparkSession, config: Config, down: Layer, key_secret: bytes | None) -> str:
-    """The latest HOP_KEY_CURRENCY cause of this key at this hop, from the dq store."""
+def layer_key_hash(spark: SparkSession, layer: Layer, key_secret: bytes) -> str:
+    """The key_hash the hop checks give this layer's key: the same key_string and dre_key_hash, in SQL."""
+    from hcsc.datalake.dre.checks.hop.common import HASH_FUNCTION, register_key_hash
+    from hcsc.datalake.dre.checks.keys import key_string
+
+    register_key_hash(spark, key_secret)
+    ds = layer.dataset
+    parts = ["CAST(NULL AS STRING)" if layer.values[c] is None else sql_string(layer.values[c]) for c in ds.key]
+    return spark.sql(f"SELECT {HASH_FUNCTION}({key_string(parts)}) AS h").collect()[0].h
+
+
+def cause_line(spark: SparkSession, config: Config, up: Layer, down: Layer, key_secret: bytes | None) -> str:
+    """The latest HOP_KEY_CURRENCY cause of this key at this hop (up -> down), from the dq store."""
     from hcsc.datalake.dre.causes.engine import failure_type, resolve
-    from hcsc.datalake.dre.checks.hop.common import key_hash
+    from hcsc.datalake.dre.checks.hop.common import hop_label
 
     if key_secret is None:
         return "cause: not available (hmac_secret_file is not set, so causes are not kept per key)"
     ds = down.dataset
-    canonical = "|".join(down.values[c] if down.values[c] is not None else "<null>" for c in ds.key)
-    ref = key_hash(key_secret, canonical)
+    ref = layer_key_hash(spark, down, key_secret)
     dq_database = validate_dq_database(config.defaults.dq_database)
+    hop = hop_label(validate_identifier(up.dataset.dataset, "dataset id"),
+                    validate_identifier(ds.dataset, "dataset id"))
     rows = [r.asDict() for r in spark.sql(
         f"SELECT c.*, r.evaluated_at AS result_at FROM {dq_database}.dq_cause_result c "
         f"JOIN {dq_database}.dq_check_result r ON r.evaluation_id = c.evaluation_id AND r.run_id = c.run_id "
-        f"WHERE r.dataset = '{validate_identifier(ds.dataset, 'dataset id')}' AND r.check_id = 'HOP_KEY_CURRENCY' "
-        f"AND c.failure_ref = '{ref}'").collect()]
+        f"WHERE r.dataset = '{ds.dataset}' AND r.check_id = 'HOP_KEY_CURRENCY' "
+        f"AND c.hop = '{hop}' AND c.failure_ref = '{ref}'").collect()]
     feed = config.feed_of(ds.dataset)
     ft = failure_type(feed.pattern if feed else None, "HOP_KEY_CURRENCY")
     if not rows or ft is None:
-        return "cause: not evaluated (no failed HOP_KEY_CURRENCY for this key in the dq store)"
+        return "cause: not evaluated (no failed HOP_KEY_CURRENCY for this key at this hop in the dq store)"
     latest = max(r["result_at"] for r in rows)
     return resolve([r for r in rows if r["result_at"] == latest], ft).text()
 
@@ -139,7 +151,7 @@ def trace(spark: SparkSession, config: Config, dataset_id: str, raw_key: list[st
     what = "does not have the key" if state == "MISSING" else "holds an older version"
     lines.append(f"first gap: {up.dataset.dataset} -> {down.dataset.dataset}: "
                  f"{down.dataset.dataset} {what} ({state})")
-    lines.append(cause_line(spark, config, down, key_secret))
+    lines.append(cause_line(spark, config, up, down, key_secret))
     return lines
 
 

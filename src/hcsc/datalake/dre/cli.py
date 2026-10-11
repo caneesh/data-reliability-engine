@@ -1,7 +1,6 @@
 """Command line entry point for `dre` (spec section 8).
 
-Every subcommand is built: `validate` (step 2), `install` (step 3), `run` and
-`dry-run` (steps 4 to 9), `trace` (step 9) and `watchdog` (step 10).
+Subcommands: validate, install, dry-run, run, trace, watchdog and retention.
 """
 
 from __future__ import annotations
@@ -12,14 +11,15 @@ from pathlib import Path
 
 from hcsc.datalake.dre import __version__
 
-# Subcommand name -> (help text, build step that implements it).
-COMMANDS: dict[str, tuple[str, int]] = {
-    "validate": ("Static validation of all config", 2),
-    "install": ("Print, apply or check the dq store tables and views", 3),
-    "dry-run": ("Run preconditions and checks for one feed; write nothing", 4),
-    "run": ("Full run: preconditions, checks, causes, results, email", 8),
-    "trace": ("Trace one key along the upstream chain", 9),
-    "watchdog": ("Check the last expected run exists and is complete", 10),
+# Subcommand name -> help text.
+COMMANDS: dict[str, str] = {
+    "validate": "Static validation of all config",
+    "install": "Print, apply or check the dq store tables and views",
+    "dry-run": "Run preconditions and checks for one feed; write nothing",
+    "run": "Full run: preconditions, checks, causes, results, email",
+    "trace": "Trace one key along the upstream chain",
+    "watchdog": "Check the last expected run exists and is complete",
+    "retention": "List (or with --apply drop) dq store partitions older than retention_months",
 }
 CONF_HELP = "configuration directory (default: conf)"
 
@@ -28,10 +28,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="dre", description="Data Reliability Engine")
     parser.add_argument("--version", action="version", version=f"dre {__version__}")
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
-    for name, (help_text, step) in COMMANDS.items():
-        cmd = sub.add_parser(name, help=f"{help_text} (build step {step})")
-        if name in ("validate", "install", "run", "dry-run", "trace", "watchdog"):
-            cmd.add_argument("--conf", default="conf", help=CONF_HELP)
+    for name, help_text in COMMANDS.items():
+        cmd = sub.add_parser(name, help=help_text)
+        cmd.add_argument("--conf", default="conf", help=CONF_HELP)
         if name == "dry-run":
             cmd.add_argument("--feed", required=True, help="the feed to check")
         if name == "trace":
@@ -40,6 +39,8 @@ def build_parser() -> argparse.ArgumentParser:
         if name == "run":
             cmd.add_argument("--feed", help="run one feed only (default: all feeds)")
             cmd.add_argument("--execution-type", default="NORMAL", choices=("NORMAL", "RERUN", "REPLAY"))
+        if name == "retention":
+            cmd.add_argument("--apply", action="store_true", help="drop the expired partitions (default: list them)")
         if name == "install":
             mode = cmd.add_mutually_exclusive_group(required=True)
             mode.add_argument("--print", dest="mode", action="store_const", const="print",
@@ -85,6 +86,24 @@ def install(conf: str, mode: str) -> int:
     return install_command(get_spark(), config.defaults.dq_database, mode)
 
 
+def retention(conf: str, apply: bool) -> int:
+    from datetime import datetime, timezone
+
+    from hcsc.datalake.dre.config.loader import load
+    from hcsc.datalake.dre.session import get_spark
+    from hcsc.datalake.dre.store.retention import retention_command
+
+    config, errors = load(Path(conf))
+    if config.defaults is None:
+        for error in errors:
+            print(error)
+        print(f"dre retention: cannot read retention_months from {conf}/defaults.yaml")
+        return 3
+    d = config.defaults
+    return retention_command(get_spark(), d.dq_database, d.retention_months, apply,
+                             datetime.now(timezone.utc).date())
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -112,9 +131,10 @@ def main(argv: list[str] | None = None) -> int:
         from hcsc.datalake.dre.watchdog import watch
 
         return watch(get_spark("dre-watchdog"), args.conf)
-    _, step = COMMANDS[args.command]
-    print(f"dre {args.command}: not built yet (build step {step})", file=sys.stderr)
-    return 3
+    if args.command == "retention":
+        return retention(args.conf, args.apply)
+    parser.error(f"unknown command {args.command}")  # argparse rejects these first
+    return 2
 
 
 if __name__ == "__main__":

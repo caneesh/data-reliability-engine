@@ -22,6 +22,9 @@ PACKAGE_ROOT = SRC_ROOT / "hcsc" / "datalake" / "dre"
 def spark(tmp_path_factory: pytest.TempPathFactory) -> Iterator["SparkSession"]:
     from pyspark.sql import SparkSession
 
+    from hcsc.datalake.dre.session import use_utc_clock
+
+    use_utc_clock()  # as get_spark does: Spark hands back times in the process's local zone
     # Python workers must run the same interpreter as the driver (the test runner).
     os.environ["PYSPARK_PYTHON"] = sys.executable
     os.environ["PYSPARK_DRIVER_PYTHON"] = sys.executable

@@ -13,10 +13,11 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+from dataclasses import replace
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
-from hcsc.datalake.dre.checks.base import CheckContext, CheckResult, did_not_run, utc_literal
+from hcsc.datalake.dre.checks.base import CheckContext, CheckResult, did_not_run, from_exception, utc_literal
 from hcsc.datalake.dre.checks.keys import column_expr, key_string
 from hcsc.datalake.dre.checks.times import utc_expr
 
@@ -29,9 +30,23 @@ if TYPE_CHECKING:
 HASH_FUNCTION = "dre_key_hash"
 
 
+def hop_label(upstream_id: str, dataset_id: str) -> str:
+    """How a hop is named in dq_key_event and dq_cause_result: `<upstream>-><dataset>`."""
+    return f"{upstream_id}->{dataset_id}"
+
+
 def upstream_pairs(ctx: CheckContext) -> list[tuple[str, Dataset | None]]:
     """(upstream id, upstream dataset or None if unknown), in key_map order."""
     return [(up_id, ctx.upstreams.get(up_id)) for up_id in ctx.dataset.key_map]
+
+
+def per_hop(up_id: str, evaluate_hop: Callable[[], CheckResult]) -> CheckResult:
+    """One hop's result. An exception in one hop (say its upstream table is gone) is DID_NOT_RUN
+    for that hop only; the other hops' results stand."""
+    try:
+        return evaluate_hop()
+    except Exception as exc:
+        return replace(from_exception(exc), group_values={"upstream": up_id})
 
 
 def hop_params(ctx: CheckContext, event: Event, up_id: str, up: Dataset | None) -> dict[str, Any] | CheckResult:
@@ -65,7 +80,7 @@ def hop_params(ctx: CheckContext, event: Event, up_id: str, up: Dataset | None) 
         "full_sweep": ctx.full_sweep, "hash_fn": HASH_FUNCTION,
         # hashed: compute key_hash with the secret; use_open: also judge keys open in v_open_keys
         "hashed": ctx.key_secret is not None, "use_open": ctx.key_secret is not None,
-        "dq_database": ctx.dq_database, "dataset": ds.dataset,
+        "dq_database": ctx.dq_database, "dataset": ds.dataset, "hop": hop_label(up_id, ds.dataset),
     }
 
 

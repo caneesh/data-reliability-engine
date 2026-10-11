@@ -44,7 +44,9 @@ def failures_for(cx: CauseContext, result: CheckResult) -> list[Failure]:
         if cx.ctx.key_secret is None:
             return [Failure(ref=None)]
         mode = "currency" if check == "HOP_KEY_CURRENCY" else "agreement"
-        rows = cx.spark.sql(render_sql("hop_key_failures.sql.j2", p=hop(cx), mode=mode, limit=LISTED)).collect()
+        source = result.judged_view if mode == "currency" else None  # the check's judgement, if kept
+        rows = cx.spark.sql(render_sql("hop_key_failures.sql.j2", p=hop(cx), mode=mode, limit=LISTED,
+                                       source=source)).collect()
         failures = [Failure(ref=r.key_hash, key=r.asDict()) for r in rows]
         cx.cache["failure_hashes"] = [f.ref for f in failures]
         return failures

@@ -1,19 +1,19 @@
 {# The failing keys of a hop check, for the cause engine (spec section 7), up to {{ limit }}:
-   mode currency: keys judged MISSING or STALE; mode agreement: CURRENT keys whose owned columns
-   disagree. Per key: key_hash, the key (stays in memory, never logged), its state, the upstream
-   latest record and load time, and this dataset's latest record and load time. #}
+   mode currency: keys judged MISSING or STALE (read from the check's materialised `source` when
+   given); mode agreement: CURRENT keys whose owned columns disagree. Per key: key_hash, the key
+   (stays in memory, never logged), its state, the upstream latest record and load time, and this
+   dataset's latest record and load time. #}
 {% import "hop_common.sql.j2" as hop %}
-WITH {{ hop.ctes(p) }}{% if mode == "agreement" %},
+WITH {% if source %}judged AS (SELECT * FROM {{ source }}){% else %}{{ hop.ctes(p) }}{% endif %}{% if mode == "agreement" %},
 {{ hop.mismatches(p) }}{% endif %}
-SELECT j.key_hash, j.k, j.key_state, u.up_record_ts, u.up_load_ts, d.dn_record_ts, d.dn_load_ts
+
+SELECT j.key_hash, j.k, j.key_state, j.up_record_ts, j.up_load_ts, j.dn_record_ts, j.dn_load_ts
 FROM judged j
-JOIN up_keys u ON u.k = j.k
-LEFT JOIN dn_keys d ON d.k = j.k
 {% if mode == "agreement" %}
 JOIN per_key m ON m.k = j.k AND m.mismatch = 1
 WHERE j.key_state = 'CURRENT'
 {% else %}
-WHERE j.key_state <> 'CURRENT'
+WHERE j.key_state IN ('MISSING', 'STALE')
 {% endif %}
 ORDER BY j.key_hash
 LIMIT {{ limit }}

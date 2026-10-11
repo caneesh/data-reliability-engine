@@ -10,6 +10,7 @@ If the feed's landing roots could not be listed this run: DID_NOT_RUN with that 
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -45,7 +46,7 @@ class FilesNotLoaded(Check):
             "file_name_column": ds.file_name_column, "feed_filter": ds.feed_filter,
             "cutoff": utc_literal(event.window_end - timedelta(hours=ctx.settings.sla_hours)), "limit": LISTED,
         }
-        row = ctx.spark.sql(render_sql("t1_files_not_loaded.sql.j2", summary=True, **params)).collect()[0]
+        row = ctx.spark.sql(render_sql("t1_files_not_loaded.sql.j2", **params)).collect()[0]
         result = from_counts(
             row.population, row.violations,
             observed=f"{row.violations or 0} of {row.population} files first seen over "
@@ -53,8 +54,7 @@ class FilesNotLoaded(Check):
             expected="every landed file has raw rows",
         )
         if result.state == "FAILED":
-            paths = [r.path for r in ctx.spark.sql(render_sql("t1_files_not_loaded.sql.j2", summary=False, **params)).collect()]
-            detail = json.dumps({"not_loaded": paths, "listed": len(paths), "total": row.violations})
-            result = CheckResult(result.state, result.population, result.violations, result.observed,
-                                 result.expected, group_values=result.group_values, detail=detail)
+            paths = list(row.not_loaded or [])
+            result = replace(result, detail=json.dumps({"not_loaded": paths, "listed": len(paths),
+                                                        "total": row.violations}))
         return [result]

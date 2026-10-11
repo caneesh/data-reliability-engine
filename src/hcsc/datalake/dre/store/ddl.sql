@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_cause_result (
 
 CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_key_event (
   run_id STRING, evaluation_id STRING, dataset STRING, check_id STRING,
+  hop STRING,
   key_hash STRING, key_value STRING,
   event STRING,
   state_detail STRING, observed_at TIMESTAMP
@@ -72,28 +73,28 @@ FROM (
 ) ranked
 WHERE latest_rank = 1;
 
--- Keys whose latest event is FLAGGED or STILL_FLAGGED, with the time the key
+-- Keys whose latest event at a hop is FLAGGED or STILL_FLAGGED, with the time the key
 -- was first flagged in its current open spell (after its last CLEARED).
 -- key_value is restricted and not exposed here.
 CREATE VIEW IF NOT EXISTS {{ dq_database }}.v_open_keys AS
-SELECT dataset, check_id, key_hash, latest_event, state_detail,
+SELECT dataset, check_id, hop, key_hash, latest_event, state_detail,
        first_flagged_at, last_observed_at, run_id, evaluation_id
 FROM (
-  SELECT dataset, check_id, key_hash,
+  SELECT dataset, check_id, hop, key_hash,
          event AS latest_event, state_detail, run_id, evaluation_id,
          observed_at AS last_observed_at,
          MIN(CASE WHEN event IN ('FLAGGED', 'STILL_FLAGGED') AND
                        (last_cleared_at IS NULL OR observed_at > last_cleared_at)
                   THEN observed_at END)
-           OVER (PARTITION BY dataset, check_id, key_hash) AS first_flagged_at,
+           OVER (PARTITION BY dataset, check_id, hop, key_hash) AS first_flagged_at,
          ROW_NUMBER() OVER (
-           PARTITION BY dataset, check_id, key_hash
+           PARTITION BY dataset, check_id, hop, key_hash
            ORDER BY observed_at DESC, run_id DESC
          ) AS latest_rank
   FROM (
     SELECT e.*,
            MAX(CASE WHEN event = 'CLEARED' THEN observed_at END)
-             OVER (PARTITION BY dataset, check_id, key_hash) AS last_cleared_at
+             OVER (PARTITION BY dataset, check_id, hop, key_hash) AS last_cleared_at
     FROM {{ dq_database }}.dq_key_event e
   ) with_cleared
 ) ranked

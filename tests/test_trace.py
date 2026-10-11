@@ -46,3 +46,30 @@ def test_bad_input(spark, tmp_path, capsys) -> None:
     assert code == 3 and "4-part key" in lines[0]
     code, lines = trace(replay, capsys, ["--dataset", "nope", "--key", "x"])
     assert code == 3 and lines == ["dre trace: unknown dataset 'nope'"]
+
+
+def test_the_cause_line_is_the_gap_hop_s_own(spark, tmp_path, capsys) -> None:
+    """Review finding 15: a cause stored for the same key at another hop is not this hop's cause."""
+    from datetime import date, datetime
+
+    from hcsc.datalake.dre.checks.hop.common import key_hash
+    from tests.store.conftest import append_rows
+
+    secret = tmp_path / "hmac.secret"
+    secret.write_bytes(b"synthetic-trace-secret\n")
+    replay = replay_conf(spark, tmp_path, "trace_hop", {
+        "defaults.yaml": [("hmac_secret_file: null", f"hmac_secret_file: {secret}")]})
+    create_table(spark, replay.curated, CURATED_COLUMNS, [curated_row(updated=curated_load_time(12))])
+    create_table(spark, replay.gold, GOLD_COLUMNS)
+    ref = key_hash(b"synthetic-trace-secret", "123401|01|2026-01-01|AGR-A")
+    day = date(2026, 1, 15)
+    append_rows(spark, replay.dq, "dq_check_result", [{
+        "evaluation_id": "e1", "run_id": "r1", "dataset": "gold_member_coverage", "check_id": "HOP_KEY_CURRENCY",
+        "state": "FAILED", "evaluated_at": datetime(2026, 1, 15, 12), "run_date": day}])
+    append_rows(spark, replay.dq, "dq_cause_result", [{
+        "run_id": "r1", "evaluation_id": "e1", "failure_ref": ref, "hop": "another_upstream->gold_member_coverage",
+        "cause_check_id": "builtin", "order_no": 1, "state": "CONFIRMED", "cause_code": "NOT_RUN",
+        "evidence": "{}", "evaluated_at": datetime(2026, 1, 15, 12), "run_date": day}])
+    code, lines = trace(replay, capsys)
+    assert code == 0
+    assert lines[-1] == "cause: not evaluated (no failed HOP_KEY_CURRENCY for this key at this hop in the dq store)"

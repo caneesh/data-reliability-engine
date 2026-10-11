@@ -158,6 +158,14 @@ def test_value_format(spark) -> None:
     assert (r.state, r.reason_code) == ("DID_NOT_RUN", "empty_population")
 
 
+def test_value_format_reads_the_stored_value_not_the_normalised_key(spark) -> None:
+    """Review finding 12: sub_id has strip_leading_zeros; a zero-padding rule sees '000123401'."""
+    check = RuleCheck(rule("value_format", {"column": "sub_id", "pattern": r"^[0-9]{9}$"}))
+    ds = table(spark, "vf_padded", [gold_row(), gold_row(sub_id="123402", source="SRC_B")])
+    assert states(run(spark, check, ds)) == [({"src_sys_nm": "SRC_A"}, "PASSED", 1, 0),
+                                             ({"src_sys_nm": "SRC_B"}, "FAILED", 1, 1)]
+
+
 # --- null_rate_max ---
 
 def test_null_rate_max(spark) -> None:

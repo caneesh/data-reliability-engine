@@ -1,8 +1,9 @@
 {# Shared CTEs for hop checks. p: parameters from checks/hop/common.py.
    up / dn: each side's rows (canonical key k, record time, load time, owned columns as strings);
    up_top / dn_top: rows at each key's latest record time, ties kept;
-   judged: the keys judged in this window, with MISSING / STALE / CURRENT: upstream keys at their
-   deadline, keys reloaded here in the window once their upstream deadline has passed, open keys. #}
+   judged: the keys judged in this window, with MISSING / STALE / CURRENT and whether the key was
+   open at this hop: upstream keys at their deadline, keys reloaded here in the window once their
+   upstream deadline has passed, open keys. #}
 {% macro ctes(p) %}
 up AS (
   SELECT {{ p.up_key }} AS k, {{ p.up_record }} AS record_ts, {{ p.up_load }} AS load_ts
@@ -44,7 +45,7 @@ dn_keys AS (
 open_keys AS (
 {% if p.use_open %}
   SELECT DISTINCT key_hash FROM {{ p.dq_database }}.v_open_keys
-  WHERE dataset = '{{ p.dataset }}' AND check_id = 'HOP_KEY_CURRENCY'
+  WHERE dataset = '{{ p.dataset }}' AND check_id = 'HOP_KEY_CURRENCY' AND hop = '{{ p.hop }}'
 {% else %}
   SELECT CAST(NULL AS STRING) AS key_hash WHERE 1 = 0
 {% endif %}
@@ -54,10 +55,11 @@ hashed_up AS (
   FROM up_keys u
 ),
 judged AS (
-  SELECT u.k, u.key_hash, u.up_record_ts, d.dn_record_ts,
+  SELECT u.k, u.key_hash, u.up_record_ts, u.up_load_ts, d.dn_record_ts, d.dn_load_ts,
          CASE WHEN d.k IS NULL THEN 'MISSING'
               WHEN d.dn_record_ts IS NULL OR d.dn_record_ts < u.up_record_ts THEN 'STALE'
-              ELSE 'CURRENT' END AS key_state
+              ELSE 'CURRENT' END AS key_state,
+         o.key_hash IS NOT NULL AS was_open
   FROM hashed_up u
   LEFT JOIN dn_keys d ON d.k = u.k
   LEFT JOIN open_keys o ON o.key_hash = u.key_hash

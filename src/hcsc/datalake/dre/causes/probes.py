@@ -14,12 +14,15 @@ source: what it reads comes from the feed's `probes:` parameters. All reads only
 - size_changed: CONFIRMED when a file of the failure was seen with more than one size.
 
 Values read from files are parsed through Spark; log lines and file contents never go into
-evidence (only paths, counts and the parsed values).
+evidence (only paths, counts and the parsed values). What a probe reads (a value file, the log
+lines matching a pattern, a parsed value) is read once per evaluation and shared by its failures
+through the CauseContext cache.
 """
 
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from typing import Any
 
 from hcsc.datalake.dre.causes.base import CauseContext, Failure, Outcome, confirmed, not_ready, ruled_out
@@ -37,13 +40,15 @@ def file_exists(cx: CauseContext, params: Any, failure: Failure) -> Outcome:
     return confirmed(path=params.path) if path_exists(cx.spark, params.path) else ruled_out(path=params.path)
 
 
-def _parse(cx: CauseContext, value: str, fmt: str, tz: str | None = None):
-    sql = render_sql("cause_parse_time.sql.j2", value=sql_string(value), fmt=sql_string(fmt),
-                     tz=sql_string(tz) if tz else None, slot=None)
-    return cx.spark.sql(sql).collect()[0].v
+def _parse(cx: CauseContext, value: str, fmt: str, tz: str | None = None) -> datetime | None:
+    def query() -> datetime | None:
+        sql = render_sql("cause_parse_time.sql.j2", value=sql_string(value), fmt=sql_string(fmt),
+                         tz=sql_string(tz) if tz else None, slot=None)
+        return cx.spark.sql(sql).collect()[0].v
+    return cx.cached(f"parse:{fmt}:{tz}:{value}", query)
 
 
-def _slot_partition(cx: CauseContext, failure: Failure, fmt: str):
+def _slot_partition(cx: CauseContext, failure: Failure, fmt: str) -> datetime | None:
     tz = (cx.feed.cadence.timezone if cx.feed and cx.feed.cadence.timezone else None) or cx.ctx.default_timezone
     sql = render_sql("cause_parse_time.sql.j2", slot=utc_literal(failure.slot), fmt=sql_string(fmt),
                      tz=sql_string(tz), value=None)
@@ -57,9 +62,16 @@ def _extract(pattern: str, text: str) -> str | None:
     return match.group(1) if match.groups() else match.group(0)
 
 
+def _file_value(cx: CauseContext, path: str, regex: str) -> str | None:
+    """The value extract_regex finds in the first READ_LINES lines of the file (read once)."""
+    def read() -> str | None:
+        lines = [r.value for r in cx.spark.read.text(path).limit(READ_LINES).collect()]
+        return _extract(regex, "\n".join(lines))
+    return cx.cached(f"file_value:{path}:{regex}", read)
+
+
 def file_value_compare(cx: CauseContext, params: Any, failure: Failure) -> Outcome:
-    lines = [r.value for r in cx.spark.read.text(params.path).limit(READ_LINES).collect()]
-    raw = _extract(params.extract_regex, "\n".join(lines))
+    raw = _file_value(cx, params.path, params.extract_regex)
     if raw is None:
         raise ValueError(f"extract_regex found no value in {params.path}")
     if params.compare_to == "window":
@@ -107,18 +119,26 @@ def log_contains(cx: CauseContext, params: Any, failure: Failure) -> Outcome:
     names = _names(failure)
     if not names:
         return ruled_out(reason="no file to look for")
-    logs = glob_files(cx.spark, params.path_glob)
+
+    def matching() -> tuple[int, list[tuple[str, str]]]:
+        """(log files, (log, line) for every line matching the pattern): read once per evaluation.
+        The lines stay in memory; only log paths and counts go into evidence."""
+        logs = glob_files(cx.spark, params.path_glob)
+        if not logs:
+            return 0, []
+        lines = cx.spark.read.text(logs).withColumn("log", F.input_file_name())
+        return len(logs), [(r["log"], r["value"]) for r in lines.filter(F.col("value").rlike(params.pattern))
+                           .select("log", "value").collect()]
+    logs, lines = cx.cached(f"log_contains:{params.path_glob}:{params.pattern}", matching)
     if not logs:
         return ruled_out(logs=0)
-    lines = cx.spark.read.text(logs).withColumn("log", F.input_file_name())
-    names_hit = None
-    for name in names:
-        hit = F.instr(F.col("value"), name) > 0
-        names_hit = hit if names_hit is None else names_hit | hit
-    found = lines.filter(F.col("value").rlike(params.pattern) & names_hit).groupBy("log").count().collect()
+    found: dict[str, int] = {}
+    for log, line in lines:
+        if any(name in line for name in names):
+            found[log] = found.get(log, 0) + 1
     if found:
-        return confirmed(logs={r["log"]: r["count"] for r in found})
-    return ruled_out(logs=len(logs))
+        return confirmed(logs=found)
+    return ruled_out(logs=logs)
 
 
 def table_contains(cx: CauseContext, params: Any, failure: Failure) -> Outcome:

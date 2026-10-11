@@ -172,6 +172,12 @@ def cross_check(config: Config, feeds_complete: bool = True) -> list[ConfigError
             if col not in key:
                 err("dataset", ds_id, ("mismatch_probe_drop", i), f"{col!r} is not a key column",
                     "list key columns only")
+        if ds.winner_rule is not None:
+            ordered = {term.split()[0] for term in ds.winner_rule.order_by}
+            for col in ds.winner_rule.formats:
+                if col not in ordered:
+                    err("dataset", ds_id, ("winner_rule", "formats", col), f"{col!r} is not in winner_rule.order_by",
+                        "give formats only for columns the winner rule orders by")
         if ds.owned_columns and not ds.key_map:
             err("dataset", ds_id, ("owned_columns",), "owned_columns needs a key_map",
                 "add key_map for the upstream dataset, or remove owned_columns")

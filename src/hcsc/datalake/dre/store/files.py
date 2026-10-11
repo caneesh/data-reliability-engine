@@ -7,9 +7,10 @@ the latest size, and a size change after first sight stays visible.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import TYPE_CHECKING
 
+from hcsc.datalake.dre.checks.times import as_utc
 from hcsc.datalake.dre.store import writer
 from hcsc.datalake.dre.store.names import validate_dq_database, validate_identifier
 
@@ -18,10 +19,6 @@ if TYPE_CHECKING:
 
     from hcsc.datalake.dre.sources.hdfs import FileInfo
     from hcsc.datalake.dre.store.runs import Run
-
-
-def as_utc(value: datetime) -> datetime:
-    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
 
 def known_files(spark: SparkSession, dq_database: str, feed: str) -> dict[str, tuple[datetime, int, datetime]]:

@@ -35,7 +35,8 @@ def utc_expr(column: TimeColumn, default_tz: str) -> str:
 
 
 def as_utc(value: datetime) -> datetime:
-    """Aware UTC datetime; a naive value (as Spark returns in a UTC session) is taken as UTC."""
+    """Aware UTC datetime. A naive value is taken as UTC: Spark returns naive datetimes in the
+    driver process's local time zone, which session.use_utc_clock sets to UTC."""
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
 

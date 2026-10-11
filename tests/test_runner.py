@@ -259,10 +259,30 @@ def test_full_sweep_day_is_counted_in_the_default_timezone() -> None:
     from tests.conftest import REPO_ROOT
 
     config, _ = load(REPO_ROOT / "conf")  # full_sweep_day SUNDAY, timezone America/Chicago
-    assert is_full_sweep(config, "gold_member_coverage", datetime(2026, 1, 18, 12, tzinfo=timezone.utc))      # Sunday
-    assert not is_full_sweep(config, "gold_member_coverage", datetime(2026, 1, 17, 12, tzinfo=timezone.utc))  # Saturday
+
+    def window(start_hour: int, end_hour: int) -> Event:  # hours from Sunday 2026-01-18 00:00 UTC
+        base = datetime(2026, 1, 18, tzinfo=timezone.utc)
+        return Event("gold_member_coverage", base + timedelta(hours=start_hour), base + timedelta(hours=end_hour))
+
+    # Sunday 00:00 in Chicago is 06:00 UTC: the window that crosses it is the sweep.
+    assert is_full_sweep(config, "gold_member_coverage", window(5, 7))
     # Sunday 03:00 UTC is still Saturday evening in Chicago.
-    assert not is_full_sweep(config, "gold_member_coverage", datetime(2026, 1, 18, 3, tzinfo=timezone.utc))
+    assert not is_full_sweep(config, "gold_member_coverage", window(2, 3))
+    # Saturday.
+    assert not is_full_sweep(config, "gold_member_coverage", window(-30, -29))
+
+
+def test_the_full_sweep_runs_once_on_its_day_not_in_every_run() -> None:
+    """Review finding 17: with hourly runs, only the first window ending on full_sweep_day sweeps."""
+    from hcsc.datalake.dre.config.loader import load
+    from hcsc.datalake.dre.runner import is_full_sweep
+    from tests.conftest import REPO_ROOT
+
+    config, _ = load(REPO_ROOT / "conf")
+    base = datetime(2026, 1, 18, 6, tzinfo=timezone.utc)  # Sunday 00:00 in Chicago
+    hourly = [Event("gold_member_coverage", base + timedelta(hours=h - 1), base + timedelta(hours=h))
+              for h in range(0, 23)]  # the first ends at Sunday 00:00 in Chicago
+    assert [is_full_sweep(config, "gold_member_coverage", e) for e in hourly] == [True] + [False] * 22
 
 
 def test_weekly_rules_use_rule_weekly_day_when_set(monkeypatch, tmp_path) -> None:
@@ -284,3 +304,46 @@ def test_weekly_rules_use_rule_weekly_day_when_set(monkeypatch, tmp_path) -> Non
     monkeypatch.setattr(schedule, "is_due", lambda freq, start, at, tz, day, done: days.append(day) or True)
     rules_due(None, config, plan_rules(config), datetime(2026, 1, 16, tzinfo=timezone.utc))
     assert set(days) == {"MONDAY"}
+
+
+def test_a_failed_key_event_write_makes_the_run_partial_and_the_result_is_still_explained(
+        spark, tmp_path, monkeypatch, capsys) -> None:
+    """Review finding 4: a result is written only when its key events are too; a stored result is
+    still explained."""
+    from hcsc.datalake.dre import runner
+
+    replay = replay_conf(spark, tmp_path, "runner_key_events")
+    create_table(spark, replay.gold, GOLD_COLUMNS, [gold_row()])
+    create_table(spark, replay.curated, CURATED_COLUMNS, [curated_row()])
+    explained: list[int] = []
+    real_explain = runner.explain_failures
+
+    def failing_write(*args, **kwargs):
+        raise OSError("synthetic write failure")
+
+    def spy(spark_, config, evaluation, rows, run):
+        explained.append(len(rows))
+        return real_explain(spark_, config, evaluation, rows, run)
+
+    monkeypatch.setattr(runner, "write_key_events", failing_write)
+    monkeypatch.setattr(runner, "explain_failures", spy)
+    assert main(["run", "--conf", str(replay.conf)]) == 2
+    [final] = [r for r in spark.table(f"{replay.dq}.dq_run").collect() if r.status != "STARTED"]
+    assert (final.status, final.checks_written) == ("PARTIAL", 0)
+    assert spark.table(f"{replay.dq}.dq_check_result").count() == final.checks_expected  # every result stored
+    assert explained and all(n > 0 for n in explained)  # each with its rows, so causes can be written
+
+
+def test_a_planning_error_ends_the_run_failed(spark, tmp_path, monkeypatch) -> None:
+    """Review finding 18: plan() raising after the STARTED row still writes a final FAILED row."""
+    from hcsc.datalake.dre import runner
+
+    replay = replay_conf(spark, tmp_path, "runner_plan_error")
+
+    def broken_plan(*args, **kwargs):
+        raise ValueError("synthetic planning error")
+
+    monkeypatch.setattr(runner, "plan", broken_plan)
+    assert main(["run", "--conf", str(replay.conf)]) == 2
+    [run] = spark.table(f"{replay.dq}.v_latest_run").collect()
+    assert run.status == "FAILED"

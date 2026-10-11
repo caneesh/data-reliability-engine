@@ -73,3 +73,23 @@ def test_check_delay_moves_the_window_end_back() -> None:
     delayed = window_for(ds, run_start, None, SETTINGS, "America/Chicago", check_delay_minutes=60)
     assert plain.window_end == datetime(2026, 1, 15, 11, 52, tzinfo=UTC)
     assert delayed.window_end == datetime(2026, 1, 15, 10, 52, tzinfo=UTC)
+
+
+def test_schema_drift_is_kept_on_a_due_dataset_of_the_table() -> None:
+    """Review finding 10: two feeds' datasets share one raw table; only feed B is due. Choosing the
+    one T1_SCHEMA_DRIFT per table after dropping feeds that are not due keeps B's."""
+    from types import SimpleNamespace
+
+    from hcsc.datalake.dre.runner import SCHEMA_DRIFT, Planned, once_per_table
+
+    def planned(feed: str, dataset: str, check: str) -> Planned:
+        return Planned(SimpleNamespace(feed=feed), SimpleNamespace(dataset=dataset, table="raw_db.shared"),
+                       SimpleNamespace(check_id=check))
+
+    work = [planned("feed_a", "raw_a", SCHEMA_DRIFT), planned("feed_a", "raw_a", "T1_ON_TIME"),
+            planned("feed_b", "raw_b", SCHEMA_DRIFT), planned("feed_b", "raw_b", "T1_ON_TIME")]
+    kept = once_per_table(only_due(work, {"feed_b"}), SCHEMA_DRIFT)
+    assert [(p.dataset.dataset, p.check.check_id) for p in kept] == [("raw_b", SCHEMA_DRIFT), ("raw_b", "T1_ON_TIME")]
+    # Choosing first (the old order) would have dropped B's drift check along with feed A.
+    assert [p.dataset.dataset for p in only_due(once_per_table(work, SCHEMA_DRIFT), {"feed_b"})
+            if p.check.check_id == SCHEMA_DRIFT] == []

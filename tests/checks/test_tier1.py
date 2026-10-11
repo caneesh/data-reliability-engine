@@ -192,6 +192,44 @@ def test_volume_needs_seven_earlier_loads_per_slot(spark) -> None:
         assert r.population == 10  # recorded, so the history builds up
 
 
+def test_volume_judges_a_monthly_feed(spark) -> None:
+    """Review finding 5: a monthly feed's previous slot is a month back; its period still forms."""
+    monthly = FEED.model_copy(update={"cadence": Cadence(kind="monthly", days_of_month=[1], times=["06:00"],
+                                                         timezone="UTC")})
+    event = Event("vol_month", datetime(2026, 2, 1, 5, tzinfo=UTC), datetime(2026, 2, 1, 7, tzinfo=UTC))
+    loads = [gold_row(sub_id=f"m-{i}", loaded="2026-01-10 08:00:00:000000") for i in range(12)]
+    create_table(spark, "t1.vol_month", GOLD_COLUMNS, loads)
+    rows = [{"evaluation_id": f"vol_month-{m}", "run_id": f"r{m}", "event_id": f"e{m}", "dataset": "vol_month",
+             "check_id": "T1_VOLUME", "execution_type": "NORMAL", "state": "PASSED", "population": 10,
+             "violations": 0, "group_values": {"slot": "06:00", "slot_time": f"2025-{m:02d}-01 06:00"},
+             "window_start": datetime(2025, m, 1, 5), "window_end": datetime(2025, m, 1, 7),
+             "run_date": date(2025, m, 1)} for m in range(2, 10)]
+    append_rows(spark, DQ, "dq_check_result", rows)
+    [r] = run(spark, Volume(), gold("t1.vol_month", dataset="vol_month", load_time=UTC_LOAD), feed=monthly,
+              event=event)
+    assert r.group_values == {"slot": "06:00", "slot_time": "2026-01-01 06:00"}  # the January load's period
+    assert (r.state, r.population) == ("PASSED", 12)
+    assert r.expected == "5 to 15 rows (median 10 of the last 8 loads)"
+
+
+def test_volume_counts_a_rejudged_load_once(spark) -> None:
+    """Review finding 11: a load judged in a held window and again later is one load of history."""
+    volume_history(spark, "vol_rejudged", [10] * 6)
+    rejudged = [{"evaluation_id": f"vol_rejudged-{label(slot)}-held{j}", "run_id": f"h{j}", "event_id": f"h{j}",
+                 "dataset": "vol_rejudged", "check_id": "T1_VOLUME", "execution_type": "NORMAL",
+                 "state": "PASSED", "population": 10, "violations": 0,
+                 "group_values": {"slot": label(slot), "slot_time": f"2026-01-10 {label(slot)}"},
+                 "window_start": datetime(2026, 1, 10, 11), "window_end": datetime(2026, 1, 10, 12 + j),
+                 "evaluated_at": datetime(2026, 1, 10, 12 + j), "run_date": date(2026, 1, 10)}
+                for slot in PERIODS for j in range(2)]
+    append_rows(spark, DQ, "dq_check_result", rejudged)
+    create_table(spark, "t1.vol_rejudged", GOLD_COLUMNS, loads_per_slot({}))
+    results = run(spark, Volume(), gold("t1.vol_rejudged", dataset="vol_rejudged", load_time=UTC_LOAD),
+                  feed=SIX_SLOTS)
+    # 6 loads plus one load judged twice: 7 loads, enough history, not 8.
+    assert {(r.state, r.expected) for r in results} == {("PASSED", "5 to 15 rows (median 10 of the last 7 loads)")}
+
+
 def test_volume_without_rows_is_empty_population(spark) -> None:
     create_table(spark, "t1.vol_empty", GOLD_COLUMNS)
     [r] = run(spark, Volume(), gold("t1.vol_empty", dataset="vol_empty", load_time=UTC_LOAD), feed=SIX_SLOTS)

@@ -21,23 +21,9 @@ Probe types:
 
 from __future__ import annotations
 
-import re
-from typing import Annotated, Any, Literal
+from typing import Any, Literal
 
-from pydantic import AfterValidator, Field
-
-from hcsc.datalake.dre.config.models import Model, NonEmptyStr, SqlFragment, TableName, invalid
-
-
-def _regex(value: str) -> str:
-    try:
-        re.compile(value)
-    except re.error as exc:
-        raise invalid(f"pattern {value!r} does not compile: {exc}", "fix the regular expression") from None
-    return value
-
-
-Regex = Annotated[str, Field(min_length=1), AfterValidator(_regex)]
+from hcsc.datalake.dre.config.models import Model, NonEmptyStr, Regex, SqlFragment, TableName
 
 
 class FileExists(Model):

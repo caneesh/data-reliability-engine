@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from hcsc.datalake.dre.store.names import validate_dq_database
-from hcsc.datalake.dre.store.schema import expected_objects, render_ddl
+from hcsc.datalake.dre.store.schema import TableDef, expected_objects, render_ddl
 
 if TYPE_CHECKING:
     from pyspark.sql import SparkSession
@@ -84,7 +84,7 @@ def missing_objects(spark: SparkSession, dq_database: str) -> list[str]:
     return [f.name for f in check_store(spark, dq_database) if f.status == MISSING]
 
 
-def _check_table(spark: SparkSession, db: str, table) -> Finding:
+def _check_table(spark: SparkSession, db: str, table: TableDef) -> Finding:
     name = f"{db}.{table.name}"
     if not spark.catalog.tableExists(name):
         return Finding(name, MISSING)

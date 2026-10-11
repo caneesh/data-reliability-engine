@@ -87,35 +87,46 @@ class WindowHistory:
     held_by: tuple[str, ...] = ()           # the reason codes that held them
 
 
-def window_history(spark: SparkSession, dq_database: str, dataset: str,
-                   exclude_checks: tuple[str, ...] = ()) -> WindowHistory:
-    """Read the dataset's window history from dq_check_result. Results of exclude_checks (gold
-    rules, which run on their own schedule over the whole table) neither move nor hold a window."""
+def window_histories(spark: SparkSession, dq_database: str, datasets: list[str]) -> dict[str, WindowHistory]:
+    """Read the datasets' window histories from dq_check_result in one pass. Gold rule results
+    (the only results with a severity) neither move nor hold a window: rules run on their own
+    schedule over the whole table. They are told apart by the row, not by today's rule ids, so a
+    renamed or deleted rule's old results stay out too."""
     validate_dq_database(dq_database)
-    validate_identifier(dataset, "dataset id")
+    if not datasets:
+        return {}
+    names = ", ".join(f"'{validate_identifier(d, 'dataset id')}'" for d in sorted(set(datasets)))
+    found = {d: WindowHistory() for d in datasets}
     if not spark.catalog.tableExists(f"{dq_database}.dq_check_result"):
-        return WindowHistory()
+        return found
     blocking = ", ".join(f"'{c}'" for c in BLOCKING_CATEGORIES)
-    excluded = ", ".join(f"'{validate_identifier(c, 'check id')}'" for c in exclude_checks)
-    exclude = f" AND check_id NOT IN ({excluded})" if exclude_checks else ""
-    row = spark.sql(
+    rows = spark.sql(
         f"WITH events AS ("
-        f"  SELECT event_id, MIN(window_start) AS window_start, MAX(window_end) AS window_end,"
+        f"  SELECT dataset, event_id, MIN(window_start) AS window_start, MAX(window_end) AS window_end,"
         f"         MAX(CASE WHEN state = 'DID_NOT_RUN' AND reason_category IN ({blocking}) THEN 1 ELSE 0 END) AS held,"
         f"         collect_set(CASE WHEN state = 'DID_NOT_RUN' AND reason_category IN ({blocking})"
         f"                          THEN reason_code END) AS held_by"
         f"  FROM {dq_database}.dq_check_result"
-        f"  WHERE dataset = '{dataset}' AND execution_type = 'NORMAL'{exclude}"
-        f"  GROUP BY event_id"
-        f"), good AS (SELECT MAX(window_end) AS previous_end FROM events WHERE held = 0) "
-        f"SELECT g.previous_end, MIN(e.window_start) AS held_start, MIN(e.window_end) AS first_held_end,"
+        f"  WHERE dataset IN ({names}) AND execution_type = 'NORMAL' AND severity IS NULL"
+        f"  GROUP BY dataset, event_id"
+        f"), good AS (SELECT dataset, MAX(CASE WHEN held = 0 THEN window_end END) AS previous_end"
+        f"            FROM events GROUP BY dataset) "
+        f"SELECT g.dataset, g.previous_end, MIN(e.window_start) AS held_start, MIN(e.window_end) AS first_held_end,"
         f"       MAX(e.window_end) AS last_held_end, flatten(collect_list(e.held_by)) AS held_by "
-        f"FROM good g LEFT JOIN events e ON e.held = 1 AND (g.previous_end IS NULL OR e.window_end > g.previous_end) "
-        f"GROUP BY g.previous_end"
-    ).collect()[0]
+        f"FROM good g LEFT JOIN events e ON e.dataset = g.dataset AND e.held = 1"
+        f"  AND (g.previous_end IS NULL OR e.window_end > g.previous_end) "
+        f"GROUP BY g.dataset, g.previous_end"
+    ).collect()
     utc = (lambda t: None if t is None else as_utc(t))
-    return WindowHistory(utc(row.previous_end), utc(row.held_start), utc(row.first_held_end),
-                         utc(row.last_held_end), tuple(sorted(set(row.held_by or []))))
+    for row in rows:
+        found[row.dataset] = WindowHistory(utc(row.previous_end), utc(row.held_start), utc(row.first_held_end),
+                                           utc(row.last_held_end), tuple(sorted(set(row.held_by or []))))
+    return found
+
+
+def window_history(spark: SparkSession, dq_database: str, dataset: str) -> WindowHistory:
+    """One dataset's window history (window_histories)."""
+    return window_histories(spark, dq_database, [dataset])[dataset]
 
 
 def previous_window_end(spark: SparkSession, dq_database: str, dataset: str) -> datetime | None:

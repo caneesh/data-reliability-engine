@@ -127,6 +127,7 @@ OrderTerm = Annotated[str, AfterValidator(_order_term)]
 Email = Annotated[str, AfterValidator(_email)]
 TimeZone = Annotated[str, AfterValidator(_timezone)]
 NonEmptyStr = Annotated[str, Field(min_length=1)]
+Regex = Annotated[str, Field(min_length=1), AfterValidator(_regex)]  # a regular expression that compiles
 
 Pattern = Literal["FILE_CYCLIC", "FILE_PERIODIC", "TABLE_MERGE"]
 FileFormat = Literal["sequence", "text", "xml", "csv", "parquet", "orc"]
@@ -317,7 +318,13 @@ class TimeColumn(Model):
 
 
 class WinnerRule(Model):
+    """How the merge chooses among upstream versions tied at the latest record time. Terms are
+    upstream columns. A column that is the upstream's record_time or load_time is read with that
+    column's format and time zone; `formats` gives the Spark datetime pattern of any other time
+    column written as a string, so it is ordered as a time, never as a string."""
+
     order_by: Annotated[list[OrderTerm], Field(min_length=1)]
+    formats: dict[Identifier, NonEmptyStr] = {}
 
 
 class Dataset(SettingsOverride):
@@ -391,7 +398,7 @@ class ChildWithinParent(Model):
 
 class ValueFormat(Model):
     column: Identifier
-    pattern: Annotated[str, Field(min_length=1), AfterValidator(_regex)]
+    pattern: Regex
 
 
 class NullRateMax(Model):

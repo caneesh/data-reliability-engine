@@ -15,7 +15,7 @@ import pytest
 
 from hcsc.datalake.dre.checks.base import CheckContext, run_check
 from hcsc.datalake.dre.checks.events import Event
-from hcsc.datalake.dre.checks.hop.common import key_hash, register_key_hash
+from hcsc.datalake.dre.checks.hop.common import hop_label, key_hash, register_key_hash
 from hcsc.datalake.dre.checks.hop.file_completeness import FileCompleteness
 from hcsc.datalake.dre.checks.hop.key_currency import KeyCurrency
 from hcsc.datalake.dre.checks.hop.value_agreement import ValueAgreement
@@ -80,8 +80,9 @@ def events_of(result) -> list[tuple[str, str, str, str | None]]:
 
 
 def record(spark, result, ds: Dataset, run_id: str, observed: datetime) -> None:
-    append_key_events(result.key_events, DQ, run_id, f"eval-{run_id}", ds.dataset, "HOP_KEY_CURRENCY",
-                      observed, observed.date())
+    hop = hop_label(result.group_values["upstream"], ds.dataset)
+    append_key_events(result.key_events, DQ, run_id, f"eval-{run_id}-{hop}", ds.dataset, "HOP_KEY_CURRENCY",
+                      hop, observed, observed.date())
 
 
 # --- HOP_KEY_CURRENCY ---
@@ -179,6 +180,56 @@ def test_key_events_flagged_still_flagged_cleared(spark) -> None:
     assert events_of(r) == [(expected_hash, "CLEARED", "CURRENT", KEY)]
     record(spark, r, dn, "run-3", datetime(2026, 1, 16, 14, tzinfo=UTC))
     assert spark.sql(f"SELECT * FROM {DQ}.v_open_keys WHERE dataset = '{dn.dataset}'").count() == 0
+
+
+def two_upstreams(spark, name: str, rows_a: list, rows_b: list, gold_rows: list):
+    """gold with two upstreams, curated_a and curated_b, mapped the same way."""
+    create_table(spark, f"hop.{name}_a", CURATED_COLUMNS, rows_a)
+    create_table(spark, f"hop.{name}_b", CURATED_COLUMNS, rows_b)
+    create_table(spark, f"hop.{name}_gold", GOLD_COLUMNS, gold_rows)
+    a = curated(f"hop.{name}_a", dataset="curated_a")
+    b = curated(f"hop.{name}_b", dataset="curated_b")
+    mapping = gold("hop.unused").key_map["example_curated_enrollment"]
+    dn = gold(f"hop.{name}_gold", dataset=f"gold_{name}", upstream=["curated_a", "curated_b"],
+              key_map={"curated_a": mapping, "curated_b": mapping})
+    return a, b, dn
+
+
+def run_hops(spark, check, ds: Dataset, upstreams: list[Dataset], event: Event = EVENT, secret: bytes | None = None):
+    ctx = CheckContext(spark, ds, None, SETTINGS, "UTC", DQ, upstreams={u.dataset: u for u in upstreams},
+                       key_secret=secret)
+    results, _ = run_check(check, ctx, event)
+    return {r.group_values["upstream"]: r for r in results}
+
+
+def test_open_keys_are_kept_per_hop(spark) -> None:
+    """Review finding 2: a key STALE against curated_a and CURRENT against curated_b stays open at
+    curated_a->gold; curated_b's hop does not clear it."""
+    a, b, dn = two_upstreams(spark, "kc_two", [curated_row(updated=IN_WINDOW)], [curated_row(updated=EARLIER)],
+                             [gold_row(record=EARLIER)])
+    results = run_hops(spark, KeyCurrency(), dn, [a, b], secret=SECRET)
+    assert {u: r.state for u, r in results.items()} == {"curated_a": "FAILED", "curated_b": "PASSED"}
+    for r in results.values():
+        record(spark, r, dn, "two-1", datetime(2026, 1, 16, 12, tzinfo=UTC))
+    later = Event("gold", datetime(2026, 1, 16, 12, tzinfo=UTC), datetime(2026, 1, 16, 13, tzinfo=UTC))
+    results = run_hops(spark, KeyCurrency(), dn, [a, b], event=later, secret=SECRET)
+    assert events_of(results["curated_a"]) == [(key_hash(SECRET, KEY), "STILL_FLAGGED", "STALE", KEY)]
+    assert (results["curated_b"].state, results["curated_b"].reason_code) == ("DID_NOT_RUN", "empty_population")
+    assert events_of(results["curated_b"]) == []  # never open at curated_b->gold, so nothing to clear
+    open_hops = [r.hop for r in spark.sql(f"SELECT hop FROM {DQ}.v_open_keys WHERE dataset = '{dn.dataset}'").collect()]
+    assert open_hops == ["curated_a->gold_kc_two"]
+
+
+@pytest.mark.parametrize("check", [KeyCurrency(), ValueAgreement()], ids=lambda c: c.check_id)  # FileCompleteness: same per_hop
+def test_one_broken_hop_does_not_hide_the_others(spark, check) -> None:
+    """Review finding 14: curated_b's table is gone; curated_a's result still stands."""
+    a, b, dn = two_upstreams(spark, f"hop_broken_{check.check_id.lower()}", [curated_row(sub_id="1", updated=IN_WINDOW)],
+                             [curated_row(updated=IN_WINDOW)], [gold_row(record=EARLIER)])
+    b = curated("hop.no_such_table", dataset="curated_b")
+    results = run_hops(spark, check, dn, [a, b])
+    assert results["curated_a"].state in ("FAILED", "DID_NOT_RUN")
+    assert results["curated_a"].reason_code != "table_missing"
+    assert (results["curated_b"].state, results["curated_b"].reason_code) == ("DID_NOT_RUN", "table_missing")
 
 
 def test_full_sweep_clears_keys_no_longer_upstream(spark) -> None:

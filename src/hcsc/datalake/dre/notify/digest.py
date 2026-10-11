@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from pyspark.sql import SparkSession
 
     from hcsc.datalake.dre.config.loader import Config
+    from hcsc.datalake.dre.config.models import Defaults
     from hcsc.datalake.dre.store.runs import Run
 
 SAMPLE_KEYS = 5
@@ -116,13 +117,15 @@ def _groups(values: dict[str, str | None] | None) -> str:
     return ",".join(f"{k}={'' if v is None else v}" for k, v in sorted((values or {}).items()))
 
 
-def read_run(spark: SparkSession, dq_database: str, run_id: str) -> dict[str, Any]:
-    """Everything a run's digests need from the dq store."""
+def read_run(spark: SparkSession, dq_database: str, run_id: str, run_date: date | None = None) -> dict[str, Any]:
+    """Everything a run's digests need from the dq store. Every row a run writes carries its
+    run_date, so with run_date given the run's own rows are read from that partition only."""
     validate_dq_database(dq_database)
     if not _RUN_ID.match(run_id):
         raise ValueError("unexpected run id")
+    this_run = f"run_id = '{run_id}'" + (f" AND run_date = DATE'{run_date.isoformat()}'" if run_date else "")
     current = [r.asDict() for r in spark.sql(
-        f"SELECT *, {GROUPS_SQL} AS groups FROM {dq_database}.dq_check_result WHERE run_id = '{run_id}'").collect()]
+        f"SELECT *, {GROUPS_SQL} AS groups FROM {dq_database}.dq_check_result WHERE {this_run}").collect()]
     if not current:
         return {"current": [], "history": {}, "previous_groups": {}, "causes": [], "samples": {}}
     started = min(as_utc(r["evaluated_at"]) for r in current)
@@ -156,10 +159,10 @@ def read_run(spark: SparkSession, dq_database: str, run_id: str) -> dict[str, An
             f"  ON l.dataset = h.dataset AND l.check_id = h.check_id AND l.run_id = h.run_id").collect():
         previous_groups.setdefault((r.dataset, r.check_id), {})[r.groups] = r.state
     causes = [r.asDict() for r in spark.sql(
-        f"SELECT * FROM {dq_database}.dq_cause_result WHERE run_id = '{run_id}'").collect()]
+        f"SELECT * FROM {dq_database}.dq_cause_result WHERE {this_run}").collect()]
     samples: dict[str, list[str]] = {}
     for r in spark.sql(
-            f"SELECT evaluation_id, key_hash FROM {dq_database}.dq_key_event WHERE run_id = '{run_id}' "
+            f"SELECT evaluation_id, key_hash FROM {dq_database}.dq_key_event WHERE {this_run} "
             f"AND event IN ('FLAGGED', 'STILL_FLAGGED') ORDER BY evaluation_id, key_hash").collect():
         samples.setdefault(r.evaluation_id, []).append(r.key_hash)
     return {"current": current, "history": history, "previous_groups": previous_groups,
@@ -291,10 +294,10 @@ def build_digests(config: Config, run: Run, data: dict[str, Any]) -> list[Digest
 
 
 def digests_for_run(spark: SparkSession, config: Config, run: Run) -> list[Digest]:
-    return build_digests(config, run, read_run(spark, config.defaults.dq_database, run.run_id))
+    return build_digests(config, run, read_run(spark, config.defaults.dq_database, run.run_id, run.run_date))
 
 
-def to_send(digests: list[Digest], defaults, run_started: datetime) -> list[Digest]:
+def to_send(digests: list[Digest], defaults: Defaults, run_started: datetime) -> list[Digest]:
     """The digests to send: an all-clear digest only as email.all_clear_digest allows (every run,
     once a day from the run starting in the hour from rule_run_at, or never)."""
     from zoneinfo import ZoneInfo

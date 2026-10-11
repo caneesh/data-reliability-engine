@@ -6,7 +6,8 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 
 from hcsc.datalake.dre.checks.events import (
-    Event, WindowHistory, evaluation_id, previous_window_end, release_hold, window_for, window_history,
+    Event, WindowHistory, evaluation_id, previous_window_end, release_hold, window_for, window_histories,
+    window_history,
 )
 from hcsc.datalake.dre.config.models import Dataset, TimeColumn
 from hcsc.datalake.dre.store.local_setup import create_store
@@ -68,8 +69,8 @@ def test_evaluation_id_includes_sorted_group_values() -> None:
 
 def _result(event_id: str, end_hour: int, state: str = "PASSED", category: str | None = None,
             execution_type: str = "NORMAL", check_id: str = "T1_KEY_DUPLICATES", code: str | None = None,
-            dataset: str = "gold") -> dict:
-    return {"evaluation_id": f"{event_id}-{state}-{check_id}", "run_id": event_id, "event_id": event_id,
+            dataset: str = "gold", severity: str | None = None) -> dict:
+    return {"severity": severity, "evaluation_id": f"{event_id}-{state}-{check_id}", "run_id": event_id, "event_id": event_id,
             "window_start": datetime(2026, 1, 15, end_hour - 1), "window_end": datetime(2026, 1, 15, end_hour),
             "execution_type": execution_type, "dataset": dataset, "check_id": check_id,
             "state": state, "reason_category": category, "reason_code": code, "run_date": date(2026, 1, 15)}
@@ -96,14 +97,31 @@ def test_blocked_events_do_not_move_the_window(spark) -> None:
 
 
 def test_rule_results_neither_move_nor_hold_a_window(spark) -> None:
+    """Rule results (the only rows with a severity) are left out by the row itself, so a rule
+    since renamed or deleted from config cannot move the window either."""
     create_store(spark, "dq_windows_rules")
     append_rows(spark, "dq_windows_rules", "dq_check_result", [
         _result("e1", 1),
-        _result("e2", 2, check_id="one_row_per_coverage"),                               # a rule: ignored
-        _result("e3", 3, "DID_NOT_RUN", "PLATFORM", check_id="one_row_per_coverage"),   # ignored too
+        _result("e2", 2, check_id="one_row_per_coverage", severity="high"),                             # a rule
+        _result("e3", 3, "DID_NOT_RUN", "PLATFORM", check_id="one_row_per_coverage", severity="high"),  # too
+        _result("e4", 4, check_id="a_rule_since_renamed", severity="low"),                              # too
     ])
-    history = window_history(spark, "dq_windows_rules", "gold", exclude_checks=("one_row_per_coverage",))
+    history = window_history(spark, "dq_windows_rules", "gold")
     assert history == WindowHistory(previous_end=datetime(2026, 1, 15, 1, tzinfo=UTC))
+
+
+def test_window_histories_read_every_dataset_in_one_query(spark) -> None:
+    create_store(spark, "dq_windows_many")
+    append_rows(spark, "dq_windows_many", "dq_check_result", [
+        _result("a1", 2, dataset="gold"),
+        _result("b1", 3, dataset="other"), _result("b2", 4, "DID_NOT_RUN", "PLATFORM", code="query_failed",
+                                                   dataset="other"),
+    ])
+    found = window_histories(spark, "dq_windows_many", ["gold", "other", "never_run"])
+    assert found["gold"] == WindowHistory(previous_end=datetime(2026, 1, 15, 2, tzinfo=UTC))
+    assert found["other"].previous_end == datetime(2026, 1, 15, 3, tzinfo=UTC)
+    assert found["other"].held_by == ("query_failed",)
+    assert found["never_run"] == WindowHistory()
 
 
 HELD = WindowHistory(previous_end=datetime(2026, 1, 15, 3, tzinfo=UTC), held_start=datetime(2026, 1, 15, 3, tzinfo=UTC),

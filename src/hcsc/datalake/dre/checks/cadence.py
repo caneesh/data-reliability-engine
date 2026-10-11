@@ -63,6 +63,16 @@ def slots(cadence: Cadence, start: datetime, end: datetime) -> list[datetime]:
     return sorted(set(found))
 
 
+def previous_slot(cadence: Cadence, before: datetime) -> datetime | None:
+    """The latest slot strictly before `before`, looking back up to two years (monthly and
+    calendar_dates cadences can have slots weeks apart)."""
+    for days in (8, 63, 740):
+        found = slots(cadence, as_utc(before) - timedelta(days=days), before)
+        if found:
+            return found[-1]
+    return None
+
+
 def slot_label(cadence: Cadence, slot: datetime) -> str:
     """The slot's local time of day, e.g. 04:00: the key T1_VOLUME compares like with like on."""
     return as_utc(slot).astimezone(ZoneInfo(cadence.timezone)).strftime("%H:%M")

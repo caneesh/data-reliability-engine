@@ -20,6 +20,7 @@ from hcsc.datalake.dre.causes.base import (
 )
 from hcsc.datalake.dre.causes.failures import failures_for
 from hcsc.datalake.dre.causes.probes import PROBES
+from hcsc.datalake.dre.checks.hop.common import hop_label as hop_label_of
 from hcsc.datalake.dre.checks.registry import CauseEntry, FailureType, pattern_causes
 from hcsc.datalake.dre.config.probes import PROBE_PARAMS, is_ready, parameter_sets
 
@@ -64,16 +65,21 @@ def run_entry(cx: CauseContext, entry: CauseEntry, failure: Failure) -> Outcome:
             sets = [{}]
         model = PROBE_PARAMS[entry.probe]
         outcomes = []
+        unready = 0
         for raw_set in sets:
             params = model.model_validate(raw_set or {})
             if is_ready(params):
                 outcomes.append(PROBES[entry.probe](cx, params, failure))
+            else:
+                unready += 1
         if not outcomes:
             return not_ready(f"probes.{entry.params} is not configured")
         for state in (CONFIRMED, ERROR):
             hit = next((o for o in outcomes if o.state == state), None)
             if hit is not None:
                 return hit
+        if unready:  # a set never checked could still confirm the cause: never RULED_OUT
+            return not_ready(f"{unready} of {len(sets)} parameter sets of probes.{entry.params} are not configured")
         return outcomes[0] if len(outcomes) == 1 else Outcome(RULED_OUT, {"parameter_sets": len(outcomes)})
     except Exception as exc:
         return error(exc)
@@ -82,7 +88,7 @@ def run_entry(cx: CauseContext, entry: CauseEntry, failure: Failure) -> Outcome:
 def hop_label(cx: CauseContext, ft: FailureType) -> str:
     ds = cx.dataset.dataset
     if cx.upstream_id:
-        return f"{cx.upstream_id}->{ds}"
+        return hop_label_of(cx.upstream_id, ds)
     if ft.name == "file_not_loaded":
         raw = cx.raw_dataset()
         return f"landing->{raw.dataset if raw else ds}"

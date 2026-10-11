@@ -171,6 +171,8 @@ key_map:                          # how this table's key maps to its upstream's 
     covrg_agrmt_id: qualifiedhealthplanid
 winner_rule:                      # optional; how the merge chooses among versions
   order_by: ["sourcelastupdatets DESC", "enddate DESC"]
+  # formats: { enddate: yyyy-MM-dd }  # optional: pattern of an upstream time column stored as a string;
+  #                                     record_time and load_time columns use their own reading
 compute_budget_minutes: 8
 ```
 
@@ -210,7 +212,7 @@ Rule `params` shapes, where section 6 does not spell them out: `superseded_still
 **Evaluation event.** The thing a check evaluates. In release 1 there is one kind, a batch load event: one dataset, one load window, identified by `event_id = sha256(dataset + window_start + window_end)`. Streaming windows come later and must fit the same interface. Windows are UTC and half-open: they include `window_start` and exclude `window_end`. Each result row records its event's `window_start` and `window_end`.
 
 - `window_end` = the run's start minus `settle_minutes` (default 15), so rows still being written are left for the next run.
-- `window_start` = the latest `window_end` among the dataset's NORMAL events, skipping any event in which a check was DID\_NOT\_RUN for a PLATFORM or BUDGET reason (that window is held: evaluated again). On a dataset's first run, `window_end` minus `initial_lookback_hours` (default 24). CONFIGURATION reasons never hold a window: those checks report DID\_NOT\_RUN on every run until the configuration is fixed. Gold rule results neither move nor hold a window (rules run on their own schedule over the whole table).
+- `window_start` = the latest `window_end` among the dataset's NORMAL events, skipping any event in which a check was DID\_NOT\_RUN for a PLATFORM or BUDGET reason (that window is held: evaluated again). On a dataset's first run, `window_end` minus `initial_lookback_hours` (default 24). CONFIGURATION reasons never hold a window: those checks report DID\_NOT\_RUN on every run until the configuration is fixed. Gold rule results neither move nor hold a window (rules run on their own schedule over the whole table); they are told apart by the row (only rule results carry a `severity`), so a renamed or deleted rule's results stay out too.
 - A hold lasts at most `max_window_hours` (default 72), counted from the end of the first held event. When a run finds the cap reached, the window advances: it starts where the last held event ended, and one result with `check_id` WINDOW\_GAP, DID\_NOT\_RUN / window\_gap, records the unchecked span as its window (`detail`: unchecked hours and the reason codes that held it). The gap is never evaluated again.
 - Both bounds are truncated to `load_time.granularity`, counted in the load time's zone. A window never runs backwards: if the previous end is later than this end, the window is empty.
 
@@ -275,6 +277,7 @@ CREATE TABLE dq.dq_cause_result (
 
 CREATE TABLE dq.dq_key_event (
   run_id STRING, evaluation_id STRING, dataset STRING, check_id STRING,
+  hop STRING,                           -- <upstream>-><dataset>: a key is open or cleared per hop
   key_hash STRING, key_value STRING,    -- key_value restricted access
   event STRING,                         -- FLAGGED | STILL_FLAGGED | CLEARED
   state_detail STRING, observed_at TIMESTAMP
@@ -290,7 +293,7 @@ Views derive current state:
 
 - `dq.v_latest_run`: each run's latest `dq_run` row (its final row once written, otherwise STARTED)
 - `dq.v_latest_result`: the latest evaluation per (dataset, check\_id) by `evaluated_at`: one row for an ungrouped check, one row per group for a grouped one
-- `dq.v_open_keys`: keys whose latest `dq_key_event` is FLAGGED or STILL\_FLAGGED, with first flagged date
+- `dq.v_open_keys`: keys whose latest `dq_key_event` at a hop is FLAGGED or STILL\_FLAGGED, with first flagged date (per dataset, check, hop and key)
 - `dq.v_file_status`: one row per file path with first-seen time and latest size
 
 `key_hash` is HMAC-SHA256 of the normalised key, with the secret read from a protected file named in config, never from the repository. Emails use counts and, only if enabled, `key_hash`; `key_value` is never written to logs or emails.
@@ -305,7 +308,7 @@ Each check is a class implementing `applies_to(dataset, pattern)`, `required_col
 | --- | --- | --- | --- | --- |
 | T1\_ON\_TIME | all | For each cadence slot due in the window, look for a load time later than the slot within `sla_hours` | Loads due: cadence slots whose deadline (slot + `sla_hours`) falls in the window | A due slot has no load within SLA |
 | T1\_ZERO\_ROWS | all | For each cadence slot due in the window, count rows loaded within `sla_hours` of the slot | Loads due: cadence slots whose deadline (slot + `sla_hours`) falls in the window, the same slots as T1\_ON\_TIME | A due load wrote fewer than `min_rows_per_load` rows |
-| T1\_VOLUME | all | For each slot whose load period (slot to next slot) ends in the window, compare its row count with the median of the last 14 loads for the same slot; one result per slot (group `slot` = local HH:MM, `slot_time`) | The slot's rows | Outside median ± `volume_tolerance_pct` (default 50). Fewer than 7 prior loads for the slot: DID\_NOT\_RUN / insufficient\_history |
+| T1\_VOLUME | all | For each slot whose load period (slot to next slot) ends in the window, compare its row count with the median of the last 14 loads for the same slot (a load judged again after a held window counts once; the previous slot is found however far back, so monthly cadences form periods); one result per slot (group `slot` = local HH:MM, `slot_time`) | The slot's rows | Outside median ± `volume_tolerance_pct` (default 50). Fewer than 7 prior loads for the slot: DID\_NOT\_RUN / insufficient\_history |
 | T1\_FILES\_NOT\_LOADED | FILE\_CYCLIC, FILE\_PERIODIC; RAW datasets with `file_name_column` | Files in `dq_file` first seen more than `sla_hours` ago with zero rows in the raw dataset (after `feed_filter`) matching on `file_name_column`, compared by base file name | The feed's files in `dq_file` first seen more than `sla_hours` before the window end | Any such file; `detail` lists the files (up to 100). Landing roots not listable this run: DID\_NOT\_RUN / landing\_unreadable or hdfs\_unavailable |
 | T1\_SCHEMA\_DRIFT | all, table-wide | Hash the table's column names and types; compare with the previous run's hash, stored in `observed` | The table's columns | Hash changed; `detail` lists added, removed and retyped columns. No earlier hash: DID\_NOT\_RUN / insufficient\_history |
 | T1\_KEY\_NULLS | all, table-wide | Rows in the event window with a null or empty key column, grouped by `group_by` | Rows loaded in the window (per group) | Any |
@@ -328,10 +331,10 @@ Add `owned_columns` to the dataset config when HOP\_VALUE\_AGREEMENT is wanted, 
 Hop details:
 
 - **A hop** is this dataset and one upstream in its `key_map`; each hop check writes one result per upstream (group `upstream`). Keys on both sides are built from the mapped columns with each side's `key_normalise`, as one string (parts joined with `|`, null written as `<null>`). Each side's `feed_filter` applies. Both datasets need `record_time` and the upstream needs `load_time`; otherwise DID\_NOT\_RUN / invalid\_config.
-- **Keys judged.** An upstream key is judged once, in the window where its latest load time plus `sla_hours` falls (so a key younger than the SLA is never judged); a key with a row in this dataset loaded in the window is judged again once its upstream deadline has passed, so a key that regresses here without any upstream change (for example overwritten with an older version) is caught; and every key still open in `v_open_keys`. On `full_sweep_day`, every upstream key past its deadline. HOP\_FILE\_COMPLETENESS judges files the same way, by each file's first upstream load time.
+- **Keys judged.** An upstream key is judged once, in the window where its latest load time plus `sla_hours` falls (so a key younger than the SLA is never judged); a key with a row in this dataset loaded in the window is judged again once its upstream deadline has passed, so a key that regresses here without any upstream change (for example overwritten with an older version) is caught; and every key still open at this hop in `v_open_keys`. On `full_sweep_day` (the dataset's first window ending that day, in the `defaults.yaml` time zone, so once a day), every upstream key past its deadline. HOP\_FILE\_COMPLETENESS judges files the same way, by each file's first upstream load time.
 - **Ties.** Every upstream row at a key's latest record time is kept. HOP\_VALUE\_AGREEMENT requires each of them to match this dataset's latest row, so tied upstream rows that disagree with each other always fail.
 - **Population.** HOP\_KEY\_CURRENCY: keys judged. HOP\_VALUE\_AGREEMENT: judged keys that are CURRENT. HOP\_FILE\_COMPLETENESS: files judged; `detail` lists the short files (up to 100).
-- **Key events.** HOP\_KEY\_CURRENCY appends to `dq_key_event`: FLAGGED (newly MISSING or STALE), STILL\_FLAGGED (open and still not CURRENT), CLEARED (open and now CURRENT; on the full sweep also open keys no longer upstream, with `state_detail` "no longer upstream"). `state_detail` holds MISSING, STALE or CURRENT. `key_hash` is computed in SQL by a function registered with the secret in its closure, so the secret never appears in SQL text or query plans. Without `hmac_secret_file` no events are written and a FAILED result says so in `detail`; a configured secret file that cannot be read, or is empty, stops `dre run` before it starts (exit 3).
+- **Key events.** HOP\_KEY\_CURRENCY appends to `dq_key_event`, per hop (`hop` = `<upstream>-><dataset>`, so two upstreams of one dataset never clear each other's keys), and computes them inside the check, within its compute budget: FLAGGED (newly MISSING or STALE), STILL\_FLAGGED (open and still not CURRENT), CLEARED (open and now CURRENT; on the full sweep also open keys no longer upstream, with `state_detail` "no longer upstream"). `state_detail` holds MISSING, STALE or CURRENT. `key_hash` is computed in SQL by a function registered with the secret in its closure, so the secret never appears in SQL text or query plans. Without `hmac_secret_file` no events are written and a FAILED result says so in `detail`; a configured secret file that cannot be read, or is empty, stops `dre run` before it starts (exit 3).
 
 **Gold rule templates** (one rule file per use):
 
@@ -380,7 +383,7 @@ When a check FAILS, the cause engine runs every cause check listed for that fail
 | `size_changed` | none | The file's size changed after it was first seen (`dq_file`) |
 | `builtin` | none | Engine logic over DRE's own evidence (tables, `dq_file`, dataset config) |
 
-Each pattern's YAML lists, per failure type, the checks it covers and the cause entries in order: `{code, probe, params}`, where `params` names a key in the feed's `probes:` that supplies the parameters, and the last entry is the fallback. A feed configures its probes by key; a key may hold one parameter set or a list (any one confirming confirms the cause). `dre validate` checks every key against the feed's pattern and the probe type's parameters. Adding a cause never touches the engine; a new kind of evidence is a new generic probe type.
+Each pattern's YAML lists, per failure type, the checks it covers and the cause entries in order: `{code, probe, params}`, where `params` names a key in the feed's `probes:` that supplies the parameters, and the last entry is the fallback. A feed configures its probes by key; a key may hold one parameter set or a list (any one confirming confirms the cause; if none confirms and any set is not configured, the cause is NOT\_READY, never RULED\_OUT). `dre validate` checks every key against the feed's pattern and the probe type's parameters. Adding a cause never touches the engine; a new kind of evidence is a new generic probe type.
 
 ```yaml
 # feed config
@@ -452,6 +455,7 @@ A filter rule is one `table_contains` parameter set under `filter_rules`: `table
 | `dre run [--feed F] [--execution-type NORMAL\|RERUN\|REPLAY]` | Scheduled every hour. Evaluates only feeds with something due: a cadence slot's deadline (slot + `sla_hours`) passed since the feed's last evaluated window, or new or changed landed files. `--feed F` evaluates F even when nothing is due. Then preconditions, checks, causes, append results, send email | 0 run completed (even with FAILED checks), 2 partial, 3 could not start (including: the store is not installed; the message names `dre install`) |
 | `dre trace --dataset D --key "k1,k2,..."` | Prints one line per layer along the `upstream` chain: present or not, record time, load time, file; ends with the first layer where the key is absent or older, then that hop's cause line | 0, or 3 for an unknown dataset or a key with the wrong number of parts |
 | `dre watchdog` | Checks the last expected run exists and wrote every expected check; emails if not | 0 healthy, 1 alert sent |
+| `dre retention [--apply] [--conf DIR]` | Scheduled weekly. Lists each dq table's `run_date` partitions older than its `retention_months`; `--apply` drops them through `store/retention.py` | 0 done, 1 a table could not be read or dropped, 3 no `defaults.yaml` |
 
 **Email digest**, one per run, plain text, in this order:
 

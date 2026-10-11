@@ -1,27 +1,38 @@
-{# HOP_KEY_CURRENCY. mode summary: population (keys judged), violations (MISSING or STALE).
-   mode events: key events for dq_key_event: FLAGGED (newly MISSING or STALE), STILL_FLAGGED
-   (still open), CLEARED (open and now CURRENT; on the full sweep, open and no longer upstream). #}
+{# HOP_KEY_CURRENCY. mode judged: every key judged at this hop (hop_common.sql.j2 `judged`), and on
+   the full sweep the hop's open keys no longer upstream (key_state GONE); the check materialises
+   it once and reads the other modes from it (`source`). mode summary: population (keys judged),
+   violations (MISSING or STALE). mode events: key events for dq_key_event: FLAGGED (newly MISSING
+   or STALE), STILL_FLAGGED (still open), CLEARED (open and now CURRENT; on the full sweep, open
+   and no longer upstream). #}
 {% import "hop_common.sql.j2" as hop %}
+{% if mode == "judged" %}
 WITH {{ hop.ctes(p) }}
+SELECT k, key_hash, key_state, up_record_ts, up_load_ts, dn_record_ts, dn_load_ts, was_open FROM judged
+{% if p.full_sweep %}
+UNION ALL
+SELECT CAST(NULL AS STRING) AS k, o.key_hash, 'GONE' AS key_state,
+       CAST(NULL AS TIMESTAMP) AS up_record_ts, CAST(NULL AS TIMESTAMP) AS up_load_ts,
+       CAST(NULL AS TIMESTAMP) AS dn_record_ts, CAST(NULL AS TIMESTAMP) AS dn_load_ts, TRUE AS was_open
+FROM open_keys o
+LEFT ANTI JOIN hashed_up u ON u.key_hash = o.key_hash
+{% endif %}
+{% else %}
+WITH {% if source %}judged AS (SELECT * FROM {{ source }}){% else %}{{ hop.ctes(p) }}{% endif %}
+
 {% if mode == "summary" %}
 SELECT COUNT(*) AS population,
        SUM(CASE WHEN key_state <> 'CURRENT' THEN 1 ELSE 0 END) AS violations,
        SUM(CASE WHEN key_state = 'MISSING' THEN 1 ELSE 0 END) AS missing,
        SUM(CASE WHEN key_state = 'STALE' THEN 1 ELSE 0 END) AS stale
 FROM judged
+WHERE key_state <> 'GONE'
 {% else %}
-SELECT j.key_hash, j.k AS key_value,
-       CASE WHEN j.key_state = 'CURRENT' THEN 'CLEARED'
-            WHEN o.key_hash IS NOT NULL THEN 'STILL_FLAGGED'
+SELECT key_hash, k AS key_value,
+       CASE WHEN key_state IN ('CURRENT', 'GONE') THEN 'CLEARED'
+            WHEN was_open THEN 'STILL_FLAGGED'
             ELSE 'FLAGGED' END AS event,
-       j.key_state AS state_detail
-FROM judged j
-LEFT JOIN open_keys o ON o.key_hash = j.key_hash
-WHERE j.key_state <> 'CURRENT' OR o.key_hash IS NOT NULL
-{% if p.full_sweep %}
-UNION ALL
-SELECT o.key_hash, CAST(NULL AS STRING) AS key_value, 'CLEARED' AS event, 'no longer upstream' AS state_detail
-FROM open_keys o
-LEFT ANTI JOIN hashed_up u ON u.key_hash = o.key_hash
+       CASE WHEN key_state = 'GONE' THEN 'no longer upstream' ELSE key_state END AS state_detail
+FROM judged
+WHERE key_state <> 'CURRENT' OR was_open
 {% endif %}
 {% endif %}

@@ -11,7 +11,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from hcsc.datalake.dre.checks.base import (
-    FAILED, PASSED, Check, CheckContext, CheckResult, did_not_run, from_counts, group_values, render_sql,
+    FAILED, PASSED, Check, CheckContext, CheckResult, did_not_run, double, from_counts, group_values,
+    render_sql,
 )
 from hcsc.datalake.dre.checks.keys import column_expr, key_exprs
 from hcsc.datalake.dre.checks.times import sql_string
@@ -84,11 +85,12 @@ class RuleCheck(Check):
             )
             return self._counts(ctx, sql, "child rows start outside their parent's window", "child rows")
         if t == "value_format":
-            sql = render_sql("rule_value_format.sql.j2", column=column_expr(ds, p.column),
+            # the stored value, not its key_normalise form: the rule is about how values are written
+            sql = render_sql("rule_value_format.sql.j2", column=p.column,
                              pattern=sql_string(p.pattern), **base)
             return self._counts(ctx, sql, f"values of {p.column} do not match the pattern", "values")
         if t == "null_rate_max":
-            sql = render_sql("rule_null_rate_max.sql.j2", column=p.column, **base)
+            sql = render_sql("rule_null_rate_max.sql.j2", column=p.column, max_rate=double(p.max_rate), **base)
             return [self._null_rate(row, p.max_rate) for row in ctx.spark.sql(sql).collect()]
         raise ValueError(f"unknown template {t}")
 
@@ -106,7 +108,7 @@ class RuleCheck(Check):
         if not row.population:
             return did_not_run("empty_population", group_values=groups)
         rate = (row.nulls or 0) / row.population
-        over = rate > max_rate
-        return CheckResult(FAILED if over else PASSED, population=row.population, violations=1 if over else 0,
+        return CheckResult(FAILED if row.violations else PASSED, population=row.population,
+                           violations=row.violations,
                            observed=f"{rate:.2%} null ({row.nulls or 0} of {row.population} rows)",
                            expected=f"at most {max_rate:.2%} null", group_values=groups)

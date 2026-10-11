@@ -61,15 +61,46 @@ def expired_partitions(run_dates: list[date], retention_months: int, today: date
     return sorted(d for d in set(run_dates) if d < cutoff)
 
 
+def partition_dates(spark: SparkSession, dq_database: str, table: str) -> list[date]:
+    """The run_date partitions of one dq table."""
+    validate_dq_database(dq_database)
+    validate_identifier(table, "dq table name")
+    rows = spark.sql(f"SHOW PARTITIONS {dq_database}.{table}").collect()
+    return [date.fromisoformat(r[0].split("=", 1)[1]) for r in rows]
+
+
 def apply_retention(
     spark: SparkSession, dq_database: str, table: str, retention_months: int, today: date
 ) -> list[date]:
     """Drop expired run_date partitions of one dq table; return the dates dropped."""
-    validate_dq_database(dq_database)
-    validate_identifier(table, "dq table name")
-    rows = spark.sql(f"SHOW PARTITIONS {dq_database}.{table}").collect()
-    run_dates = [date.fromisoformat(r[0].split("=", 1)[1]) for r in rows]
-    dropped = expired_partitions(run_dates, retention_months, today)
+    dropped = expired_partitions(partition_dates(spark, dq_database, table), retention_months, today)
     for run_date in dropped:
         spark.sql(drop_partition_sql(dq_database, table, run_date, retention_months, today))
     return dropped
+
+
+def retention_command(spark: SparkSession, dq_database: str, retention_months: dict[str, int], apply: bool,
+                      today: date) -> int:
+    """`dre retention [--apply]`: list (or, with --apply, drop) each dq table's run_date partitions
+    older than its retention_months. Exit 0, or 1 if a table could not be read or dropped."""
+    from hcsc.datalake.dre.store.names import DQ_TABLES
+
+    failed = 0
+    for table in DQ_TABLES:
+        months = retention_months[table]
+        try:
+            if apply:
+                dates = apply_retention(spark, dq_database, table, months, today)
+            else:
+                dates = expired_partitions(partition_dates(spark, dq_database, table), months, today)
+        except Exception as exc:  # report the table, go on with the others
+            print(f"{dq_database}.{table}: not done ({type(exc).__name__})")
+            failed += 1
+            continue
+        verb = "dropped" if apply else "would drop"
+        kept_from = retention_cutoff(today, months).isoformat()
+        shown = f" ({dates[0].isoformat()} to {dates[-1].isoformat()})" if dates else ""
+        print(f"{dq_database}.{table}: {verb} {len(dates)} partition(s){shown}; keeping run_date from {kept_from}")
+    if not apply:
+        print("dre retention: nothing dropped; run with --apply to drop these partitions")
+    return 1 if failed else 0

@@ -25,6 +25,8 @@ Read this first when resuming. Then `CLAUDE.md` (working rules), `docs/spec.md` 
 1. "Continue and I will provide the answers at the end. Make the application work based on assumptions, which are configurable." Done: every open choice is a setting whose default is the assumption (README, "Settings that carry an assumption").
 2. Write the context to files before compaction: this file.
 
+3. "Do a thorough code review", then "Fix all those can be fixed, document the rest" (2026-10-11). Done: 27 of 29 findings fixed with tests; items 6 (NO_UPSTREAM_DATA window) and 7 (what a RERUN evaluates) wait on answers. All in `docs/decisions.md`, "Code review (2026-10-11)". The store changed: `dq_key_event` has a `hop` column.
+
 **Next action:** wait for the user's answers. Then turn each answer into configuration or a small change, with tests, CI green, and a summary that starts with the CI result. The release-1 milestone after that is the spec's two-week unattended run in a test environment, outside this repository.
 
 ## Waiting on answers
@@ -51,6 +53,7 @@ Read this first when resuming. Then `CLAUDE.md` (working rules), `docs/spec.md` 
   - Client deploy mode on an edge node, with Python 3.10.
   - A cluster throughput figure, if checks should be refused before running (`scan_mb_per_minute`).
   - The `dq` database and service account.
+- **From the code review:** review item 6 (NO_UPSTREAM_DATA counts upstream rows in the event window, which spec section 7 says but which rarely fits hourly runs) and item 7 (how `--execution-type RERUN|REPLAY` picks its window and what it may write).
 - **User decisions:**
   - WRONG_PARTITION: probe `confirm_when` `later` (the default) or `different`.
   - All-clear digest volume: `email.all_clear_digest`.
@@ -96,6 +99,7 @@ Production table, column and path names stay null. CLAUDE.md forbids inventing t
   - Tables: `dq_run`, `dq_check_result`, `dq_cause_result`, `dq_key_event`, `dq_file`.
   - Views: `v_latest_run`, `v_latest_result`, `v_open_keys`, `v_file_status`.
   - DDL only through `dre install --apply`.
+- **Retention:** `dre retention [--apply]`, weekly; drops through `store/retention.py` only.
 - **Email** (`notify/`): `digest.py` and `digest.txt.j2` (golden files in `tests/notify/golden/`), and `email.py` (smtplib).
 - **Trace** (`trace.py`) and **watchdog** (`watchdog.py`). The watchdog imports only the config loader, the store's names and the mail sender; a test enforces this.
 - **Packaging:** `python scripts/package.py` builds `dist/`: the wheel, `dre-pyfiles-<v>.zip` (with pkgutil namespace inits, zip only), `dre-deps-<v>-<platform>.zip` and `dre_main.py`. Deployment is described in the README.

@@ -8,13 +8,14 @@ converted to UTC, and truncated to this dataset's load_time granularity before c
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from typing import Any
 
 from hcsc.datalake.dre.causes.base import CauseContext, Failure, Outcome, confirmed, not_ready, ruled_out
 from hcsc.datalake.dre.checks.base import render_sql, utc_literal
 from hcsc.datalake.dre.checks.hop.common import hop_params, register_key_hash
 from hcsc.datalake.dre.checks.keys import column_expr, key_string
-from hcsc.datalake.dre.checks.times import as_utc, utc_expr
+from hcsc.datalake.dre.checks.times import as_utc, sql_string, utc_expr
 
 NO_LOAD_TIME = "this dataset has no load_time"
 _HASH = re.compile(r"^[0-9a-f]{64}$")
@@ -41,9 +42,10 @@ def hash_literals(hashes: list[str]) -> list[str]:
     return [f"'{h}'" for h in hashes]
 
 
-def latest_load_here(cx: CauseContext):
+def latest_load_here(cx: CauseContext) -> datetime | None:
     ds = cx.dataset
-    def query():
+
+    def query() -> datetime | None:
         sql = render_sql("cause_max_load.sql.j2", table=ds.table, feed_filter=ds.feed_filter,
                          load_expr=utc_expr(ds.load_time, cx.ctx.default_timezone))
         value = cx.spark.sql(sql).collect()[0].max_load
@@ -62,7 +64,7 @@ def hop_files(cx: CauseContext) -> dict[str, Any]:
     return cx.cached("hop_files", query)
 
 
-def _upstream_load(cx: CauseContext, failure: Failure):
+def _upstream_load(cx: CauseContext, failure: Failure) -> datetime | None:
     if failure.key is not None:
         return failure.key["up_load_ts"]
     row = hop_files(cx).get(failure.file_name)
@@ -90,7 +92,11 @@ def file_skipped(cx: CauseContext, failure: Failure) -> Outcome:
         return ruled_out(reason="the file is no longer upstream")
     if row.rows_here > 0:
         return ruled_out(rows_here=row.rows_here, upstream_rows=row.up_rows)
-    later = [r for r in files.values() if r.first_load > row.first_load and r.rows_here > 0]
+    if row.first_load is None:
+        return ruled_out(reason="no upstream load time for the file")
+    # files whose load times are all null or unparseable have no place in the order: left out
+    later = [r for r in files.values()
+             if r.first_load is not None and r.first_load > row.first_load and r.rows_here > 0]
     return confirmed(later_files_loaded=len(later)) if later else ruled_out(rows_here=0, later_files_loaded=0)
 
 
@@ -111,9 +117,13 @@ def key_mismatch(cx: CauseContext, failure: Failure) -> Outcome:
         return not_ready("the dataset has no mismatch_probe_drop")
     if failure.key["key_state"] != "MISSING":
         return ruled_out(reason="the key is present here")
+    # a single-column key has nothing left to match on once its column is dropped
+    droppable = [c for c in ds.mismatch_probe_drop if [k for k in ds.key if k != c]]
+    if not droppable:
+        return not_ready("mismatch_probe_drop leaves no key column to match on")
     up = cx.upstream()
     mapping = ds.key_map[cx.upstream_id]
-    for dropped in ds.mismatch_probe_drop:
+    for dropped in droppable:
         def query(dropped: str = dropped) -> set[str]:
             kept = [c for c in ds.key if c != dropped]
             sql = render_sql(
@@ -125,7 +135,25 @@ def key_mismatch(cx: CauseContext, failure: Failure) -> Outcome:
             return {r.key_hash for r in cx.spark.sql(sql).collect()}
         if failure.ref in cx.cached(f"key_mismatch:{dropped}", query):
             return confirmed(matches_without=dropped)
-    return ruled_out(columns_tried=list(ds.mismatch_probe_drop))
+    return ruled_out(columns_tried=droppable)
+
+
+def winner_order(cx: CauseContext) -> str:
+    """The winner rule's ORDER BY over the upstream's rows, time columns parsed (never compared
+    as strings): the upstream's record_time and load_time as configured, others by
+    winner_rule.formats; any other column as it is stored."""
+    up, rule = cx.upstream(), cx.dataset.winner_rule
+    tz = cx.ctx.default_timezone
+    parsed = {c.column: utc_expr(c, tz) for c in (up.record_time, up.load_time) if c is not None}
+    terms = []
+    for term in rule.order_by:
+        column, *direction = term.split()
+        if column in rule.formats:
+            expr = f"to_timestamp({column}, {sql_string(rule.formats[column])})"
+        else:
+            expr = parsed.get(column, column)
+        terms.append(" ".join([expr, *direction]))
+    return ", ".join(terms)
 
 
 def tie_resolved_by_rule(cx: CauseContext, failure: Failure) -> Outcome:
@@ -137,7 +165,7 @@ def tie_resolved_by_rule(cx: CauseContext, failure: Failure) -> Outcome:
     if failure.key["key_state"] != "CURRENT":
         return ruled_out(reason="not at the latest upstream version")
     def query() -> dict[str, Any]:
-        sql = render_sql("cause_key_ties.sql.j2", p=hop(cx), order_by=", ".join(ds.winner_rule.order_by),
+        sql = render_sql("cause_key_ties.sql.j2", p=hop(cx), order_by=winner_order(cx),
                          hashes=hash_literals(cx.cache["failure_hashes"]))
         return {r.key_hash: r for r in cx.spark.sql(sql).collect()}
     row = cx.cached("ties", query).get(failure.ref)
@@ -157,6 +185,8 @@ def older_version_written_later(cx: CauseContext, failure: Failure) -> Outcome:
     loaded_here = failure.key["dn_load_ts"]
     if loaded_here is None:
         return ruled_out(reason="no load time here for the key")
+    if failure.key["up_load_ts"] is None:
+        return ruled_out(reason="no upstream load time for the key")
     here, upstream = cx.at_load_granularity(loaded_here), cx.at_load_granularity(failure.key["up_load_ts"])
     evidence = {"loaded_here": here.isoformat(), "newer_version_loaded_upstream": upstream.isoformat()}
     return confirmed(**evidence) if here > upstream else ruled_out(**evidence)

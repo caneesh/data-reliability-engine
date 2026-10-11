@@ -11,6 +11,7 @@ from __future__ import annotations
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from jinja2 import Environment, PackageLoader, StrictUndefined
@@ -64,9 +65,12 @@ class CheckResult:
     reason_code: str | None = None
     group_values: dict[str, str | None] = field(default_factory=dict)
     detail: str | None = None
-    # Key events to append to dq_key_event (a DataFrame of key_hash, key_value, event, state_detail);
-    # written by the runner after the result, never by the check.
+    # Key events to append to dq_key_event (a DataFrame of key_hash, key_value, event, state_detail,
+    # already computed inside the check); written by the runner after the result, never by the check.
     key_events: Any = field(default=None, compare=False, repr=False)
+    # HOP_KEY_CURRENCY: the temp view holding this hop's judged keys, for the cause engine to read
+    # instead of judging again; the runner drops it once the result is explained.
+    judged_view: str | None = field(default=None, compare=False, repr=False)
 
 
 def did_not_run(code: str, detail: str | None = None, group_values: dict[str, str | None] | None = None) -> CheckResult:
@@ -131,11 +135,16 @@ def needs_load_time(ctx: CheckContext) -> CheckResult | None:
     return None
 
 
-def utc_literal(value) -> str:
+def utc_literal(value: datetime) -> str:
     """A UTC TIMESTAMP literal for a window bound or slot (the session runs in UTC)."""
     from hcsc.datalake.dre.checks.times import as_utc
 
     return "TIMESTAMP '" + as_utc(value).strftime("%Y-%m-%d %H:%M:%S.%f") + "'"
+
+
+def double(value: float) -> str:
+    """A Spark DOUBLE literal for a config number (a bare 0.7 would be a DECIMAL)."""
+    return f"{float(value)!r}D"
 
 
 _SQL = Environment(loader=PackageLoader("hcsc.datalake.dre.checks", "sql"), undefined=StrictUndefined,
