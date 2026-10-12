@@ -26,6 +26,7 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
 | Extensibility step 1: self-registering capabilities (`docs/design/extensibility.md`) | `23d1a8a` | #32 |
 | Extensibility step 2: check parameters, T1_FRESHNESS, T1_COLUMN_RANGE | `d4f452d` (#33 red: four result counts) and `30fffda` | #34 |
 | Extensibility step 3: patterns from configuration, `kind` | `c1f2811` | #35 |
+| Extensibility step 4: rule templates from configuration, guard rule 10 | `31fa034` | #36 |
 
 Each row has a section in `docs/decisions.md` saying what was decided and why.
 

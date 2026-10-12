@@ -74,6 +74,7 @@ data-reliability-engine/
             keys.py          # key expressions with key_normalise applied; the normaliser registry
             times.py         # time columns to UTC; window bounds truncated to granularity
             cadence.py       # cadence slots (expected loads) in UTC
+            calendars.py     # EVERYDAY, WEEKDAYS and the named calendars from conf/calendars
             events.py        # batch load events, event_id and evaluation_id
             registry.py      # the check registry; which checks run, from patterns/*.yaml
             tier1/           # one module per Tier 1 check
@@ -116,6 +117,7 @@ data-reliability-engine/
     feeds/  datasets/  rules/
     patterns/                # optional: patterns of this instance; a packaged name replaces that pattern (section 3)
     templates/               # optional: gold rule templates of this instance, SQL in YAML (section 3)
+    calendars/               # optional: named calendars (weekdays only, holidays) for cadences (section 3)
   tests/
     fixtures/                # synthetic data builders
     replay/                  # one test per replay scenario (section 9)
@@ -143,7 +145,7 @@ cadence:
   # kind calendar_dates: dates: [2026-01-05, 2026-02-02]   (times optional, default 00:00)
   # kind monthly:        days_of_month: [1, 15], times: ["06:00"]   (a day past the month's end is skipped)
   timezone: America/Chicago
-  calendar: EVERYDAY              # EVERYDAY | WEEKDAYS (named calendar files: not in release 1; dre validate rejects them)
+  calendar: EVERYDAY              # EVERYDAY | WEEKDAYS | a named calendar from conf/calendars (release 3)
 sla_hours: 8
 datasets: [rms_raw_enrollment, rms_curated_enrollment, gold_member_coverage]
 check_delay_minutes: 0            # evaluate a slot this long after its deadline (default 0)
@@ -234,6 +236,16 @@ sql: |                            # returns population and violations, and g_1..
 ```
 
 The template sees `table`, `feed_filter`, `group_by`, `params` and four helpers: `column(name)` (with `key_normalise`), `time(name, format)` (parsed, never compared as a string), `key_expr` and `literal(text)`. Params of type `column` and `columns` are the columns the rule reads (preconditions). The SQL renders in a sandboxed Jinja environment and always runs wrapped as `SELECT * FROM (...) dre_rule`, so a statement that is not a query is a parse error (section 9, rule 10); `dre validate` also rejects write and DDL keywords in the text, naming the file and line, and `dre dry-run` renders each such rule against its table. Rules on these templates follow the denominator rule like any other: an empty population is DID\_NOT\_RUN.
+
+**Named calendars** (release 3). `conf/calendars/<name>.yaml` names the days a feed does not load on, so its slots are not expected (and not reported late) on them:
+
+```yaml
+calendar: US_BUSINESS             # the name a cadence's `calendar` uses
+weekdays_only: true               # skip Saturdays and Sundays
+holidays: [2026-01-01, 2026-01-19, 2026-07-03]
+```
+
+`EVERYDAY` and `WEEKDAYS` are packaged and cannot be redefined. A calendar applies to `times` and `interval` cadences; `calendar_dates` and `monthly` list their own days. An unknown calendar is a config error naming the known ones.
 
 **Table-wide datasets.** A dataset that no feed lists covers a whole table, for example to run gold rules across every source system. It must set `owner` (whose recipients get its results) and `expectation_version` (it has no feed to take one from), has no `feed_filter`, and takes its settings from `defaults.yaml`. It gets the checks in `patterns/table_wide.yaml`: T1\_SCHEMA\_DRIFT, T1\_KEY\_NULLS and T1\_KEY\_DUPLICATES only, plus gold rules. A dataset that a feed lists takes its owner and expectation version from the feed and must set neither. Each dataset is listed by at most one feed.
 

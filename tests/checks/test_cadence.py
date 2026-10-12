@@ -46,9 +46,9 @@ def test_interval_and_calendar_dates() -> None:
     assert dated == [datetime(2026, 1, 15, 15, 0, tzinfo=UTC)]
 
 
-def test_named_calendar_is_rejected_by_config_and_guarded_here() -> None:
-    with pytest.raises(ValueError, match="named calendar file"):
-        cadence(calendar="holidays.yaml")  # dre validate reports it
+def test_unknown_calendar_is_rejected_by_config_and_guarded_here() -> None:
+    with pytest.raises(ValueError, match="is not a calendar"):
+        cadence(calendar="holidays.yaml")  # dre validate reports it; named calendars live in conf/calendars
     unchecked = Cadence.model_construct(kind="times", times=["00:30"], interval_minutes=None, dates=None,
                                         timezone="America/Chicago", calendar="holidays.yaml")
     with pytest.raises(UnsupportedCalendar):

@@ -64,6 +64,7 @@ class Config:
     datasets: dict[str, Dataset] = field(default_factory=dict)
     rules: dict[str, Rule] = field(default_factory=dict)
     templates: dict[str, Any] = field(default_factory=dict)  # conf/templates: TemplateFile by name (release 3)
+    calendars: dict[str, Any] = field(default_factory=dict)  # conf/calendars: CalendarFile by name (release 3)
     sources: dict[tuple[str, str], Source] = field(default_factory=dict)  # (kind, id) -> Source
 
     def feed_of(self, dataset_id: str) -> Feed | None:
@@ -218,6 +219,8 @@ def read_yaml(path: Path, display: str) -> tuple[Any, yaml.Node | None, list[Con
         mark = exc.problem_mark or exc.context_mark
         line = mark.line + 1 if mark else 1
         return None, None, [ConfigError(display, line, "", f"YAML syntax error: {exc.problem}", "fix the YAML syntax at this line")]
+    except ValueError as exc:  # PyYAML builds dates and times itself: 2026-13-01 raises here, not a YAMLError
+        return None, None, [ConfigError(display, 1, "", f"YAML value error: {exc}", "fix the date or time literal, or quote it")]
     except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
         return None, None, [ConfigError(display, 1, "", f"cannot read file: {exc}", "check the file is readable UTF-8 YAML")]
     if node is None or not isinstance(data, dict):
@@ -265,6 +268,39 @@ def _load_templates(config: Config) -> list[ConfigError]:
     return errors
 
 
+def _load_calendars(config: Config) -> list[ConfigError]:
+    """conf/calendars/*.yaml: each file a named calendar (spec section 3), registered for the feeds."""
+    from hcsc.datalake.dre.checks.calendars import CalendarFile, use_conf_calendars
+
+    errors: list[ConfigError] = []
+    files: list[Any] = []
+    folder = config.conf_dir / "calendars"
+    for path in sorted([*folder.glob("*.yaml"), *folder.glob("*.yml")]):
+        display = str(path)
+        data, node, errs = read_yaml(path, display)
+        errors.extend(errs)
+        if data is None:
+            continue
+        try:
+            file = CalendarFile.model_validate(data)
+        except ValidationError as exc:
+            errors.extend(errors_from_validation(exc, display, node))
+            continue
+        if file.calendar in config.calendars:
+            errors.append(ConfigError(display, line_of(node, ("calendar",)), "calendar",
+                                      f"duplicate calendar {file.calendar!r}", "give each calendar a unique name"))
+            continue
+        config.calendars[file.calendar] = file
+        config.sources[("calendar", file.calendar)] = Source(display, node)
+        files.append(file)
+    for refused in use_conf_calendars(files):
+        source = config.sources[("calendar", refused)]
+        errors.append(ConfigError(source.file, line_of(source.node, ("calendar",)), "calendar",
+                                  f"{refused!r} is a packaged calendar", "pick another name"))
+        del config.calendars[refused]
+    return errors
+
+
 def load(conf_dir: Path | str) -> tuple[Config, list[ConfigError]]:
     """Load and validate each file on its own. Cross-file checks are in validate.py."""
     from hcsc.datalake.dre.checks.registry import use_conf_patterns
@@ -274,6 +310,7 @@ def load(conf_dir: Path | str) -> tuple[Config, list[ConfigError]]:
     errors: list[ConfigError] = []
     use_conf_patterns(conf_dir)  # patterns/*.yaml in the conf directory add to or replace the packaged ones
     errors.extend(_load_templates(config))  # before the rules, which name them
+    errors.extend(_load_calendars(config))  # before the feeds, whose cadences name them
 
     defaults_path = conf_dir / "defaults.yaml"
     display = str(defaults_path)

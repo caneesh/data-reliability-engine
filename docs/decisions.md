@@ -321,6 +321,14 @@ Deferred to step 2: `causes/failures.py` still lists the failing things of a FAI
 5. **`dre dry-run`** renders each rule on a conf template against its table (`LIMIT 0`), so a column or expression error shows before a run.
 6. **No sample template.** A template without a rule shows nothing, and a sample rule would change the result counts again; the spec example and the tests carry it.
 
+## Extensibility, step 5: named calendars (2026-10-12)
+
+1. **`conf/calendars/*.yaml`** (`weekdays_only`, `holidays`) registers a calendar before the feeds load; `cadence.calendar` validates against the calendar registry (`checks/calendars.py`), which also holds EVERYDAY and WEEKDAYS. A packaged name is refused.
+2. **What a calendar is.** Only "which days the feed runs": weekends off or not, plus listed holidays. Nothing else was asked for; business-day counting, half days or regional sets can be added to the file's model when a real feed needs them.
+3. **Runtime guard kept.** A cadence with an unknown calendar (only possible by bypassing config validation) still raises `UnsupportedCalendar`, which the checks turn into DID_NOT_RUN / invalid_config as before.
+4. **Two tests changed:** `test_named_calendar_is_rejected_by_config_and_guarded_here` and the `named-calendar-file` validate case encoded "named calendars are not supported"; both now check that an *unknown* calendar is rejected, which is the rule that remains.
+5. **A loader bug found on the way:** PyYAML builds date literals itself, so `2026-13-01` raised a bare `ValueError` out of `dre validate` instead of a config error. `read_yaml` now reports it with the file.
+
 ## Notes for later steps
 
 - **Step 4:** done: `dre dry-run` parses SQL fragments (`config/fragments.py`).

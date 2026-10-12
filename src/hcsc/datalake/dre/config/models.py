@@ -95,12 +95,19 @@ def _regex(value: str) -> str:
     return value
 
 
+def _stem(value: str) -> str:
+    name = value.lower()
+    return name[:-5] if name.endswith(".yaml") else name[:-4] if name.endswith(".yml") else name
+
+
 def _calendar(value: str) -> str:
-    if value not in ("EVERYDAY", "WEEKDAYS"):
-        raise invalid(
-            f"calendar {value!r} looks like a named calendar file, which release 1 does not support",
-            "use EVERYDAY or WEEKDAYS, or list the run dates with kind: calendar_dates",
-        )
+    """EVERYDAY, WEEKDAYS, or a named calendar from conf/calendars (checks/calendars.py)."""
+    from hcsc.datalake.dre.checks.calendars import CALENDARS
+
+    if value not in CALENDARS:
+        raise invalid(f"{value!r} is not a calendar",
+                      f"use one of {list(CALENDARS.ids())}, add conf/calendars/{_stem(value)}.yaml, "
+                      "or list the run dates with kind: calendar_dates")
     return value
 
 
@@ -274,7 +281,7 @@ class Cadence(Model):
     dates: list[date] | None = None
     days_of_month: list[Annotated[int, Field(ge=1, le=31)]] | None = None  # kind monthly
     timezone: TimeZone
-    calendar: Annotated[str, AfterValidator(_calendar)] = "EVERYDAY"  # EVERYDAY | WEEKDAYS (named files: not in release 1)
+    calendar: Annotated[str, AfterValidator(_calendar)] = "EVERYDAY"  # EVERYDAY | WEEKDAYS | a conf/calendars name
 
     @model_validator(mode="after")
     def _check(self) -> Cadence:

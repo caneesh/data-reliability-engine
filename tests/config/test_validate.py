@@ -105,7 +105,7 @@ CASES = [
     ("negative-settle", DEFAULTS, "settle_minutes: 15", "settle_minutes: -5", "settle_minutes", "settle_minutes", "greater than", ">= 0"),
     ("table-wide-needs-version", TABLE_WIDE, "expectation_version: 1 ", "# ", "expectation_version", "dataset: gold_member_coverage_all", "needs an expectation_version", "expectation_version: 1"),
     ("feed-dataset-no-version", GOLD, "layer: GOLD\n", "layer: GOLD\nexpectation_version: 2\n", "expectation_version", "expectation_version: 2", "versions this dataset's checks", "bump the feed's"),
-    ("named-calendar-file", FEED, "calendar: EVERYDAY", "calendar: holidays.yaml", "cadence.calendar", "calendar: holidays.yaml", "named calendar file", "EVERYDAY or WEEKDAYS"),
+    ("unknown-calendar", FEED, "calendar: EVERYDAY", "calendar: holidays.yaml", "cadence.calendar", "calendar: holidays.yaml", "is not a calendar", "conf/calendars/holidays.yaml"),
     ("winner-format-not-ordered", GOLD, 'order_by: ["sourcelastupdatets DESC", "enddate DESC"]', 'order_by: ["sourcelastupdatets DESC", "enddate DESC"]\n  formats: { startdate: yyyy-MM-dd }', "winner_rule.formats.startdate", "formats:", "not in winner_rule.order_by", "columns the winner rule orders by"),
     ("hop-exclusion-not-upstream", GOLD, "winner_rule:", "hop_exclusions: { nowhere: \"x = 1\" }\nwinner_rule:", "hop_exclusions.nowhere", "hop_exclusions", "not an upstream in key_map", "upstreams this dataset's key_map maps"),
     ("bad-email", DEFAULTS, "dre-alerts@example.com", "dre-alerts", "recipients.membership-gold[0]", "membership-gold:", "email", "name@domain"),
