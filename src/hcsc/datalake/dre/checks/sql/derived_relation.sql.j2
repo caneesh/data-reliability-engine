@@ -1,0 +1,31 @@
+{# A derived dataset's relation (checks/derived.py). Each source is its table after its own
+   feed_filter, aliased with its dataset id, so expressions name columns as <dataset>.<column>.
+   Output: the group_by and columns outputs, record_ts and load_ts (the latest record and load
+   time of the `from` rows in the group, UTC), and {{ unmatched }}: the joined datasets with no
+   match for the group (empty array when every join matched). #}
+SELECT {% for name, expr in group_by %}{{ expr }} AS {{ name }},
+       {% endfor %}
+{% for name, expr in columns %}
+       {{ expr }} AS {{ name }},
+{% endfor %}
+       MAX({{ record_expr }}) AS record_ts,
+       MAX({{ load_expr }}) AS load_ts,
+       array_sort(array_distinct(array_compact(flatten(collect_list(array(
+{% for j in joins %}
+         CASE WHEN {{ j.probe }} IS NULL THEN '{{ j.alias }}' END{% if not loop.last %},{% endif %}
+
+{% endfor %}
+{% if not joins %}
+         CAST(NULL AS STRING)
+{% endif %}
+       )))))) AS {{ unmatched }}
+FROM (SELECT * FROM {{ base.table }}{% if base.filter %} WHERE {{ base.filter }}{% endif %}) {{ base.alias }}
+{% for j in joins %}
+{{ j.type }} JOIN (SELECT * FROM {{ sources[loop.index].table }}{% if sources[loop.index].filter %} WHERE {{ sources[loop.index].filter }}{% endif %}) {{ j.alias }}
+  ON {% for left, right in j.on %}{{ left }} = {{ right }}{% if not loop.last %} AND {% endif %}{% endfor %}
+
+{% endfor %}
+{% if where %}
+WHERE {{ where }}
+{% endif %}
+GROUP BY {% for name, expr in group_by %}{{ expr }}{% if not loop.last %}, {% endif %}{% endfor %}

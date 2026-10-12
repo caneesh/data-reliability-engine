@@ -1,0 +1,303 @@
+# Decisions
+
+Answers to the open decisions in spec section 11. Fill in **Answer** before build step 1, or write "spec default". Claude Code adds a line here whenever it takes a default.
+
+| Decision | Spec default | Answer | Decided by, date |
+| --- | --- | --- | --- |
+| Language | PySpark 3.5.1 | | |
+| Python version and packages on the cluster | Python 3.10+, dependencies shipped in a zip | | |
+| Where it runs and is scheduled | `dre run` hourly (Control-M or cron); the watchdog hourly from a separate folder or host | Hourly run, due feeds only (genericity review) | Aneesh Chan, 2026-10-10 |
+| Database name and service account | `dq`; a read-only account with write access only to `dq` | | |
+| Use of AI coding tools on HCSC code | Only through HCSC-approved access | | |
+| Code repository location | (not in spec) | Approved by HCSC: the repo is hosted on Aneesh Chan's GitHub (`caneesh/data-reliability-engine`) | HCSC, 2026-10-09 |
+
+## Defaults taken during the build
+
+- 2026-10-09, step 1: Language: no answer recorded; took the spec default, PySpark 3.5.1.
+- 2026-10-09, step 1: Python version and packages on the cluster: no answer recorded; took the spec default, Python 3.10+ with dependencies shipped in a zip. CI runs on Python 3.10.
+- 2026-10-09, step 1: Where it runs and is scheduled: no answer recorded; took the spec default (Control-M for the main run, a separate folder or cron for the watchdog). Nothing built in step 1 depends on it.
+- 2026-10-09, step 1: Database name and service account: no answer recorded; took the spec default, `dq`. The guard test accepts `dq` or the placeholder `dq_database` (see tests/guard/scan.py), since the real name comes from config.
+- 2026-10-09, step 1: Use of AI coding tools on HCSC code: handled with HCSC separately, outside this build. Not a build blocker; no default recorded here.
+- 2026-10-09, step 2: Settings defaults from the spec applied when defaults.yaml omits them: `volume_tolerance_pct` 50 (section 6), `email_sample_keys` false (section 1), `full_sweep_day` SUNDAY (section 8). Sample `retention_months`: 84 for results, events and runs, 13 for the file registry (section 5).
+
+## Configuration assumptions (step 2, reviewed 2026-10-09)
+
+The engine field names chosen in step 2 are in spec section 3. The other assumptions:
+
+1. **Settings levels.** `sla_hours`, `email_sample_keys`, `min_rows_per_load`, `volume_tolerance_pct`, `compute_budget_minutes` and `full_sweep_day` may be set in `defaults.yaml`, a feed or a dataset. A dataset takes the value from the lowest level that sets it (dataset, then the feed that lists it, then defaults); null means inherit. Table-wide datasets skip the feed level.
+2. **`defaults.yaml` fields.** `dq_database`, `environment`, `hmac_secret_file` (null until set; an absolute path outside the repository and the conf directory), `retention_months` (one entry per dq table), `recipients` (owner to addresses), and the settings above.
+3. **Which nulls are allowed.** Fields the spec shows as null are optional: `partition_column`, `file_name_column`, `cause_inputs.*`, `owner` on feed datasets. `load_time` is optional with a warning. `record_time` is optional unless the dataset has a `key_map` or is mapped to by one. Every other field is required, so a null there is an error.
+4. **Time formats.** `record_time` and `load_time` share the shape `{column, format, granularity}`; `format: null` means the column is already DATE or TIMESTAMP. The sample leaves `format` null where the real format is not confirmed.
+5. **Load-time checks.** The warning names T1\_ON\_TIME, T1\_ZERO\_ROWS, T1\_VOLUME and T1\_KEY\_NULLS (and, with a key_map, cause checks NOT\_RUN and OLDER\_VERSION\_WRITTEN\_LATER). Step 5 must keep this list (`config/validate.py`, `LOAD_TIME_CHECKS`) in line with the checks it builds, including any fallback to `partition_column`.
+6. **Regex dialect.** `value_format` patterns are compiled with Python's `re`; Spark uses Java regex. A pattern valid in one and not the other is caught by dry-run.
+7. **SQL fragments.** `dre validate` only rejects `;` in `feed_filter`, `open_when` and filter conditions. **Step 4 must parse them in `dre dry-run`** (Spark `EXPLAIN` or equivalent) and report failures with file, line and field.
+8. **Sample config.** No raw dataset until its columns are confirmed. The `older_coverage_still_open` grouping and order are placeholders until the rule baselines are run (spec section 11, queries 5 to 7).
+
+## Store assumptions (step 3, 2026-10-09)
+
+1. **Two dq_run rows per run** (changed in the step 3 review). A STARTED row when the run starts and a final row (COMPLETED, PARTIAL or FAILED) when it ends; the run's state is its latest row (`v_latest_run`). A run that dies stays STARTED, which the watchdog reports. Both rows carry `run_date` = the UTC date the run started. Status of the final row: COMPLETED when every expected check was written, PARTIAL when fewer, FAILED when the run says it failed.
+2. **v_latest_result with groups.** The spec says one row per (dataset, check\_id). For a check split by `group_by`, the view returns every group row of the latest evaluation (latest by `evaluated_at`, then `run_id`), so an ungrouped check still gives one row.
+3. **v_open_keys** gives the first flagged time of the key's current open spell (after its last CLEARED). It does not expose `key_value`, which stays restricted in `dq_key_event`.
+4. **v_file_status** gives the earliest `first_seen_at`, and size, `modified_at` and `observed_at` from the latest observation.
+5. **`dre install` applies the DDL** (decided in the step 3 review, 2026-10-09). The platform team only creates the empty dq database and grants the service account access. `dre install --print` renders the DDL for the configured database, `--apply` runs it, `--check` compares the existing tables and views with it. Every statement is IF NOT EXISTS, so `--apply` is safe to rerun and never replaces an existing table or view: a changed definition shows up as DIFFERS in `--check` and needs a person to migrate it. `dre run` checks the store tables and views exist and exits 3 naming `dre install` if not. Reason: the engine owns its schema, while creating databases and granting access stays with the platform team. Enforced by guard rule 8 (spec section 9).
+
+## Check framework assumptions (step 4, 2026-10-09)
+
+1. **T1_KEY_DUPLICATES built in step 4.** R09 and R11 need a real check or they pass vacuously. T1_KEY_DUPLICATES needs no load-time window and step 5 needs it for R08; step 5 adds the other six Tier 1 checks.
+2. **Event windows** (replaced in the step 4 review, 2026-10-09; spec section 4). Windows are UTC, half-open, and recorded on each result row (`window_start`, `window_end`). The end is the run's start minus `settle_minutes`; the start is the latest `window_end` of the dataset's NORMAL events, skipping an event when **any** of its checks was DID\_NOT\_RUN for PLATFORM, BUDGET or CONFIGURATION, so a blocked check never silently loses a window. The cost: one check stuck on a configuration error holds the dataset's window open until it is fixed, and the window grows. First run: end minus `initial_lookback_hours`. Bounds truncate to `load_time.granularity` in the load time's zone. `event_id` and `evaluation_id` hash their parts joined with `|` (the spec writes `+`); `evaluation_id` includes the sorted group values.
+3. **`evaluate` returns a list,** one result per group, rather than the single `CheckResult` in the spec's interface. A query that returns no rows (an empty table with `group_by`) is one DID\_NOT\_RUN / `empty_population` result.
+4. **Error mapping.** Spark error classes map to reason codes: `UNRESOLVED_COLUMN*` to `column_missing`, `TABLE_OR_VIEW_NOT_FOUND` to `table_missing`, `DATATYPE_MISMATCH*` and `CAST_INVALID_INPUT` to `incompatible_type`, and everything else (including Python errors) to PLATFORM / `query_failed`. A failing catalogue call in the preconditions is `metastore_unavailable`.
+5. **Run accounting and exit codes.** `checks_expected` is the number of (dataset, check) evaluations planned; `checks_written` the number whose rows were appended. A failed write is logged (check id and table only) and leaves the run PARTIAL (exit 2). An error outside a check ends the run FAILED, also exit 2, since spec section 8 has no separate code for it.
+6. **Execution type.** `--execution-type` is recorded on each result row. Only NORMAL events move the window forward. Reusing the earlier window for a RERUN, so that it gets the same `evaluation_id`, is left to step 8, where the full run comes together. (Built after the code review, 2026-10-12: see "Review items 6 and 7, answered".)
+8. **Time zones** (step 4 review). Time columns carry a `timezone` (IANA; default `timezone` in `defaults.yaml`). Checks convert with `to_utc_timestamp` after parsing, in a UTC Spark session; a column without `format` is read as a TIMESTAMP in its zone.
+9. **Table-wide datasets** (step 4 review) get T1\_SCHEMA\_DRIFT, T1\_KEY\_NULLS and T1\_KEY\_DUPLICATES (`patterns/table_wide.yaml`), carry their own `expectation_version`, and run only in a full `dre run` (not with `--feed`). T1\_SCHEMA\_DRIFT runs once per physical table (step 5).
+7. **dry-run** exits 0 even when SQL fragments do not resolve (spec section 8: "0 always, unless the command itself fails"); it exits 3 only when the config is invalid or the feed unknown. It reads the window from the store when there is one and writes nothing.
+
+## Tier 1 checks (step 5, 2026-10-09)
+
+1. **T1\_FILES\_NOT\_LOADED is built in step 6** (decided by Aneesh Chan, 2026-10-09), with the `dq_file` registry it needs. Spec section 10 now gives step 5 as the six table-based checks. Until step 6 the check is not in any pattern file, and there is no stub that could PASS.
+2. **Presence checks count expected loads** (decided by Aneesh Chan, 2026-10-09). T1\_ON\_TIME and T1\_ZERO\_ROWS take loads due as their population: a load due with nothing loaded is FAILED, no load due is DID\_NOT\_RUN / empty\_population, and neither can PASS on an empty table. R11 is split into R11a (no load due: everything DID\_NOT\_RUN) and R11b (a load due: those two FAILED, row-based checks DID\_NOT\_RUN). Each check's population is in spec section 6.
+3. **Which slots** (revised in the step 5 review). T1\_ON\_TIME and T1\_ZERO\_ROWS both judge the slots whose deadline (slot + `sla_hours`) falls in the window, so each slot is judged once and never before its SLA has run out. They count rows loaded in [slot, slot + SLA): T1\_ON\_TIME needs one, T1\_ZERO\_ROWS needs `min_rows_per_load`, sharing one SQL template. With `min_rows_per_load: 1` the two agree on every slot. Named calendar files are rejected by `dre validate` (release 1 supports EVERYDAY and WEEKDAYS; `kind: calendar_dates` lists dates).
+4. **T1\_VOLUME per slot** (revised in the step 5 review). One result per slot whose load period [slot, next slot) ends in the window, with group values `slot` (local HH:MM) and `slot_time` (local date and time, so two slots with the same time of day in one long window stay apart). History is the row counts of the dataset's earlier NORMAL results with the same `slot`, including DID\_NOT\_RUN / insufficient\_history ones, which record their count so the baseline builds up. A slot with no rows gives no T1\_VOLUME result; T1\_ZERO\_ROWS reports it.
+5. **T1\_SCHEMA\_DRIFT reads columns with `DESCRIBE TABLE` and compares them in Python: an exception to "all check logic is SQL in Jinja2 templates"** (recorded in the step 5 review). The comparison is of catalogue metadata (names and types in order), not of rows, and needs the previous schema from `detail`. The first evaluation of a table is DID\_NOT\_RUN / insufficient\_history and records the baseline. `observed` holds the hash, `expected` the previous hash, and `detail` a JSON object with the table and columns (and the added, removed and retyped columns when FAILED). History is looked up by table, so it survives the dataset that records it changing.
+6. **Grouping.** T1\_ON\_TIME and T1\_ZERO\_ROWS are per dataset (after `feed_filter`), not per `group_by` group; T1\_VOLUME is per slot; T1\_KEY\_NULLS and T1\_KEY\_DUPLICATES are per `group_by` group. T1\_KEY\_NULLS looks at raw key values (before `key_normalise`).
+7. **No load_time.** Checks that need it are DID\_NOT\_RUN / invalid\_config. That is a CONFIGURATION reason, so the dataset's window does not move until `load_time` is set; only checks that cannot run anyway depend on it.
+8. **One window per dataset per run.** The runner fixes every dataset's event before writing any result. Otherwise a dataset's later checks saw its earlier checks' rows from the same run and got an empty window (found and fixed in step 5).
+
+## Landing (step 6, 2026-10-09)
+
+1. **Listing** goes through the Hadoop FileSystem API from the Spark session (`listFiles`, recursive), which also reads local `file://` paths in tests. Only listing calls are used. Hidden files (`.` or `_` prefix, such as `_SUCCESS` and `.crc`) are skipped. A root that does not exist or cannot be read gives DID\_NOT\_RUN / landing\_unreadable; any other filesystem error gives hdfs\_unavailable.
+2. **Registry rows.** A row is appended only for a new path, or a known path whose size or modified time changed since its latest row, not for every file on every run. `first_seen_at` is kept from the first row, so `v_file_status` shows both when the file was first seen and its latest size, which INCOMPLETE\_AT\_LOAD needs in step 8.
+3. **Matching raw rows.** Files are matched to raw rows on the base file name: the last path component on both sides. This assumes the raw `file_name_column` holds the landed file's name (with or without a path). **To confirm with the developer.**
+4. **Which files are judged.** Every file in the feed's registry first seen more than `sla_hours` before the window end, so a file that never loads keeps failing until it does. That assumes raw keeps rows for at least as long as the registry keeps files (13 months by default); otherwise files whose raw rows were purged would show as not loaded. **To confirm with the developer.**
+5. **Validation.** `dre validate` warns (does not fail) when a file-pattern feed has no RAW dataset with a `file_name_column`, since T1\_FILES\_NOT\_LOADED cannot run for it. The sample config gets this warning until the raw dataset's columns are confirmed. Tests use a synthetic raw dataset.
+
+## Genericity review (after step 6, 2026-10-10)
+
+1. **Hourly run, due feeds only** (replaces the spec default of a scheduled main run per feed). `dre run` is scheduled every hour. Each run evaluates only feeds with something due: a cadence slot's deadline passed in the feed's window since its last evaluation, or new or changed landed files were registered. A skipped feed writes nothing, so its window carries over. `--feed F` forces F. `check_delay_minutes` (feed, default 0) moves the feed's window end back by that much, so slots are judged only once deadline plus delay has passed. Table-wide datasets run when a due feed's dataset shares their table, otherwise every run (**my choice; flag if hourly table-wide checks are too heavy**). The watchdog expects a run every hour plus grace. R11a now forces its feed with `--feed`, since a plain run correctly skips a feed with no load due.
+2. **Generic cause probes** replace the named cause inputs. Probe types: `file_exists`, `file_value_compare`, `log_contains`, `table_contains`, `size_changed`, plus `builtin` for engine logic over DRE's own evidence. Pattern YAML lists, per failure type, `{code, probe, params}`; the feed's `probes:` supplies parameters by key; missing or null parameters mean NOT\_READY. Filter rules are `table_contains` parameter sets (`table`, `condition`, optional `id`, `code_ref`); the old `owner` and `expected_daily_volume` fields are dropped. Probe execution comes with the cause engine in step 8.
+3. **Second synthetic feed** in `conf/`: `provider_roster_monthly` (FILE\_PERIODIC, monthly CSV, flat folder, no partitions, UTC, key `provider_id`) and `provider_directory_merge` (TABLE\_MERGE gold table). It needed one new generic capability: cadence `kind: monthly` with `days_of_month`. Its `initial_lookback_hours` is 840 (35 days) so a first window holds a monthly load. Replays R01, R02, R03, R08, R09, R11a and R11b run against it (`tests/replay/test_second_feed.py`).
+4. **Genericity guard** (`tests/guard/test_generic_engine.py`): a denylist of source-specific words that must not appear under `src/`. Spec section 9, rule 9.
+5. **End-to-end CI job** (`e2e` in `.github/workflows/ci.yml`): builds synthetic tables and landing folders for both feeds, then runs `dre install --apply`, `dre run` and a verifier as separate processes against one local metastore.
+
+## Hop checks and gold rules (step 7, 2026-10-10)
+
+1. **Keys judged at their deadline.** The spec says "for each upstream key" and "older than `sla_hours`". A hop check judges an upstream key once, in the window where its latest upstream load time plus `sla_hours` falls, plus keys still open in `v_open_keys`; the full sweep judges every key past its deadline. This keeps each run's work to the keys that changed, and never judges a key the downstream layer still has time to load. HOP\_FILE\_COMPLETENESS judges each file the same way, by its first upstream load time.
+2. **Ties.** Every upstream row at a key's latest record time is kept; HOP\_VALUE\_AGREEMENT needs each of them to match this dataset's latest row (null-safe, compared as strings). So R06 (an open row and a termination tied) always fails agreement, whichever row gold kept. STALE means this dataset's latest record time for the key is older than upstream's, or null.
+3. **One result per upstream** (group `upstream`), so a dataset mapped to two upstreams gets a result for each hop.
+4. **The HMAC secret** is read once per run from `hmac_secret_file` (surrounding whitespace stripped). It is used in a Spark SQL function registered with the secret in its closure, never put in SQL text. Not set: no key events, and a FAILED HOP\_KEY\_CURRENCY says so in `detail`. Set but unreadable or empty: `dre run` exits 3 before writing anything, so key events are never lost quietly.
+5. **Key normaliser `parse_date`.** R04 needs raw dates (MM/dd/yyyy) to match curated ones (yyyy-MM-dd). `key_normalise` now also takes `{ parse_date: <format> }`, which reads the string with that format and writes it as yyyy-MM-dd. A generic capability, not per-source code.
+6. **Rule `format`.** `column_order`, `superseded_still_open` and `child_within_parent` take an optional `format` so string dates are parsed, not compared as strings (CLAUDE.md). The sample gold rules set `format: yyyy-MM-dd` (gold dates are YYYY-MM-DD, spec section 9).
+7. **Rules run over the whole table** (after `feed_filter`), not only over the event window: the rules describe the table's state. proposed and approved rules both run; the email (step 9) marks proposed ones report only. How often they run: see the step 7 review, item 2.
+8. **Sample config: curated's `load_time` is not confirmed**, so gold's hop checks are DID\_NOT\_RUN / invalid\_config on every run until it is (spec section 11). Since the step 7 review this no longer holds gold's window.
+9. **R04 at check level** uses a synthetic raw dataset (test-only columns, with `msg_ts` as its record and load time), since the sample config has no raw dataset until its columns are confirmed.
+
+## Step 7 review (2026-10-10)
+
+1. **Hop keys reloaded downstream.** The hop key population also includes keys with a row in this dataset loaded in the window, so a key that regresses without an upstream change (for example gold overwritten with an older version) is judged again. Such a key is judged only once its upstream deadline (latest upstream load + `sla_hours`) has passed, so a reload never judges a key the downstream still has time to catch up on (my choice: otherwise a reload inside the SLA would flag a key early). Needs the downstream `load_time`; without one, only the other two terms apply. The weekly full sweep (`full_sweep_day`) already existed; it is tested at check level (`tests/checks/test_hop.py`, full-sweep tests) and for the day in the default time zone (`tests/test_runner.py`).
+2. **Rule frequency.** `frequency: every_run | daily | weekly`, default daily, and `rule_run_at` (default `"06:00"`, in the defaults.yaml timezone) in `defaults.yaml`. **My choices, flag if wrong:** the key is named `rule_run_at` (a bare `run_at` read as the main run's schedule); weekly rules run on the dataset's `full_sweep_day`, since the spec names no other weekly day; a rule is due when it has no NORMAL result since its latest due moment, not counting a result held by a PLATFORM or BUDGET reason; rules are planned on their own schedule, not only when their feed is due (a daily rule on a monthly feed would otherwise run monthly); and rule results neither move nor hold their dataset's window.
+3. **Window rule corrected.** Only PLATFORM and BUDGET reasons hold a window; CONFIGURATION reasons never do, and those checks report DID\_NOT\_RUN every run. A hold lasts at most `max_window_hours` (default 72, a setting overridable per feed or dataset). **My choices, flag if wrong:** the cap counts from the end of the first held event, not the window's length, so a monthly feed's naturally long window is not cut short by a single held run; on release the window starts where the last held event ended, and the gap is one result per dataset with `check_id` WINDOW\_GAP, DID\_NOT\_RUN / window\_gap, with reason category DATA\_UNAVAILABLE (a category that does not hold, so the gap's own end moves the window on), its window set to the unchecked span and `detail` listing the hours and the codes that held it. Gap rows count in the run's `checks_expected` and `checks_written`.
+
+## Cause engine (step 8, 2026-10-10)
+
+1. **Failures explained one by one** (`failure_ref`): files, slots, upstream files or key hashes, at most 100 per evaluation (as in check details). T1\_ON\_TIME and T1\_ZERO\_ROWS now list their failing slots in `detail` so they can be explained.
+2. **Fallback not written as a row.** The spec's cause states are CONFIRMED, RULED\_OUT, NOT\_READY and ERROR; the fallback is not checked, so it gets no row. The cause is resolved from the rows plus the pattern's fallback (`causes/engine.py`, `resolve`); the email (step 9) and `dre trace` use the same.
+3. **Keys without an HMAC secret.** Failing keys are referenced by `key_hash`. Without `hmac_secret_file` they cannot be, so each cause check is written once with no `failure_ref`, NOT\_READY ("hmac_secret_file is not set"). The replays configure a secret.
+4. **`file_value_compare` takes a `format`** (a Spark datetime pattern), required like its other parameters. The spec's parameters (path, extract\_regex, compare\_to) would force comparing partition values as strings, which CLAUDE.md forbids. The failing file's partition is the same `extract_regex` applied to the file's folder name; a missed or short slot's partition is the slot's date in the feed's time zone, written with `format` and read back. **To confirm with the developer: the handoff file's date format.**
+5. **WRONG\_PARTITION (spec unclear, flag).** The spec says "Rows were written to a partition other than the one named in the cursor file", but the probe it names (`file_value_compare`, `compare_to: partition`) confirms when the cursor's partition is later than the failure's partition. For a short slot, I compare the cursor with the slot's partition: CONFIRMED when the cursor is ahead (today's load went to a later partition). It does not look for the rows in the other partition (gold has no partition column in the sample). **Please confirm this reading, or say how the rows in the other partition should be found.** R03's WRONG\_PARTITION replay is built on it.
+6. **Missed slots on file patterns** (T1\_ON\_TIME): RAW\_LOAD\_HELD and the cursor apply as for files; PIPELINE\_STALLED, size\_changed, UNREADABLE and LOAD\_ERROR look at the files first seen since the slot that have no raw rows. Without a raw dataset those are NOT\_READY.
+7. **PIPELINE\_STALLED** counts files first seen with (in the same listing) or after the failing file, excluding it: if any of them loaded, the pipeline ran. With no such file it is RULED\_OUT (nothing shows the pipeline stopped). R02's replay lands files after the missed loads.
+8. **NO\_UPSTREAM\_DATA** counts upstream rows loaded in the event window (the spec's "in the window"), not in the slot's own load period: a merge runs after its upstream loads.
+9. **Load times compared at this dataset's granularity** (NOT\_RUN, OLDER\_VERSION\_WRITTEN\_LATER): the upstream load time is truncated to this dataset's `load_time.granularity` first. NOT\_RUN is CONFIRMED only when this dataset's latest load is strictly before it; the same minute counts as "ran".
+10. **TIE\_RESOLVED\_BY\_RULE.** CONFIRMED for a CURRENT key when the upstream rows tied at the latest record time carry different owned-column values and this dataset's row matches the row `winner_rule` ranks first: the disagreement is the rule's choice (R06). STALE and MISSING keys: RULED\_OUT.
+11. **UNREADABLE** reads only the first record (or header) with the reader for `file_format` (Spark's sequence, text and CSV readers; parquet and orc by schema; xml as text starting with `<`). An empty file is unreadable; a file that has gone is ERROR, not UNREADABLE. Reading files and logs uses Spark readers, not `spark.sql` templates (a recorded exception, like DESCRIBE in step 5). Synthetic landing files in tests are now real sequence files (`tests/fixtures/landing.py`), as spec section 9 asks.
+12. **`log_contains`** matches the pattern with Spark's (Java) regex; `dre validate` compiles it with Python's. Simple patterns behave the same; flag if the real pattern uses syntax where they differ.
+13. **Cause checks never stop the run.** A probe that raises is ERROR; if the failing things cannot be listed, every cause check is written as ERROR; a failed cause write is logged (exception type only) and the run continues.
+
+## Email and trace (step 9, 2026-10-10)
+
+1. **Sending.** The spec names a sender but no mail relay. `defaults.yaml` gets `email: {smtp_host, smtp_port, sender}` (standard-library SMTP, no service of ours); null until the platform team confirms the relay (added to spec section 11). Until then each run prints, per owner, the subject and "not sent".
+2. **One digest per owner per run**, holding only that owner's results (the feed's owner; a table-wide dataset's owner; a rule's owner for its results). An owner with nothing evaluated in a run gets no digest. **Flag:** with the hourly run (genericity review) this is up to 24 digests a day per owner, and a DID\_NOT\_RUN for a configuration problem appears in each. Say if you want, for example, all-clear digests only once a day.
+3. **What counts.** New failures: results FAILED now whose previous result was not FAILED (a first result that FAILED counts). Did not run: every DID\_NOT\_RUN this run, including WINDOW\_GAP. `all clear` only when nothing is newly failing, still failing or did not run. Proposed rules are report only and never counted; approved rules count like checks.
+4. **Cause line** follows the spec's form and also names the fallback: `cause not proven (DROPPED): ruled out …`. `dre run` prints the same lines.
+5. **One alert for T1\_ON\_TIME and T1\_ZERO\_ROWS** when every short load of T1\_ZERO\_ROWS is also a missed load of T1\_ON\_TIME (a missed load always writes zero rows); shown under T1\_ON\_TIME with a note. A T1\_ZERO\_ROWS with other short loads keeps its own alert.
+6. **Missing groups** are judged only on configured group columns (the dataset's or rule's `group_by`, and `upstream`): T1\_VOLUME's groups name the slot's date, so last run's slots are never "missing".
+7. **Trace** prints layers most upstream first and finds the first hop with the key missing or at an older record time. Its cause line is the latest HOP\_KEY\_CURRENCY cause for the key's `key_hash` at that hop, so it needs `hmac_secret_file`. Key values on the command line are split on commas (a value containing a comma cannot be traced). Bad input exits 3, like `dre run` when it cannot start.
+
+## Watchdog and budgets (step 10, 2026-10-10)
+
+1. **Budget per check.** "If a check exceeds its budget" read as each check getting its dataset's whole `compute_budget_minutes` (not one budget shared by the dataset's checks in a run). **Flag if a shared budget per dataset is meant.**
+2. **Cancelling.** Each check runs in its own Spark job group in a worker thread; at the budget the group is cancelled with interrupt, which stops its running Spark jobs. Python work inside the check cannot be interrupted; it is abandoned and its result ignored.
+3. **Scan estimate.** The spec asks to estimate the scan size before running, but turning bytes into minutes needs the cluster's throughput, which nobody has given. The estimate (Spark's table statistics, present when the metastore has them, e.g. after ANALYZE TABLE) is recorded in a budget\_exceeded result's detail; checks are not refused up front. **To confirm with the platform team:** a throughput figure, if checks should be refused before running.
+4. **Watchdog hour and grace.** One hour judged per watchdog run: (now − `watchdog_grace_minutes`), floored to the hour; grace 30 minutes by default. A run that started late and is still within its grace is not an alert; if it is still STARTED at the next watchdog run it falls outside the judged hour and is not reported again (a known gap, to keep the watchdog stateless).
+5. **Watchdog alerts** go to every address in `recipients` (no separate operations owner is configured; **flag if there should be one**), through the digest's mail relay; with the relay unset the alert is printed and the exit code is still 1. A FAILED final row is an alert as well as `checks_written < checks_expected`.
+6. **Independence.** `watchdog.py` imports only the config loader, the store's name validation and the mail sender; a test checks its imports.
+
+## Packaging (step 11, 2026-10-10)
+
+1. **Artifacts** (`python scripts/package.py`): the wheel; `dre-pyfiles-<version>.zip` with the package for `--py-files`; `dre-deps-<version>-<platform>.zip`, wheels of pydantic, PyYAML and Jinja2 for the cluster's Python and platform (default 3.10, manylinux2014\_x86\_64); `dre_main.py`, the entry point. PySpark is the cluster's.
+2. **Dependencies are installed, not shipped in `--py-files`.** pydantic's core is compiled, and Python cannot import compiled modules from a zip. They are installed once on the driver host from the wheel zip (offline), and runs use `--deploy-mode client`. Executors need only the package itself (for the key-hash function), which the `--py-files` zip carries. **To confirm with the platform team:** client mode on an edge node, and its Python version.
+3. **Namespace packages in the zip.** Python's zip importer cannot resolve native namespace packages, so the `--py-files` zip alone gets pkgutil-style `hcsc/__init__.py` and `hcsc/datalake/__init__.py`, which still merge with other HCSC tools' portions. The source keeps native namespace packages (CLAUDE.md).
+4. **CI** gains a `package` job: it builds the artifacts, installs only PySpark and the dependency wheels (the `dre` package itself is not installed), and runs `validate`, `install --print` and `dry-run` through `spark-submit` from `dist/`.
+
+## Configurable assumptions (2026-10-10)
+
+Asked to make the engine work on its assumptions and make them configurable, until answers come. Each choice where the spec was open is now a setting whose default is the assumption (README, "Settings that carry an assumption"): `email.all_clear_digest` (step 9, item 2), `watchdog_owner` (step 10, item 5), `compute_budget_scope` (step 10, item 1), `scan_mb_per_minute` (step 10, item 3), `rule_weekly_day` (step 7 review, item 2) and the probe parameter `confirm_when` (step 8, item 5: `different` confirms WRONG\_PARTITION for any partition other than the cursor's). Unknown production values (table, column and path names, formats) are not given assumed values: CLAUDE.md forbids inventing them, and they stay null so the dependent checks and causes say DID\_NOT\_RUN or NOT\_READY.
+
+## Code review (2026-10-11)
+
+A full review of `src/` found 29 issues. The fixes below change behaviour; each has a test that fails without it. Items 6 and 7 waited on answers (end of this section); both were answered and built on 2026-10-12.
+
+**Changes to the spec or the store** (spec sections 4 to 8 updated):
+
+1. **The driver runs in UTC.** PySpark returns TIMESTAMP values as naive datetimes in the driver process's local time zone, not `spark.sql.session.timeZone`. `session.get_spark` now sets the process time zone to UTC, so a host whose clock is not UTC no longer shifts every time read back from Spark: window starts, `dq_file` comparisons, slot times and the watchdog's hour.
+2. **Key events are per hop.** `dq_key_event` gains `hop` (`<upstream>-><dataset>`, as in `dq_cause_result`), and `v_open_keys` is per (dataset, check, hop, key). Before, a dataset with two upstreams had each hop clear the keys the other flagged. A store installed before this change needs the column and the view recreated; no store has been deployed yet.
+3. **Key events are computed inside the check.** HOP_KEY_CURRENCY materialises the hop's judged keys once (a local checkpoint) and reads the summary, the key events and the cause engine's failing keys from them. All of its Spark work now runs within the compute budget, and an error in it becomes DID_NOT_RUN. Before, the events query ran later, in the runner's write path, outside both.
+4. **A check counts as written only when its key events are too.** A result already stored is still explained, and a failed key-event write leaves the run PARTIAL.
+5. **The full sweep runs once on `full_sweep_day`.** It is the dataset's first window ending that day (in the `defaults.yaml` time zone). Before, every hourly run that day did a full sweep.
+6. **`dre retention [--apply]`** is built, as decided at step 10: it lists, or drops, each dq table's partitions older than its `retention_months`.
+7. **`winner_rule.formats`** (optional, column -> Spark datetime pattern): the winner rule now orders time columns as times. The upstream's `record_time` and `load_time` columns use their own configured reading; any other time column stored as a string needs a format.
+8. **Parameter sets.** A cause whose ready parameter sets are all ruled out, but which has a set that is not configured, is NOT_READY, not RULED_OUT (spec section 7: missing parameters are NOT_READY, never RULED_OUT).
+
+**Fixes that change no stated rule:**
+
+- **T1_VOLUME:**
+  - Monthly and sparse cadences now form load periods, because the previous slot is looked up however far back it is. Before, a monthly feed was `empty_population` on every run.
+  - A load judged again after a held window counts once in the 14-load history.
+  - The median and the tolerance band are computed in SQL.
+- **Window history.** Rule results are left out by their row (only rule results carry a severity), not by today's rule ids, so a renamed rule cannot move a window. Every dataset's history is read in one query instead of one query per dataset.
+- **Choosing the T1_SCHEMA_DRIFT dataset.** The one per table is chosen after dropping feeds that are not due, so a shared table is still checked when only one of its feeds is due.
+- **Run start.** A planning error after the STARTED row now ends the run FAILED instead of leaving it STARTED.
+- **Hop checks.** An error in one upstream is DID_NOT_RUN for that upstream only; the other upstreams' results stand.
+- **value_format** tests the stored value, not its `key_normalise` form.
+- **null_rate_max** compares the rate in SQL.
+- **dre trace:**
+  - The cause line is the gap hop's own; it is filtered on `hop`.
+  - The key hash is computed with the hop checks' own `key_string` and `dre_key_hash`.
+- **Cause checks and null load times.** FILE_SKIPPED, OLDER_VERSION_WRITTEN_LATER and KEY_MISMATCH no longer crash on a null upstream load time, or on a single-column key whose only column is in `mismatch_probe_drop`.
+- **Efficiency:**
+  - Probes read a log glob, a value file and a parsed value once per evaluation, not once per failure.
+  - T1_FILES_NOT_LOADED and HOP_FILE_COMPLETENESS count and list in one pass.
+  - The digest reads its run's rows from the run's `run_date` partition only.
+- **Clean-up:**
+  - The duplicate `as_utc` and regex validator are removed.
+  - Dead code is removed from `cli.py`: the "not built" path and the unused `EXECUTION_TYPES`.
+  - Missing type hints are added.
+
+**Not fixed in the review: they waited on an answer** (both answered and built on 2026-10-12; next section).
+
+- **Review item 6: NO_UPSTREAM_DATA and the event window** (answered 2026-10-12, below). Spec section 7 says the cause is CONFIRMED when every upstream "loaded no rows in the event window". With hourly runs, T1_ZERO_ROWS judges a slot in the window around its deadline (slot + `sla_hours`), long after the upstream load. So in steady state the upstream count in that window is usually 0: NO_UPSTREAM_DATA is CONFIRMED and hides the later causes (R03's WRONG_PARTITION would rarely win). Proposed change: count upstream rows loaded in the failing slot's load period, `[slot, next slot)`, or from the previous slot up to this slot's deadline. That needed a spec change, so it was left as the spec said.
+- **Review item 7: what `--execution-type RERUN|REPLAY` evaluates** (answered 2026-10-12, below). Today it only labels the rows. The window is still the next new span after the last NORMAL event, so a RERUN cannot reproduce an earlier `evaluation_id` (spec section 4). It also appends `dq_file` rows and key events that the next NORMAL run then repeats. A rerun needs a way to name the window it re-evaluates, for example `--event-id`, or `--window-start` and `--window-end`. It also needs a rule for what it may write: probably results and causes but no key events or `dq_file` rows. Step 4 decision 6 deferred this to step 8, and it was not done.
+
+## Review items 6 and 7, answered (2026-10-12)
+
+The user's answers:
+
+- **Item 6:** "use the expected business event window rather than the current execution window. NO_UPSTREAM_DATA should only be confirmed when the upstream data is genuinely absent. Preserve stronger evidence of downstream failures."
+- **Item 7:** "NORMAL should process the next eligible window, RERUN should explicitly select a historical window, and REPLAY should support a historical range. Ensure idempotent results and key-event handling."
+
+**Item 6, as built:**
+
+1. **Business window.** The failing load (a T1_ZERO_ROWS slot) is judged over its business window: from the previous cadence slot, the load before it, to this slot's deadline (slot + `sla_hours`). That is the span in which the load could have taken upstream data. The previous slot is found however far back it is (monthly cadences).
+2. **When it confirms.** CONFIRMED only when every upstream loaded zero rows in that window. Any upstream rows rule it out, and the business window goes in the evidence. It is NOT_READY when an upstream has no `load_time`, when the failure names no slot, or when the feed has no earlier slot: absence that cannot be measured is never confirmed.
+3. **Order.** WRONG_PARTITION now comes before NO_UPSTREAM_DATA in all three patterns. When both are confirmed, the direct downstream evidence is the cause. Both rows stay in `dq_cause_result`.
+
+**Item 7, as built** (spec section 4, "Execution types"):
+
+1. **CLI.** `dre run --execution-type RERUN --window-start T --window-end T` and `--execution-type REPLAY --from T --to T`, in ISO 8601 (UTC without an offset). NORMAL takes neither. The window or range must be historical (ending by now) and start before it ends; otherwise exit 3.
+2. **Which windows.** RERUN truncates the bounds the way NORMAL does, so naming a NORMAL window reproduces its `event_id` and `evaluation_id`s. REPLAY replays the recorded NORMAL windows in the range exactly, a held-then-extended window once, and evaluates the spans between them as windows of their own. A feed is evaluated in a window only if something was due in it, unless `--feed` names it.
+3. **Idempotent results.** Before writing, a RERUN or REPLAY reads the latest stored result of each evaluation. An identical outcome is not written again, but still counts as written. A changed outcome is appended under the same `evaluation_id`. `v_latest_result` now orders by `window_end` before `evaluated_at`, so a rerun of the current window replaces it but a rerun of an older window never becomes the current state.
+4. **Key events.** A RERUN or REPLAY neither reads `v_open_keys` nor writes `dq_key_event`. The open-key state is today's, not the historical window's, so a rerun judges the keys its window owns (at their deadline, or reloaded in it). Repeating a rerun therefore cannot flag, clear or re-flag a key. The judged keys are still kept for the cause engine, so failing keys are explained.
+5. **What else they leave alone.** No `dq_file` registration, no WINDOW_GAP rows, no window moved or held. No gold rules or T1_SCHEMA_DRIFT, which read the table as it is now. No email: the digest reports scheduled runs, and RERUN and REPLAY print their results.
+6. **The watchdog.** `dq_run` gains `execution_type`, and the watchdog counts only NORMAL runs (or rows without the column), so a manual rerun never stands in for a missed scheduled run.
+
+## Code review comments (October 2026 document)
+
+A second review, in an uploaded document, raised four findings and six architecture concerns. Each finding was first reproduced with a test that failed on the code as it was, then fixed.
+
+1. **[HIGH] Latest-time ties gave false value mismatches** (reproduced).
+   - The cause: HOP_VALUE_AGREEMENT compared upstream and downstream rows pairwise, so two identical tied rows on each side mismatched one another.
+   - The fix: the comparison grain is now the key's latest version on each side, as the set of distinct owned-column values among the rows tied at that side's latest record time (as strings; null differs from empty). Identical multi-row versions pass; one changed row fails.
+   - R06 still fails, as it should: gold kept one of two tied upstream versions.
+2. **[HIGH] Null upstream record times hid keys** (reproduced: such a key fell out of the population and the check PASSED).
+   - Such keys are now kept, with a new key state, UNASSESSABLE, which also applies when the downstream side has no record time.
+   - UNASSESSABLE is a violation, written as a key event (`state_detail` UNASSESSABLE), and never given a cause: there is no evidence to explain it with. The observed text counts these keys.
+   - Before, a missing downstream record time was called STALE, which claimed more than the evidence shows.
+3. **[HIGH] A result and its key events were not committed together.** The store is Hive/ORC, append-only, with no transactions across tables. Recovery therefore uses deterministic ids, newest-row-wins views and holding windows:
+   - **Explicit marker.** A result stored without its key events gets a newer row under the same `evaluation_id`: DID_NOT_RUN / PLATFORM / `evidence_incomplete` (a new reason code). The run ends PARTIAL.
+   - **Held windows.** A NORMAL event evaluated by a run that did not finish COMPLETED is held: evaluated again next run, for up to `max_window_hours`. This covers a run that died before even the marker could be written. A result with no run row is not held.
+   - **Tested:** inject the failure after the result write, then retry. The retry gives exactly one current result, on the same held window, with complete key events.
+   - **Bug found by this test:** a dataset's first window, when held, was retried from the initial lookback before the new end, so its start slid forward and that slice was never checked. `release_hold` now starts a held span at its first event's start when there is no good event yet.
+4. **[MEDIUM] Failed cause investigations were invisible.** They are now tracked apart from the checks.
+   - **Recorded:** `dq_run` gains `investigations_expected` and `investigations_done`. The run status stays about checks, so a failed investigation never relabels a check.
+   - **Reported:** the watchdog alerts on an incomplete investigation, and the digest shows `cause: investigation incomplete (the next run retries it)`.
+   - **Retried:** each NORMAL run retries FAILED results from the last `investigation_retry_days` (new setting, default 7) that have no cause rows and are still their check's latest result. Both scans are bounded by `run_date`.
+   - **Never silent:** a FAILED result with nothing to investigate (only UNASSESSABLE keys) gets NOT_READY rows, so it is never pending.
+   - **Tested:** inject a cause-store failure, then retry.
+
+Architecture concerns:
+
+- **Evidence quality.** Every cause line now names its level: confirmed; suspected (every cause check ruled out, so the fallback stands by elimination); or insufficient evidence (a cause check was NOT_READY or ERROR).
+- **Allowed exclusions.** `hop_exclusions` (dataset; per upstream, a SQL condition on the upstream's rows) is the contract for legitimate business-rule exclusions: hop checks do not expect those rows.
+- **End-to-end scenario.** A synthetic test covers two upstreams, an allowed exclusion, a late upstream row and a missing gold key.
+- **Replay semantics.** RERUN and REPLAY are best-effort re-evaluations against today's data, not snapshots; the run prints this.
+- **The rest** is answered in `docs/architecture.md`: zero-touch isolation, multi-source lineage and operational safeguards. That page also lists what is still open: join and aggregate contracts, snapshot reads, and benchmarking the unbounded store reads.
+
+## Architecture principles document (October 2026)
+
+The user asked for a critical review of an uploaded principles document ("don't blindly follow them"). The review checked each point against the code. Taken up, then built after the user said yes:
+
+1. **Counts of what a hop result left out.** HOP_KEY_CURRENCY and HOP_FILE_COMPLETENESS report in `observed` the keys or rows excluded by `hop_exclusions` and the keys or files pending (within `sla_hours`), so a raw-to-gold difference is accounted for. A DID_NOT_RUN with nothing judged says the same in `detail`. The count CTEs are added only to the queries that use them: Spark analyses even unused CTEs, and with a missing upstream table their error (`column_missing`) masked the real one (`table_missing`).
+2. **A three-layer acceptance pipeline** (`tests/replay/test_acceptance_three_layers.py`, through `dre run` and `dre trace`): loss between raw and curated, loss between curated and gold, an excluded test member and a late key. Each loss is flagged at its earliest hop only.
+
+Already met, no change: zero pipeline changes and read-only access (CLAUDE.md hard constraints 1 to 3, guard tests); verification independent of job status; allowed lateness (`sla_hours`, `check_delay_minutes`, `settle_minutes`); evidence levels; check status separate from investigation status; recoverable persistence; replay limits; bounded scans and retention.
+
+Not taken, with reasons:
+
+- **Six dispositions as result states.** They map onto what exists (CURRENT, excluded, pending, MISSING or STALE with an unconfirmed cause, UNASSESSABLE), now with counts in `observed`. New result states would break hard constraint 4 (exactly PASSED, FAILED or DID_NOT_RUN). The mapping is in `docs/architecture.md`.
+- **An adapter framework for DB2, Kafka and cloud stores.** Kafka is out of release 1, and every read goes through Spark SQL or the Hadoop FileSystem API, which already is the abstraction. Building adapters before a source needs one is building ahead.
+- **Approval history, effective dates and validation status inside contracts.** Each run records the config's git commit, rules carry proposed, approved or retired, and git review is the approval history. Duplicating it in YAML adds fields nothing reads.
+- **Sampling.** Sampling would break the guarantee that every missing record is tied to a hop. Scans are bounded by windows and compute budgets instead.
+- **"Evidence confidence requirements" per contract.** The evidence level is reported; nothing would consume a required level.
+- **Table snapshots by the observers.** The store keeps judgements and key hashes, not copies of production data; the replay limit is documented instead.
+- **A control plane with access controls.** There is no service or UI; access is the `dq` database's grants, owned by the platform team.
+
+Deferred:
+
+- **Join and aggregate hops** ("transformed/aggregated"): a new contract kind (group-by and expected measure), designed before it is built; release 2.
+- **Scheduler history as cause evidence:** waits on the platform team saying where it can be read.
+- **Criterion 7** (an outage and heavy load don't affect sources): by design, but it can only be demonstrated in a representative cluster.
+
+## Derived datasets (release 2, 2026-10-12)
+
+Planned in a design discussion, agreed by the user (structured contract, upstream only, a synthetic example until real keys arrive, and spec section 1 amended for release 2), then built. The reasoning and the choices are in `docs/design/derived-datasets.md`; the contract is in spec section 3. What changed:
+
+1. **Config.** A dataset is either a `table` or `derived` (from, joins, where, group_by, columns). A derived dataset's `record_time` and `load_time` are the engine's `record_ts` and `load_ts` (UTC); it sets no filter, files, partitions, upstream or key_map; no feed lists it; `dre validate` checks all of this and warns when nothing uses it.
+2. **Rendering.** `checks/derived.py` renders the relation from `checks/sql/derived_relation.sql.j2`. Hop parameters, `dre trace`, NO_UPSTREAM_DATA and `dre dry-run` read a derived dataset through it. The checks get the derived dataset's base datasets through `CheckContext.upstreams`.
+3. **Planning.** Derived datasets are never planned: they are read as upstreams only.
+4. **Cause.** JOIN_UNMATCHED (builtin) is order 3 in every pattern's key_missing_or_stale: NOT_READY unless the upstream is derived with joins, CONFIRMED when a joined dataset had no match for the MISSING key's group. The existing tests that encode the cause order were updated for the new entry.
+
+## Notes for later steps
+
+- **Step 4:** done: `dre dry-run` parses SQL fragments (`config/fragments.py`).
+- **Step 5:** done: `LOAD_TIME_CHECKS` matches the Tier 1 checks that need `load_time`. No fallback to `partition_column` yet.
+- **Step 6:** done: T1\_FILES\_NOT\_LOADED is in `patterns/file_cyclic.yaml` and `patterns/file_periodic.yaml`.
+- **Step 6 (open):** a dataset with `partition_column` but no `load_time` may use the partition value as its load time, at the partition's granularity. Waiting on the developer to confirm whether the raw table has a load-time column; until then such a dataset's load-time checks stay DID\_NOT\_RUN / invalid\_config.
+- **Step 7:** done: on the full sweep, open keys no longer found upstream get CLEARED with `state_detail` "no longer upstream".
+- **Step 9:** done: one alert when T1\_ON\_TIME and T1\_ZERO\_ROWS fail for the same loads; groups missing since the previous run are listed.
+- **Step 10:** `dre retention` is a separate command, scheduled weekly. By default it lists the partitions it would drop under each table's `retention_months`; `--apply` drops them through `store/retention.py`. Built in the code review (2026-10-11).
+
+## Guard rules: reasons (decided after step 1, 2026-10-09)
+
+The rules themselves are in spec section 9 (Guard tests). Reasons, by rule:
+
+1. **Naming the dq store.** The real database name comes from config, so code cannot hard-code `dq`; a fixed placeholder keeps the target visible to a static scan. Validating the name as a plain identifier stops it carrying dots, quotes or SQL into statements. Step 2 must call `validate_dq_database` when loading config.
+2. **Read-only outside dq.** Hard rule 1. Path writes, FileSystem and os/shutil calls are other ways to change production data than SQL, so they are flagged the same way.
+3. **Append-only.** Hard rule 5. Overwrite modes and `saveAsTable` are the DataFrame forms of INSERT OVERWRITE and of creating tables outside `store/ddl.sql`.
+4. **One write path** (added before step 2). A static scan cannot follow a write chain split across statements; allowing the write APIs in one module closes that gap. Column order: `insertInto` matches by position, so a frame in a different order would silently write values into the wrong columns.
+5. **Retention.** Retention needs old partitions dropped, which append-only otherwise bans; keeping it in one module, with a refusal for anything inside retention, limits the exception.
+6. **Database creation** (added before step 2). On the cluster the platform team owns the database and the service account; the engine must not create it. Tests and local runs still need it.
+7. **Email.** Hard rule 6. The digest does not exist yet, so the guard is static until step 9, which must add a test on the rendered email text.
+8. **Store DDL only through `dre install`** (added in the step 3 review). The platform team creates the database and grants access; the engine creates its own tables and views, but only through one deliberate command, never as a side effect of `dre run`.
+
+CI runs on Python 3.10 with Java 17 (`.github/workflows/ci.yml`). Nothing may depend on Java 21.

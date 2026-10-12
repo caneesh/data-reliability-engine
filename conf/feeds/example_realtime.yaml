@@ -1,0 +1,25 @@
+# Synthetic sample feed with the shape of the first configuration (spec section 11).
+# The raw dataset is left out until its columns are confirmed.
+feed: example_realtime
+expectation_version: 1
+pattern: FILE_CYCLIC
+owner: membership-gold
+landing:
+  roots: [/data/landing/example_feed]
+  file_format: sequence
+  file_name_pattern: "*"
+cadence:
+  kind: times
+  times: ["00:30", "04:00", "08:00", "12:00", "16:00", "20:00"]
+  timezone: America/Chicago
+  calendar: EVERYDAY
+sla_hours: 8
+datasets: [example_curated_enrollment, gold_member_coverage]
+probes:                       # cause-check inputs (spec section 7); not yet confirmed (spec section 11),
+                              # so the causes that use them return NOT_READY
+  load_hold_marker: { path: null }                      # file_exists
+  partition_cursor: { path: null, extract_regex: null, format: null, compare_to: partition }  # file_value_compare
+  load_log: { path_glob: null, pattern: null }          # log_contains
+  filter_rules: null                                    # table_contains, one entry per filter rule
+  rejects: { table: null, condition: null }             # table_contains
+email_sample_keys: false

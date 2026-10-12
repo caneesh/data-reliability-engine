@@ -1,0 +1,10 @@
+{# file_value_compare: a value read from a file, parsed with the probe's format (never compared
+   as a string). With tz: the parsed local time as UTC. With slot: the slot's partition (the
+   slot in tz, written with the format and read back, so it is truncated the same way). #}
+{% if slot %}
+SELECT to_timestamp(date_format(from_utc_timestamp({{ slot }}, {{ tz }}), {{ fmt }}), {{ fmt }}) AS v
+{% elif tz %}
+SELECT to_utc_timestamp(to_timestamp({{ value }}, {{ fmt }}), {{ tz }}) AS v
+{% else %}
+SELECT to_timestamp({{ value }}, {{ fmt }}) AS v
+{% endif %}

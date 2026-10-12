@@ -1,0 +1,23 @@
+{# Landing causes: every file of the feed in dq_file, with when DRE first saw it, how many sizes
+   it has been seen with (size_changed), and its raw rows matched on base file name (when the
+   feed has a raw dataset with a file_name_column). #}
+WITH files AS (
+  SELECT path, MIN(first_seen_at) AS first_seen_at, COUNT(DISTINCT size_bytes) AS sizes
+  FROM {{ dq_database }}.dq_file
+  WHERE feed = '{{ feed }}'
+  GROUP BY path
+){% if raw_table %},
+raw_files AS (
+  SELECT regexp_extract({{ file_name_column }}, '([^/]+)$', 1) AS file_name, COUNT(*) AS raw_rows
+  FROM {{ raw_table }}
+{% if feed_filter %}
+  WHERE {{ feed_filter }}
+{% endif %}
+  GROUP BY regexp_extract({{ file_name_column }}, '([^/]+)$', 1)
+){% endif %}
+SELECT f.path, f.first_seen_at, f.sizes,
+       {% if raw_table %}COALESCE(r.raw_rows, 0){% else %}CAST(NULL AS BIGINT){% endif %} AS raw_rows
+FROM files f
+{% if raw_table %}
+LEFT JOIN raw_files r ON r.file_name = regexp_extract(f.path, '([^/]+)$', 1)
+{% endif %}

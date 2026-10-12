@@ -1,0 +1,60 @@
+{# HOP_KEY_CURRENCY. mode judged: every key judged at this hop (hop_common.sql.j2 `judged`), plus
+   the keys not judged and why (key_state PENDING: younger than sla_hours; EXCLUDED: every row
+   kept out by hop_exclusions), and on the full sweep the hop's open keys no longer upstream
+   (GONE); the check materialises it once and reads the other modes from it (`source`).
+   mode summary: population (keys judged), violations (MISSING, STALE or UNASSESSABLE), and the
+   pending and excluded counts. mode events: key events for dq_key_event: FLAGGED (newly MISSING,
+   STALE or UNASSESSABLE), STILL_FLAGGED (still open), CLEARED (open and now CURRENT; on the full
+   sweep, open and no longer upstream). #}
+{% import "hop_common.sql.j2" as hop %}
+{% macro not_judged() %}
+SELECT k, CAST(NULL AS STRING) AS key_hash, 'PENDING' AS key_state,
+       CAST(NULL AS TIMESTAMP) AS up_record_ts, CAST(NULL AS TIMESTAMP) AS up_load_ts,
+       CAST(NULL AS TIMESTAMP) AS dn_record_ts, CAST(NULL AS TIMESTAMP) AS dn_load_ts, FALSE AS was_open
+FROM pending_keys
+UNION ALL
+SELECT k, CAST(NULL AS STRING) AS key_hash, 'EXCLUDED' AS key_state,
+       CAST(NULL AS TIMESTAMP) AS up_record_ts, CAST(NULL AS TIMESTAMP) AS up_load_ts,
+       CAST(NULL AS TIMESTAMP) AS dn_record_ts, CAST(NULL AS TIMESTAMP) AS dn_load_ts, FALSE AS was_open
+FROM excluded_keys
+{% endmacro %}
+{% if mode == "judged" %}
+WITH {{ hop.ctes(p, counts=True) }}
+SELECT k, key_hash, key_state, up_record_ts, up_load_ts, dn_record_ts, dn_load_ts, was_open FROM judged
+UNION ALL
+{{ not_judged() }}
+{% if p.full_sweep %}
+UNION ALL
+SELECT CAST(NULL AS STRING) AS k, o.key_hash, 'GONE' AS key_state,
+       CAST(NULL AS TIMESTAMP) AS up_record_ts, CAST(NULL AS TIMESTAMP) AS up_load_ts,
+       CAST(NULL AS TIMESTAMP) AS dn_record_ts, CAST(NULL AS TIMESTAMP) AS dn_load_ts, TRUE AS was_open
+FROM open_keys o
+LEFT ANTI JOIN hashed_up u ON u.key_hash = o.key_hash
+{% endif %}
+{% else %}
+WITH {% if source %}assessed AS (SELECT * FROM {{ source }}){% else %}{{ hop.ctes(p, counts=True) }},
+assessed AS (
+  SELECT k, key_hash, key_state, up_record_ts, up_load_ts, dn_record_ts, dn_load_ts, was_open FROM judged
+  UNION ALL
+  {{ not_judged() }}
+){% endif %}
+
+{% if mode == "summary" %}
+SELECT SUM(CASE WHEN key_state IN ('MISSING', 'STALE', 'UNASSESSABLE', 'CURRENT') THEN 1 ELSE 0 END) AS population,
+       SUM(CASE WHEN key_state IN ('MISSING', 'STALE', 'UNASSESSABLE') THEN 1 ELSE 0 END) AS violations,
+       SUM(CASE WHEN key_state = 'MISSING' THEN 1 ELSE 0 END) AS missing,
+       SUM(CASE WHEN key_state = 'STALE' THEN 1 ELSE 0 END) AS stale,
+       SUM(CASE WHEN key_state = 'UNASSESSABLE' THEN 1 ELSE 0 END) AS unassessable,
+       SUM(CASE WHEN key_state = 'PENDING' THEN 1 ELSE 0 END) AS pending,
+       SUM(CASE WHEN key_state = 'EXCLUDED' THEN 1 ELSE 0 END) AS excluded
+FROM assessed
+{% else %}
+SELECT key_hash, k AS key_value,
+       CASE WHEN key_state IN ('CURRENT', 'GONE') THEN 'CLEARED'
+            WHEN was_open THEN 'STILL_FLAGGED'
+            ELSE 'FLAGGED' END AS event,
+       CASE WHEN key_state = 'GONE' THEN 'no longer upstream' ELSE key_state END AS state_detail
+FROM assessed
+WHERE key_state NOT IN ('PENDING', 'EXCLUDED') AND (key_state <> 'CURRENT' OR was_open)
+{% endif %}
+{% endif %}

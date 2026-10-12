@@ -1,0 +1,6 @@
+{# table_contains probe: the distinct failure references in a configured table among rows
+   matching its condition: base file names (by file) or key hashes (by key), using the
+   upstream dataset's file name column or mapped key columns. #}
+SELECT DISTINCT {% if by == "file" %}regexp_extract({{ column }}, '([^/]+)$', 1){% else %}{{ hash_fn }}({{ column }}){% endif %} AS ref
+FROM {{ table }}
+WHERE ({{ condition }})

@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Guard tests
+        run: pytest tests/guard
+      - name: Validate sample config
+        run: dre validate --conf conf/
+      - name: All tests
+        run: pytest
+
+  e2e:
+    # dre install and dre run end to end, as separate processes, on both synthetic feeds.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Install
+        run: pip install -e .
+      - name: Build synthetic tables and landing
+        run: mkdir e2e && cd e2e && python ../tests/e2e/build_synthetic.py
+      - name: dre install
+        run: cd e2e && dre install --conf conf --apply
+      - name: dre run
+        run: cd e2e && dre run --conf conf
+      - name: Verify results
+        run: cd e2e && python ../tests/e2e/verify.py
+
+  package:
+    # Build the release artifacts, then run dre through spark-submit from them alone, on a Python
+    # with only PySpark and the dependency wheelhouse installed (as on the cluster's driver host).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Build artifacts
+        run: python scripts/package.py
+      - name: Install the runtime without the dre package
+        run: |
+          pip install pyspark==3.5.1
+          mkdir wheels && unzip -q dist/dre-deps-*.zip -d wheels
+          pip install --no-index --find-links wheels pydantic PyYAML Jinja2
+          ! python -c "import hcsc.datalake.dre"
+      - name: spark-submit validate, install --print and dry-run
+        run: |
+          mkdir run && cd run
+          PYFILES=$(ls ../dist/dre-pyfiles-*.zip)
+          spark-submit --master "local[2]" --py-files "$PYFILES" ../dist/dre_main.py validate --conf ../conf
+          spark-submit --master "local[2]" --py-files "$PYFILES" ../dist/dre_main.py install --conf ../conf --print > ddl.sql
+          grep -q "CREATE TABLE IF NOT EXISTS dq.dq_run" ddl.sql
+          spark-submit --master "local[2]" --py-files "$PYFILES" ../dist/dre_main.py dry-run --conf ../conf --feed provider_roster_monthly | tee dry_run.txt
+          grep -q "dre dry-run: 7 checks evaluated" dry_run.txt

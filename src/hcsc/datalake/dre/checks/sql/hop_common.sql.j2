@@ -1,0 +1,129 @@
+{# Shared CTEs for hop checks. p: parameters from checks/hop/common.py.
+   up / dn: each side's rows (canonical key k, record time, load time, owned columns as strings);
+   up_top / dn_top: rows at each key's latest record time, ties kept (all of a key's rows when none
+   has a record time, so the key is never dropped);
+   judged: the keys judged in this window, with MISSING (no row here), UNASSESSABLE (a side has no
+   usable record time: currency cannot be judged, never passed), STALE, CURRENT, and whether the key was
+   open at this hop: upstream keys at their deadline, keys reloaded here in the window once their
+   upstream deadline has passed, open keys;
+   pending_keys / excluded_keys (with counts=True): what was not judged and why, for the counts in
+   the result; left out elsewhere, since Spark analyses even unused CTEs. #}
+{% macro ctes(p, counts=False) %}
+up AS (
+  SELECT {{ p.up_key }} AS k, {{ p.up_record }} AS record_ts, {{ p.up_load }} AS load_ts
+{% for c in p.owned %}
+       , CAST({{ c.up }} AS STRING) AS u_{{ loop.index }}
+{% endfor %}
+  FROM {{ p.up_table }}
+{% if p.up_filter %}
+  WHERE {{ p.up_filter }}
+{% endif %}
+),
+up_top AS (
+  SELECT * FROM (SELECT up.*, MAX(record_ts) OVER (PARTITION BY k) AS top_ts FROM up) ranked_up
+  WHERE record_ts = top_ts OR top_ts IS NULL
+),
+up_keys AS (
+  SELECT k, MAX(record_ts) AS up_record_ts, MAX(load_ts) AS up_load_ts FROM up_top GROUP BY k
+),
+dn AS (
+  SELECT {{ p.dn_key }} AS k, {{ p.dn_record }} AS record_ts,
+         {% if p.dn_load %}{{ p.dn_load }}{% else %}CAST(NULL AS TIMESTAMP){% endif %} AS load_ts
+{% for c in p.owned %}
+       , CAST({{ c.dn }} AS STRING) AS d_{{ loop.index }}
+{% endfor %}
+  FROM {{ p.dn_table }}
+{% if p.dn_filter %}
+  WHERE {{ p.dn_filter }}
+{% endif %}
+),
+dn_top AS (
+  SELECT * FROM (SELECT dn.*, MAX(record_ts) OVER (PARTITION BY k) AS top_ts FROM dn) ranked_dn
+  WHERE record_ts = top_ts OR top_ts IS NULL
+),
+dn_keys AS (
+  SELECT k, MAX(record_ts) AS dn_record_ts, MAX(load_ts) AS dn_load_ts,
+         MAX(CASE WHEN load_ts >= {{ p.window_start }} AND load_ts < {{ p.window_end }} THEN 1 ELSE 0 END) AS dn_loaded
+  FROM dn GROUP BY k
+),
+open_keys AS (
+{% if p.use_open %}
+  SELECT DISTINCT key_hash FROM {{ p.dq_database }}.v_open_keys
+  WHERE dataset = '{{ p.dataset }}' AND check_id = 'HOP_KEY_CURRENCY' AND hop = '{{ p.hop }}'
+{% else %}
+  SELECT CAST(NULL AS STRING) AS key_hash WHERE 1 = 0
+{% endif %}
+),
+hashed_up AS (
+  SELECT u.*, {% if p.hashed %}{{ p.hash_fn }}(u.k){% else %}CAST(NULL AS STRING){% endif %} AS key_hash
+  FROM up_keys u
+),
+judged AS (
+  SELECT u.k, u.key_hash, u.up_record_ts, u.up_load_ts, d.dn_record_ts, d.dn_load_ts,
+         CASE WHEN d.k IS NULL THEN 'MISSING'
+              WHEN u.up_record_ts IS NULL OR d.dn_record_ts IS NULL THEN 'UNASSESSABLE'
+              WHEN d.dn_record_ts < u.up_record_ts THEN 'STALE'
+              ELSE 'CURRENT' END AS key_state,
+         o.key_hash IS NOT NULL AS was_open
+  FROM hashed_up u
+  LEFT JOIN dn_keys d ON d.k = u.k
+  LEFT JOIN open_keys o ON o.key_hash = u.key_hash
+{% if p.full_sweep %}
+  WHERE u.up_load_ts < {{ p.deadline_end }} OR o.key_hash IS NOT NULL
+{% else %}
+  WHERE (u.up_load_ts >= {{ p.deadline_start }} AND u.up_load_ts < {{ p.deadline_end }})
+     OR (d.dn_loaded = 1 AND u.up_load_ts < {{ p.deadline_end }})
+     OR o.key_hash IS NOT NULL
+{% endif %}
+){% if counts %},
+pending_keys AS (
+  -- upstream keys not judged because their deadline has not passed yet (loaded within sla_hours)
+  SELECT u.k FROM up_keys u LEFT ANTI JOIN judged j ON j.k = u.k
+  WHERE u.up_load_ts >= {{ p.deadline_end }}
+),
+excluded_keys AS (
+  -- upstream keys whose every row a hop exclusion keeps out, in the range judged
+{% if p.up_exclusion %}
+  SELECT k FROM (
+    SELECT {{ p.up_key }} AS k, {{ p.up_load }} AS load_ts,
+           CASE WHEN coalesce(({{ p.up_exclusion }}), FALSE) THEN 1 ELSE 0 END AS excluded
+    FROM {{ p.up_table }}
+{% if p.up_base_filter %}
+    WHERE {{ p.up_base_filter }}
+{% endif %}
+  ) e
+  GROUP BY k
+  HAVING MIN(excluded) = 1
+{% if p.full_sweep %}
+     AND MAX(load_ts) < {{ p.deadline_end }}
+{% else %}
+     AND MAX(load_ts) >= {{ p.deadline_start }} AND MAX(load_ts) < {{ p.deadline_end }}
+{% endif %}
+{% else %}
+  SELECT CAST(NULL AS STRING) AS k WHERE 1 = 0
+{% endif %}
+)
+{% endif %}
+{% endmacro %}
+
+{# Keys judged CURRENT whose owned columns disagree, compared at the grain of the key's latest
+   version: the set of distinct owned-column values among the rows tied at the latest record time,
+   upstream against here (as strings; null and empty string differ). Equal sets agree, whatever
+   the number of tied rows on each side: mismatch = 1 when the sets differ. #}
+{% macro mismatches(p) %}
+up_sets AS (
+  SELECT k, array_sort(collect_set(to_json(named_struct({% for c in p.owned %}'c{{ loop.index }}', u_{{ loop.index }}{% if not loop.last %}, {% endif %}{% endfor %})))) AS vals
+  FROM up_top GROUP BY k
+),
+dn_sets AS (
+  SELECT k, array_sort(collect_set(to_json(named_struct({% for c in p.owned %}'c{{ loop.index }}', d_{{ loop.index }}{% if not loop.last %}, {% endif %}{% endfor %})))) AS vals
+  FROM dn_top GROUP BY k
+),
+per_key AS (
+  SELECT j.k, CASE WHEN u.vals = d.vals THEN 0 ELSE 1 END AS mismatch
+  FROM judged j
+  JOIN up_sets u ON u.k = j.k
+  JOIN dn_sets d ON d.k = j.k
+  WHERE j.key_state = 'CURRENT'
+)
+{% endmacro %}

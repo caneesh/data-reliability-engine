@@ -1,0 +1,9 @@
+# Synthetic raw table loaded from the monthly CSV: no partitions, UTC times.
+dataset: provider_roster_raw
+table: landing_db.provider_roster
+layer: RAW
+key: [provider_id]
+record_time: { column: roster_effective_ts, timezone: UTC }
+load_time: { column: loaded_at, granularity: second, timezone: UTC }
+file_name_column: source_file
+key_unique: true

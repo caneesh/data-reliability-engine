@@ -1,0 +1,13 @@
+# Synthetic: the gold table merged monthly from the provider roster (no files).
+feed: provider_directory_merge
+expectation_version: 1
+pattern: TABLE_MERGE
+owner: provider-data
+cadence:
+  kind: monthly
+  days_of_month: [1]
+  times: ["18:00"]
+  timezone: UTC
+sla_hours: 24
+initial_lookback_hours: 840
+datasets: [provider_directory]

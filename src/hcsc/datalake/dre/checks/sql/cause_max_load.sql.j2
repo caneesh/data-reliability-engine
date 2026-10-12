@@ -1,0 +1,6 @@
+{# NOT_RUN: the latest load time in a dataset (after its feed_filter), UTC. #}
+SELECT MAX({{ load_expr }}) AS max_load
+FROM {{ table }}
+{% if feed_filter %}
+WHERE {{ feed_filter }}
+{% endif %}

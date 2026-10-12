@@ -1,0 +1,10 @@
+{# The latest recorded schema (hash in observed, columns in detail) for this physical table,
+   whichever dataset recorded it. #}
+SELECT observed, detail
+FROM {{ dq_database }}.dq_check_result
+WHERE check_id = 'T1_SCHEMA_DRIFT'
+  AND execution_type = 'NORMAL'
+  AND observed IS NOT NULL
+  AND get_json_object(detail, '$.table') = '{{ table }}'
+ORDER BY evaluated_at DESC
+LIMIT 1

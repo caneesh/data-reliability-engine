@@ -1,0 +1,7 @@
+{# HOP_VALUE_AGREEMENT: for CURRENT keys judged in the window, the set of owned-column values at the
+   latest record time (ties kept) must be the same upstream and here (hop_common.sql.j2 `mismatches`).
+   population = CURRENT keys; violations = keys whose sets differ. #}
+{% import "hop_common.sql.j2" as hop %}
+WITH {{ hop.ctes(p) }},
+{{ hop.mismatches(p) }}
+SELECT COUNT(*) AS population, SUM(mismatch) AS violations FROM per_key

@@ -1,0 +1,16 @@
+{# max_open_rows_per_key: keys with more than max rows matching open_when. population = keys. #}
+SELECT {% for g in group_by %}g_{{ loop.index }}, {% endfor %}
+       COUNT(*) AS population,
+       SUM(CASE WHEN open_rows > {{ max }} THEN 1 ELSE 0 END) AS violations
+FROM (
+  SELECT {{ key_expr }}{% for g in group_by %}, {{ g }} AS g_{{ loop.index }}{% endfor %},
+         SUM(CASE WHEN {{ open_when }} THEN 1 ELSE 0 END) AS open_rows
+  FROM {{ table }}
+{% if feed_filter %}
+  WHERE {{ feed_filter }}
+{% endif %}
+  GROUP BY {{ key_expr }}{% for g in group_by %}, {{ g }}{% endfor %}
+) keys
+{% if group_by %}
+GROUP BY {% for g in group_by %}g_{{ loop.index }}{% if not loop.last %}, {% endif %}{% endfor %}
+{% endif %}

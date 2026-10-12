@@ -1,0 +1,12 @@
+# Synthetic sample: a rule on the table-wide dataset. Gold dates are YYYY-MM-DD
+# (spec section 9).
+rule: coverage_end_date_format
+template: value_format
+dataset: gold_member_coverage_all
+params:
+  column: mbr_mbrshp_covrg_end_dt
+  pattern: '^\d{4}-\d{2}-\d{2}$'
+group_by: [src_sys_nm]
+owner: membership-gold
+status: proposed
+severity: low

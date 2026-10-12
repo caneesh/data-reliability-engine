@@ -1,0 +1,18 @@
+{# column_order: rows where upper < lower. Rows with either value null are left out, unless
+   nulls_fail, when they count as violations. population = rows judged. #}
+SELECT {% for g in group_by %}g_{{ loop.index }}, {% endfor %}
+       COUNT(*) AS population,
+       SUM(CASE WHEN lower_v IS NULL OR upper_v IS NULL OR upper_v < lower_v THEN 1 ELSE 0 END) AS violations
+FROM (
+  SELECT {% for g in group_by %}{{ g }} AS g_{{ loop.index }}, {% endfor %}{{ lower }} AS lower_v, {{ upper }} AS upper_v
+  FROM {{ table }}
+{% if feed_filter %}
+  WHERE {{ feed_filter }}
+{% endif %}
+) pairs
+{% if not nulls_fail %}
+WHERE lower_v IS NOT NULL AND upper_v IS NOT NULL
+{% endif %}
+{% if group_by %}
+GROUP BY {% for g in group_by %}g_{{ loop.index }}{% if not loop.last %}, {% endif %}{% endfor %}
+{% endif %}

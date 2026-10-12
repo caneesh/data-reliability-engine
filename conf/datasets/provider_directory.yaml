@@ -1,0 +1,12 @@
+# Synthetic gold table merged from the raw roster.
+dataset: provider_directory
+table: gold_db.provider_directory
+layer: GOLD
+upstream: [provider_roster_raw]
+key: [provider_id]
+record_time: { column: roster_effective_ts, timezone: UTC }
+load_time: { column: merged_at, granularity: minute, timezone: UTC }
+key_unique: true
+key_map:
+  provider_roster_raw: { provider_id: provider_id }
+owned_columns: { specialty: specialty }

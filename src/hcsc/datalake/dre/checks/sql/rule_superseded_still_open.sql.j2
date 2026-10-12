@@ -1,0 +1,19 @@
+{# superseded_still_open: rows matching open_when while a row in the same group (group_key)
+   has a later order_column. population = open rows. #}
+SELECT {% for g in group_by %}g_{{ loop.index }}, {% endfor %}
+       COUNT(*) AS population,
+       SUM(CASE WHEN order_v < latest_v THEN 1 ELSE 0 END) AS violations
+FROM (
+  SELECT {% for g in group_by %}{{ g }} AS g_{{ loop.index }}, {% endfor %}
+         {{ order }} AS order_v,
+         MAX({{ order }}) OVER (PARTITION BY {{ group_key }}) AS latest_v,
+         CASE WHEN {{ open_when }} THEN 1 ELSE 0 END AS is_open
+  FROM {{ table }}
+{% if feed_filter %}
+  WHERE {{ feed_filter }}
+{% endif %}
+) rows_with_latest
+WHERE is_open = 1
+{% if group_by %}
+GROUP BY {% for g in group_by %}g_{{ loop.index }}{% if not loop.last %}, {% endif %}{% endfor %}
+{% endif %}

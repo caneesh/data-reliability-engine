@@ -1,0 +1,57 @@
+{# The digest body, plain text (spec section 8). d: notify/digest.py Digest. #}
+{{ d.subject }}
+Run {{ d.run_id }}, started {{ d.run_started.strftime("%Y-%m-%d %H:%M") }} UTC, for {{ d.owner }}.
+
+{% if d.changed or d.gone or d.did_not_run %}
+Changed since the last run
+{% for i in d.changed %}
+- {{ i.label }}: {{ i.prev_state or "first result" }} -> {{ i.state }}
+{% if i.state == "FAILED" %}
+    observed: {{ i.observed }}; expected: {{ i.expected }}
+{% if i.rule %}
+    {{ i.change }}
+{% endif %}
+{% for note in i.notes %}
+    {{ note }}
+{% endfor %}
+{% for line in i.causes %}
+    {{ line }}
+{% endfor %}
+{% if i.samples %}
+    sample keys (key_hash): {{ i.samples | join(", ") }}
+{% endif %}
+{% endif %}
+{% endfor %}
+{% for i in d.gone %}
+- {{ i.label }}: not reported this run (was {{ i.prev_state }})
+{% endfor %}
+{% if not d.changed and not d.gone %}
+- none
+{% endif %}
+
+Did not run
+{% for i in d.did_not_run %}
+- {{ i.label }}: {{ i.reason }}
+{% endfor %}
+{% if not d.did_not_run %}
+- none
+{% endif %}
+
+{% endif %}
+{% if d.still_failing %}
+Still failing
+{% for i in d.still_failing %}
+- {{ i.label }}: failing since {{ i.first_failed or "unknown" }}{% if i.rule %}, {{ i.change }}{% endif %}
+
+{% endfor %}
+
+{% endif %}
+{% if d.report_only %}
+Report only (proposed rules)
+{% for i in d.report_only %}
+- {{ i.label }}: {% if i.state == "DID_NOT_RUN" %}DID_NOT_RUN {{ i.reason }}{% else %}{{ i.state }}, {{ i.change }}{% endif %}
+
+{% endfor %}
+
+{% endif %}
+Passing checks: {{ d.passing }}

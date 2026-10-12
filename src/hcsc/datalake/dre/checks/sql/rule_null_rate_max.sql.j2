@@ -1,0 +1,14 @@
+{# null_rate_max: per group, rows and null values of the column, and violations = 1 when the null
+   rate is above max_rate (a DOUBLE literal), else 0. #}
+SELECT {% for g in group_by %}{{ g }} AS g_{{ loop.index }}, {% endfor %}
+       COUNT(*) AS population,
+       SUM(CASE WHEN {{ column }} IS NULL THEN 1 ELSE 0 END) AS nulls,
+       CASE WHEN SUM(CASE WHEN {{ column }} IS NULL THEN 1 ELSE 0 END) / COUNT(*) > {{ max_rate }} THEN 1 ELSE 0 END
+         AS violations
+FROM {{ table }}
+{% if feed_filter %}
+WHERE {{ feed_filter }}
+{% endif %}
+{% if group_by %}
+GROUP BY {% for g in group_by %}{{ g }}{% if not loop.last %}, {% endif %}{% endfor %}
+{% endif %}

@@ -1,0 +1,15 @@
+{# max_rows_per_key: keys (after key_normalise) with more than max rows. population = keys. #}
+SELECT {% for g in group_by %}g_{{ loop.index }}, {% endfor %}
+       COUNT(*) AS population,
+       SUM(CASE WHEN row_count > {{ max }} THEN 1 ELSE 0 END) AS violations
+FROM (
+  SELECT {{ key_expr }}{% for g in group_by %}, {{ g }} AS g_{{ loop.index }}{% endfor %}, COUNT(*) AS row_count
+  FROM {{ table }}
+{% if feed_filter %}
+  WHERE {{ feed_filter }}
+{% endif %}
+  GROUP BY {{ key_expr }}{% for g in group_by %}, {{ g }}{% endfor %}
+) keys
+{% if group_by %}
+GROUP BY {% for g in group_by %}g_{{ loop.index }}{% if not loop.last %}, {% endif %}{% endfor %}
+{% endif %}
