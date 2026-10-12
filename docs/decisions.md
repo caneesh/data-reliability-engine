@@ -211,6 +211,38 @@ The user's answers:
 5. **What else they leave alone.** No `dq_file` registration, no WINDOW_GAP rows, no window moved or held. No gold rules or T1_SCHEMA_DRIFT, which read the table as it is now. No email: the digest reports scheduled runs, and RERUN and REPLAY print their results.
 6. **The watchdog.** `dq_run` gains `execution_type`, and the watchdog counts only NORMAL runs (or rows without the column), so a manual rerun never stands in for a missed scheduled run.
 
+## Code review comments (October 2026 document)
+
+A second review, in an uploaded document, raised four findings and six architecture concerns. Each finding was first reproduced with a test that failed on the code as it was, then fixed.
+
+1. **[HIGH] Latest-time ties gave false value mismatches** (reproduced).
+   - The cause: HOP_VALUE_AGREEMENT compared upstream and downstream rows pairwise, so two identical tied rows on each side mismatched one another.
+   - The fix: the comparison grain is now the key's latest version on each side, as the set of distinct owned-column values among the rows tied at that side's latest record time (as strings; null differs from empty). Identical multi-row versions pass; one changed row fails.
+   - R06 still fails, as it should: gold kept one of two tied upstream versions.
+2. **[HIGH] Null upstream record times hid keys** (reproduced: such a key fell out of the population and the check PASSED).
+   - Such keys are now kept, with a new key state, UNASSESSABLE, which also applies when the downstream side has no record time.
+   - UNASSESSABLE is a violation, written as a key event (`state_detail` UNASSESSABLE), and never given a cause: there is no evidence to explain it with. The observed text counts these keys.
+   - Before, a missing downstream record time was called STALE, which claimed more than the evidence shows.
+3. **[HIGH] A result and its key events were not committed together.** The store is Hive/ORC, append-only, with no transactions across tables. Recovery therefore uses deterministic ids, newest-row-wins views and holding windows:
+   - **Explicit marker.** A result stored without its key events gets a newer row under the same `evaluation_id`: DID_NOT_RUN / PLATFORM / `evidence_incomplete` (a new reason code). The run ends PARTIAL.
+   - **Held windows.** A NORMAL event evaluated by a run that did not finish COMPLETED is held: evaluated again next run, for up to `max_window_hours`. This covers a run that died before even the marker could be written. A result with no run row is not held.
+   - **Tested:** inject the failure after the result write, then retry. The retry gives exactly one current result, on the same held window, with complete key events.
+   - **Bug found by this test:** a dataset's first window, when held, was retried from the initial lookback before the new end, so its start slid forward and that slice was never checked. `release_hold` now starts a held span at its first event's start when there is no good event yet.
+4. **[MEDIUM] Failed cause investigations were invisible.** They are now tracked apart from the checks.
+   - **Recorded:** `dq_run` gains `investigations_expected` and `investigations_done`. The run status stays about checks, so a failed investigation never relabels a check.
+   - **Reported:** the watchdog alerts on an incomplete investigation, and the digest shows `cause: investigation incomplete (the next run retries it)`.
+   - **Retried:** each NORMAL run retries FAILED results from the last `investigation_retry_days` (new setting, default 7) that have no cause rows and are still their check's latest result. Both scans are bounded by `run_date`.
+   - **Never silent:** a FAILED result with nothing to investigate (only UNASSESSABLE keys) gets NOT_READY rows, so it is never pending.
+   - **Tested:** inject a cause-store failure, then retry.
+
+Architecture concerns:
+
+- **Evidence quality.** Every cause line now names its level: confirmed; suspected (every cause check ruled out, so the fallback stands by elimination); or insufficient evidence (a cause check was NOT_READY or ERROR).
+- **Allowed exclusions.** `hop_exclusions` (dataset; per upstream, a SQL condition on the upstream's rows) is the contract for legitimate business-rule exclusions: hop checks do not expect those rows.
+- **End-to-end scenario.** A synthetic test covers two upstreams, an allowed exclusion, a late upstream row and a missing gold key.
+- **Replay semantics.** RERUN and REPLAY are best-effort re-evaluations against today's data, not snapshots; the run prints this.
+- **The rest** is answered in `docs/architecture.md`: zero-touch isolation, multi-source lineage and operational safeguards. That page also lists what is still open: join and aggregate contracts, snapshot reads, and benchmarking the unbounded store reads.
+
 ## Notes for later steps
 
 - **Step 4:** done: `dre dry-run` parses SQL fragments (`config/fragments.py`).

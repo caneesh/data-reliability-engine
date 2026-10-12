@@ -5,6 +5,7 @@ The Data Reliability Engine (DRE) is a read-only engine for data quality checks 
 - Build spec: [`docs/spec.md`](docs/spec.md) (source of truth)
 - Working rules for Claude Code: [`CLAUDE.md`](CLAUDE.md)
 - Open decisions and defaults taken: [`docs/decisions.md`](docs/decisions.md)
+- Guarantees and limits (isolation, reconciliation contracts, lineage, evidence quality, recovery, replay, safeguards): [`docs/architecture.md`](docs/architecture.md)
 - Where the build stands and what is waiting: [`docs/handoff.md`](docs/handoff.md)
 
 ## Development
@@ -84,6 +85,7 @@ Where the spec left a choice open, the engine takes a default and makes it a set
 | `email.smtp_host`, `email.smtp_port`, `email.sender` | null, 25, null | The mail relay; null: digests and watchdog alerts are printed, not sent |
 | `email.all_clear_digest` | `every_run` | An owner's "all clear" digest every run, `daily` (the run in the hour from `rule_run_at`) or `never`; digests with problems are always sent |
 | `watchdog_grace_minutes` | 30 | How long after the hour the watchdog expects that hour's run |
+| `investigation_retry_days` | 7 | How far back each NORMAL run looks for FAILED results whose cause investigation never finished, to retry it |
 | `watchdog_owner` | null | Whose recipients get watchdog alerts; null: every address in `recipients` |
 | `compute_budget_scope` | `check` | `check`: each check gets `compute_budget_minutes`; `dataset`: a dataset's checks share it in a run |
 | `scan_mb_per_minute` | null | Cluster throughput; when set, a check whose estimated scan exceeds its budget is refused before running |

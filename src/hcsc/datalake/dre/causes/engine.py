@@ -39,6 +39,7 @@ BUILTINS = {
     "NO_UPSTREAM_DATA": merge.no_upstream_data,
 }
 NO_SECRET = "hmac_secret_file is not set, so failing keys cannot be referenced"
+NOTHING_TO_EXPLAIN = "no failing item carries the evidence a cause check needs (for example only UNASSESSABLE keys)"
 
 
 def failure_type(pattern: str | None, check_id: str) -> FailureType | None:
@@ -109,6 +110,8 @@ def explain(cx: CauseContext, result: CheckResult, evaluation_id: str, run_id: s
         failures = failures_for(cx, result)
     except Exception as exc:  # the failing things could not be listed: every cause check is ERROR
         failures, listing_error = [Failure(ref=None)], error(exc)
+    if not failures:  # nothing explainable (say, only UNASSESSABLE keys): recorded, never left silent
+        failures, listing_error = [Failure(ref=None)], not_ready(NOTHING_TO_EXPLAIN)
     for failure in failures:
         for order_no, entry in enumerate(ft.order, 1):
             if entry.fallback:
@@ -133,14 +136,24 @@ class CauseLine:
     not_ready: tuple[str, ...] = ()
     errors: tuple[str, ...] = ()
 
+    @property
+    def evidence(self) -> str:
+        """How far the evidence goes: `confirmed` (a cause check proved it); `suspected` (every cause
+        check ran and was ruled out, so the fallback stands by elimination); `insufficient evidence`
+        (some cause check could not be evaluated, so the fallback is not even established)."""
+        if self.proven:
+            return "confirmed"
+        return "insufficient evidence" if self.not_ready or self.errors or not self.ruled_out else "suspected"
+
     def text(self) -> str:
         """The spec's cause line (section 8): `cause: FILE_SKIPPED (confirmed)`, or `cause not proven
-        (DROPPED): ruled out NOT_RUN, INVALID_KEY; not ready FILTERED`, naming the fallback."""
+        (DROPPED, suspected): ruled out NOT_RUN, INVALID_KEY`, or `cause not proven (DROPPED,
+        insufficient evidence): ruled out NOT_RUN; not ready FILTERED`, naming the fallback."""
         if self.proven:
             return f"cause: {self.code} (confirmed)"
         parts = [f"{label} {', '.join(codes)}" for label, codes in
                  (("ruled out", self.ruled_out), ("not ready", self.not_ready), ("error", self.errors)) if codes]
-        return f"cause not proven ({self.code})" + (": " + "; ".join(parts) if parts else "")
+        return f"cause not proven ({self.code}, {self.evidence})" + (": " + "; ".join(parts) if parts else "")
 
 
 def resolve(rows: list[dict[str, Any]], ft: FailureType) -> CauseLine:

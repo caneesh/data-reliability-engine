@@ -1,8 +1,8 @@
 {# HOP_KEY_CURRENCY. mode judged: every key judged at this hop (hop_common.sql.j2 `judged`), and on
    the full sweep the hop's open keys no longer upstream (key_state GONE); the check materialises
    it once and reads the other modes from it (`source`). mode summary: population (keys judged),
-   violations (MISSING or STALE). mode events: key events for dq_key_event: FLAGGED (newly MISSING
-   or STALE), STILL_FLAGGED (still open), CLEARED (open and now CURRENT; on the full sweep, open
+   violations (MISSING, STALE or UNASSESSABLE). mode events: key events for dq_key_event: FLAGGED (newly MISSING,
+   STALE or UNASSESSABLE), STILL_FLAGGED (still open), CLEARED (open and now CURRENT; on the full sweep, open
    and no longer upstream). #}
 {% import "hop_common.sql.j2" as hop %}
 {% if mode == "judged" %}
@@ -23,7 +23,8 @@ WITH {% if source %}judged AS (SELECT * FROM {{ source }}){% else %}{{ hop.ctes(
 SELECT COUNT(*) AS population,
        SUM(CASE WHEN key_state <> 'CURRENT' THEN 1 ELSE 0 END) AS violations,
        SUM(CASE WHEN key_state = 'MISSING' THEN 1 ELSE 0 END) AS missing,
-       SUM(CASE WHEN key_state = 'STALE' THEN 1 ELSE 0 END) AS stale
+       SUM(CASE WHEN key_state = 'STALE' THEN 1 ELSE 0 END) AS stale,
+       SUM(CASE WHEN key_state = 'UNASSESSABLE' THEN 1 ELSE 0 END) AS unassessable
 FROM judged
 WHERE key_state <> 'GONE'
 {% else %}

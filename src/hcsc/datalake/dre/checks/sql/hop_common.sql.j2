@@ -1,7 +1,9 @@
 {# Shared CTEs for hop checks. p: parameters from checks/hop/common.py.
    up / dn: each side's rows (canonical key k, record time, load time, owned columns as strings);
-   up_top / dn_top: rows at each key's latest record time, ties kept;
-   judged: the keys judged in this window, with MISSING / STALE / CURRENT and whether the key was
+   up_top / dn_top: rows at each key's latest record time, ties kept (all of a key's rows when none
+   has a record time, so the key is never dropped);
+   judged: the keys judged in this window, with MISSING (no row here), UNASSESSABLE (a side has no
+   usable record time: currency cannot be judged, never passed), STALE, CURRENT, and whether the key was
    open at this hop: upstream keys at their deadline, keys reloaded here in the window once their
    upstream deadline has passed, open keys. #}
 {% macro ctes(p) %}
@@ -17,7 +19,7 @@ up AS (
 ),
 up_top AS (
   SELECT * FROM (SELECT up.*, MAX(record_ts) OVER (PARTITION BY k) AS top_ts FROM up) ranked_up
-  WHERE record_ts = top_ts
+  WHERE record_ts = top_ts OR top_ts IS NULL
 ),
 up_keys AS (
   SELECT k, MAX(record_ts) AS up_record_ts, MAX(load_ts) AS up_load_ts FROM up_top GROUP BY k
@@ -57,7 +59,8 @@ hashed_up AS (
 judged AS (
   SELECT u.k, u.key_hash, u.up_record_ts, u.up_load_ts, d.dn_record_ts, d.dn_load_ts,
          CASE WHEN d.k IS NULL THEN 'MISSING'
-              WHEN d.dn_record_ts IS NULL OR d.dn_record_ts < u.up_record_ts THEN 'STALE'
+              WHEN u.up_record_ts IS NULL OR d.dn_record_ts IS NULL THEN 'UNASSESSABLE'
+              WHEN d.dn_record_ts < u.up_record_ts THEN 'STALE'
               ELSE 'CURRENT' END AS key_state,
          o.key_hash IS NOT NULL AS was_open
   FROM hashed_up u
@@ -73,15 +76,24 @@ judged AS (
 )
 {% endmacro %}
 
-{# Keys judged CURRENT whose owned columns disagree with any upstream row at the latest record
-   time (null-safe, as strings): mismatch = 1. #}
+{# Keys judged CURRENT whose owned columns disagree, compared at the grain of the key's latest
+   version: the set of distinct owned-column values among the rows tied at the latest record time,
+   upstream against here (as strings; null and empty string differ). Equal sets agree, whatever
+   the number of tied rows on each side: mismatch = 1 when the sets differ. #}
 {% macro mismatches(p) %}
+up_sets AS (
+  SELECT k, array_sort(collect_set(to_json(named_struct({% for c in p.owned %}'c{{ loop.index }}', u_{{ loop.index }}{% if not loop.last %}, {% endif %}{% endfor %})))) AS vals
+  FROM up_top GROUP BY k
+),
+dn_sets AS (
+  SELECT k, array_sort(collect_set(to_json(named_struct({% for c in p.owned %}'c{{ loop.index }}', d_{{ loop.index }}{% if not loop.last %}, {% endif %}{% endfor %})))) AS vals
+  FROM dn_top GROUP BY k
+),
 per_key AS (
-  SELECT u.k,
-         MAX(CASE WHEN {% for c in p.owned %}NOT (u.u_{{ loop.index }} <=> d.d_{{ loop.index }}){% if not loop.last %} OR {% endif %}{% endfor %} THEN 1 ELSE 0 END) AS mismatch
-  FROM up_top u
-  JOIN dn_top d ON d.k = u.k
-  JOIN judged j ON j.k = u.k AND j.key_state = 'CURRENT'
-  GROUP BY u.k
+  SELECT j.k, CASE WHEN u.vals = d.vals THEN 0 ELSE 1 END AS mismatch
+  FROM judged j
+  JOIN up_sets u ON u.k = j.k
+  JOIN dn_sets d ON d.k = j.k
+  WHERE j.key_state = 'CURRENT'
 )
 {% endmacro %}

@@ -22,7 +22,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -34,6 +34,7 @@ from hcsc.datalake.dre.checks.events import (
     replay_windows, window_for, window_histories,
 )
 from hcsc.datalake.dre.checks.registry import checks_for
+from hcsc.datalake.dre.checks.times import as_utc
 from hcsc.datalake.dre.config.loader import Config, ConfigError
 from hcsc.datalake.dre.config.validate import validate_conf
 from hcsc.datalake.dre.store import runs
@@ -323,20 +324,27 @@ def refresh_landing(spark: SparkSession, config: Config, work: list[Planned], ru
     return problems
 
 
-def evaluate(spark: SparkSession, config: Config, planned: Planned, event: Event,
-             landing_problems: dict[str, CheckResult] | None = None, key_secret: bytes | None = None,
-             budget_minutes: float | None = None, record_key_events: bool = True) -> Evaluation:
+def check_context(spark: SparkSession, config: Config, planned: Planned, event: Event,
+                  landing_problems: dict[str, CheckResult] | None = None, key_secret: bytes | None = None,
+                  budget_minutes: float | None = None, record_key_events: bool = True) -> CheckContext:
     ds = planned.dataset
-    settings = config.dataset_settings(ds.dataset)
     landing_problem = (landing_problems or {}).get(planned.feed.feed) if planned.feed else None
-    ctx = CheckContext(
-        spark, ds, planned.feed, settings, config.defaults.timezone, config.defaults.dq_database, landing_problem,
+    return CheckContext(
+        spark, ds, planned.feed, config.dataset_settings(ds.dataset), config.defaults.timezone,
+        config.defaults.dq_database, landing_problem,
         upstreams={u: config.datasets[u] for u in ds.key_map if u in config.datasets},
         key_secret=key_secret,
         full_sweep=is_full_sweep(config, ds.dataset, event),
         budget_minutes=budget_minutes, scan_mb_per_minute=config.defaults.scan_mb_per_minute,
         record_key_events=record_key_events,
     )
+
+
+def evaluate(spark: SparkSession, config: Config, planned: Planned, event: Event,
+             landing_problems: dict[str, CheckResult] | None = None, key_secret: bytes | None = None,
+             budget_minutes: float | None = None, record_key_events: bool = True) -> Evaluation:
+    ctx = check_context(spark, config, planned, event, landing_problems, key_secret, budget_minutes,
+                        record_key_events)
     results, duration_ms = run_check(planned.check, ctx, event)
     return Evaluation(planned, event, results, datetime.now(timezone.utc), duration_ms, ctx)
 
@@ -363,6 +371,22 @@ def result_rows(evaluation: Evaluation, run: runs.Run, execution_type: str) -> l
     ]
 
 
+def incomplete_rows(evaluation: Evaluation, rows: list[dict[str, Any]], now: datetime) -> list[dict[str, Any]]:
+    """For results stored without their key events: a DID_NOT_RUN / PLATFORM / evidence_incomplete row
+    under the same evaluation_id, newer than the result, so the current state says the evidence is
+    incomplete and the window is held and evaluated again (spec section 4)."""
+    marked = []
+    for result, row in zip(evaluation.results, rows):
+        if result.key_events is None:
+            continue
+        marked.append({**row, "state": "DID_NOT_RUN", "reason_category": "PLATFORM",
+                       "reason_code": "evidence_incomplete", "population": None, "violations": None,
+                       "observed": f"{row['state']} result stored; its key events were not",
+                       "expected": "the result and its key events stored together", "evaluated_at": now,
+                       "detail": "the window is held and evaluated again"})
+    return marked
+
+
 def write_key_events(db: str, evaluation: Evaluation, rows: list[dict[str, Any]], run: runs.Run) -> None:
     """Append each result's key events (hop checks) with the result's evaluation id."""
     from hcsc.datalake.dre.checks.hop.common import hop_label
@@ -375,10 +399,21 @@ def write_key_events(db: str, evaluation: Evaluation, rows: list[dict[str, Any]]
                               row["check_id"], hop, row["evaluated_at"], run.run_date)
 
 
+@dataclass
+class Investigations:
+    """A run's cause investigations, tracked apart from its checks: one per FAILED result with a
+    cause pattern; done once its dq_cause_result rows are stored."""
+
+    expected: int = 0
+    done: int = 0
+
+
 def explain_failures(spark: SparkSession, config: Config, evaluation: Evaluation, rows: list[dict[str, Any]],
-                     run: runs.Run) -> list[str]:
+                     run: runs.Run, tally: Investigations | None = None) -> list[str]:
     """Run the cause engine for each FAILED result, append its dq_cause_result rows, and return
-    one line per resolved cause (codes and counts only, hard rule 6)."""
+    one line per resolved cause (codes and counts only, hard rule 6). A failed investigation
+    never stops the run or changes the check: it is counted in `tally` as not done, reported by
+    the watchdog and retried by the next NORMAL run (retry_investigations)."""
     from collections import Counter
 
     from hcsc.datalake.dre.causes.base import CauseContext
@@ -395,15 +430,64 @@ def explain_failures(spark: SparkSession, config: Config, evaluation: Evaluation
             continue
         upstream = result.group_values.get("upstream") if p.check.check_id.startswith("HOP_") else None
         cx = CauseContext(evaluation.ctx, evaluation.event, config, p.check.check_id, upstream)
+        if tally is not None:
+            tally.expected += 1
         try:
             cause_rows = explain(cx, result, row["evaluation_id"], run.run_id, run.run_date,
                                  datetime.now(timezone.utc))
             append_cause_results(spark, config.defaults.dq_database, cause_rows)
-        except Exception as exc:  # causes never stop the run
+        except Exception as exc:  # causes never stop the run; the next run retries
             log.error("could not explain %s for %s: %s", p.check.check_id, p.dataset.dataset, error_detail(exc))
+            lines.append(f"  cause investigation incomplete ({type(exc).__name__}); the next run retries it")
             continue
+        if tally is not None:
+            tally.done += 1
         counts = Counter(line.text() for line in summarise(cause_rows, ft).values())
         lines += [f"  {text} [{n} failing]" for text, n in sorted(counts.items())]
+    return lines
+
+
+def pending_investigations(spark: SparkSession, config: Config, since: date,
+                           skip: set[str]) -> list[dict[str, Any]]:
+    """FAILED NORMAL results since `since` that are still their check's (and group's) latest result
+    and have no dq_cause_result rows: investigations a run could not finish. Both scans are bounded
+    by run_date."""
+    from hcsc.datalake.dre.notify.digest import GROUPS_SQL
+
+    db = config.defaults.dq_database
+    day = f"DATE'{since.isoformat()}'"
+    rows = spark.sql(
+        f"SELECT r.* FROM (SELECT d.*, ROW_NUMBER() OVER (PARTITION BY dataset, check_id, {GROUPS_SQL} "
+        f"  ORDER BY window_end DESC, evaluated_at DESC, run_id DESC) AS rn "
+        f"  FROM {db}.dq_check_result d WHERE run_date >= {day} AND execution_type = 'NORMAL') r "
+        f"LEFT ANTI JOIN (SELECT DISTINCT evaluation_id FROM {db}.dq_cause_result WHERE run_date >= {day}) c "
+        f"  ON c.evaluation_id = r.evaluation_id "
+        f"WHERE r.rn = 1 AND r.state = 'FAILED'").collect()
+    return [r.asDict() for r in rows if r.evaluation_id not in skip]
+
+
+def retry_investigations(spark: SparkSession, config: Config, run: runs.Run, key_secret: bytes | None,
+                         tally: Investigations, skip: set[str]) -> list[str]:
+    """Explain again, against the data as it is now, the FAILED results whose investigation a run
+    could not finish (pending_investigations). Each counts in this run's tally."""
+    from hcsc.datalake.dre.causes.engine import failure_type
+
+    since = run.run_date - timedelta(days=config.defaults.investigation_retry_days)
+    by_check = {(p.dataset.dataset, p.check.check_id, p.feed.feed if p.feed else None): p
+                for p in plan(config, per_table=False)}
+    lines = []
+    for row in pending_investigations(spark, config, since, skip):
+        planned = by_check.get((row["dataset"], row["check_id"], row["feed"]))
+        if planned is None or failure_type(planned.feed.pattern if planned.feed else None,
+                                           planned.check.check_id) is None:
+            continue
+        event = Event(row["dataset"], as_utc(row["window_start"]), as_utc(row["window_end"]))
+        result = CheckResult("FAILED", row["population"], row["violations"], row["observed"], row["expected"],
+                             group_values=dict(row["group_values"] or {}), detail=row["detail"])
+        ctx = check_context(spark, config, planned, event, key_secret=key_secret, record_key_events=False)
+        evaluation = Evaluation(planned, event, [result], datetime.now(timezone.utc), 0, ctx)
+        explained = explain_failures(spark, config, evaluation, [row], run, tally)
+        lines += [f"{row['dataset']} {row['check_id']}: cause investigation retried"] + explained
     return lines
 
 
@@ -558,6 +642,8 @@ def run(spark: SparkSession, conf: str, feed_id: str | None = None, selection: S
     normal = kind == "NORMAL"
     run_record = runs.start_run(spark, db, conf_dir=conf, execution_type=kind)
     written = expected = 0
+    investigations = Investigations()
+    explained: set[str] = set()  # evaluation ids this run already investigated
     try:
         planned_all = plan(config, feed_id, per_table=False)
         gap_rows: list[GapRow] = []
@@ -565,6 +651,8 @@ def run(spark: SparkSession, conf: str, feed_id: str | None = None, selection: S
             jobs, landing, gap_rows = normal_jobs(spark, config, planned_all, run_record, feed_id)
             stored: dict[str, tuple[Any, ...]] = {}
         else:
+            print(f"note: a {kind} reads the tables as they are now, not as they were in the window; rows "
+                  "changed or purged since are not seen (a best-effort re-evaluation, not a snapshot)")
             jobs, landing = historical_jobs(spark, config, planned_all, selection, feed_id, run_record.started_at)
             stored = stored_outcomes(spark, db, [event.event_id for _, event in jobs])
         expected = len(jobs) + len(gap_rows)
@@ -602,20 +690,35 @@ def run(spark: SparkSession, conf: str, feed_id: str | None = None, selection: S
                 except Exception as exc:
                     log.error("could not write the key events of %s for %s: %s", planned.check.check_id, ds_id,
                               error_detail(exc))
-            for line in describe(evaluation) + explain_failures(spark, config, evaluation, rows, run_record):
+                    try:  # say so explicitly; the run is PARTIAL either way, which also holds the window
+                        append_check_results(spark, db, incomplete_rows(evaluation, rows,
+                                                                        datetime.now(timezone.utc)))
+                    except Exception as marker_exc:
+                        log.error("could not mark %s incomplete: %s", planned.check.check_id,
+                                  error_detail(marker_exc))
+            explained.update(r["evaluation_id"] for r in rows)
+            for line in describe(evaluation) + explain_failures(spark, config, evaluation, rows, run_record,
+                                                                investigations):
                 print(line)
             drop_judged_views(spark, evaluation)
+        if normal:
+            for line in retry_investigations(spark, config, run_record, key_secret, investigations, explained):
+                print(line)
     except Exception as exc:
         log.error("run %s failed: %s", run_record.run_id, error_detail(exc))
-        runs.finish_run(spark, db, run_record, expected, written, failed=True)
+        runs.finish_run(spark, db, run_record, expected, written, failed=True,
+                        investigations=(investigations.expected, investigations.done))
         return EXIT_PARTIAL
     if normal:
         for line in email_digests(spark, config, run_record):
             print(line)
     else:
         print(f"email: not sent for a {kind} run (digests report scheduled runs)")
-    status = runs.finish_run(spark, db, run_record, expected, written)
-    print(f"dre run: {status}, {written} of {expected} checks written ({kind} run {run_record.run_id})")
+    status = runs.finish_run(spark, db, run_record, expected, written,
+                             investigations=(investigations.expected, investigations.done))
+    incomplete = investigations.expected - investigations.done
+    note = f"; {incomplete} cause investigation(s) incomplete, retried next run" if incomplete else ""
+    print(f"dre run: {status}, {written} of {expected} checks written{note} ({kind} run {run_record.run_id})")
     return EXIT_COMPLETED if status == runs.COMPLETED else EXIT_PARTIAL
 
 

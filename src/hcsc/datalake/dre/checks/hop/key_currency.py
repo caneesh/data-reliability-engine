@@ -2,9 +2,10 @@
 
 For each upstream key judged in the window, the latest upstream record time (rows tied at
 it kept) against this dataset's latest record time for the mapped key: MISSING (no row
-here), STALE (older here) or CURRENT. Population: keys judged; violations: MISSING or
-STALE. One result per upstream (group `upstream`). Key events (FLAGGED, STILL_FLAGGED,
-CLEARED) go to dq_key_event, per hop, when an HMAC secret is configured, in NORMAL runs only:
+here), UNASSESSABLE (no usable record time on a side, so currency cannot be judged: a
+violation, never passed, and given no cause), STALE (older here) or CURRENT. Population:
+keys judged; violations: MISSING, STALE or UNASSESSABLE. One result per upstream (group
+`upstream`). Key events (FLAGGED, STILL_FLAGGED, CLEARED) go to dq_key_event, per hop, when an HMAC secret is configured, in NORMAL runs only:
 a RERUN or REPLAY of a historical window judges the keys that window owns (at their deadline,
 or reloaded in it) without reading or changing the open-key state.
 
@@ -59,7 +60,9 @@ class KeyCurrency(Check):
         row = ctx.spark.sql(render_sql("hop_key_currency.sql.j2", p=params, mode="summary", source=view)).collect()[0]
         result = from_counts(
             row.population, row.violations,
-            observed=f"{row.missing or 0} missing and {row.stale or 0} stale of {row.population} keys",
+            observed=(f"{row.missing or 0} missing, {row.stale or 0} stale and {row.unassessable} unassessable "
+                      f"(no record time) of {row.population} keys" if row.unassessable else
+                      f"{row.missing or 0} missing and {row.stale or 0} stale of {row.population} keys"),
             expected="every upstream key present at its latest version",
             group_values={"upstream": up_id},
         )

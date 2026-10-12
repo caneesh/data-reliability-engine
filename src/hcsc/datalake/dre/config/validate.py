@@ -172,6 +172,10 @@ def cross_check(config: Config, feeds_complete: bool = True) -> list[ConfigError
             if col not in key:
                 err("dataset", ds_id, ("mismatch_probe_drop", i), f"{col!r} is not a key column",
                     "list key columns only")
+        for up_id in ds.hop_exclusions:
+            if up_id not in ds.key_map:
+                err("dataset", ds_id, ("hop_exclusions", up_id), f"{up_id!r} is not an upstream in key_map",
+                    "give exclusions only for the upstreams this dataset's key_map maps")
         if ds.winner_rule is not None:
             ordered = {term.split()[0] for term in ds.winner_rule.order_by}
             for col in ds.winner_rule.formats:

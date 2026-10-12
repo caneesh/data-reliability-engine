@@ -6,8 +6,9 @@ its end.
 
 - window_end = the run's start minus settle_minutes and the feed's check_delay_minutes.
 - window_start = the latest window_end among the dataset's NORMAL events,
-  skipping events that had any check DID_NOT_RUN for a PLATFORM or BUDGET reason
-  (those windows are held: evaluated again); on a dataset's first run, window_end
+  skipping events that had any check DID_NOT_RUN for a PLATFORM or BUDGET reason, or that
+  were evaluated by a run that did not finish COMPLETED (those windows are held: evaluated
+  again, so evidence a broken run could not store is recovered); on a dataset's first run, window_end
   minus initial_lookback_hours. CONFIGURATION reasons never hold a window.
 - A hold lasts at most max_window_hours, counted from the end of the first held
   event. Then the held span is given up: one WINDOW_GAP result (DID_NOT_RUN /
@@ -103,15 +104,21 @@ def window_histories(spark: SparkSession, dq_database: str, datasets: list[str])
     if not spark.catalog.tableExists(f"{dq_database}.dq_check_result"):
         return found
     blocking = ", ".join(f"'{c}'" for c in BLOCKING_CATEGORIES)
+    # A run that did not finish COMPLETED (PARTIAL, FAILED, or died while STARTED) may not have
+    # stored all its evidence: its events are held too. A result with no run row is not held.
+    incomplete = "coalesce(u.status, 'COMPLETED') <> 'COMPLETED'"
     rows = spark.sql(
         f"WITH events AS ("
-        f"  SELECT dataset, event_id, MIN(window_start) AS window_start, MAX(window_end) AS window_end,"
-        f"         MAX(CASE WHEN state = 'DID_NOT_RUN' AND reason_category IN ({blocking}) THEN 1 ELSE 0 END) AS held,"
-        f"         collect_set(CASE WHEN state = 'DID_NOT_RUN' AND reason_category IN ({blocking})"
-        f"                          THEN reason_code END) AS held_by"
-        f"  FROM {dq_database}.dq_check_result"
-        f"  WHERE dataset IN ({names}) AND execution_type = 'NORMAL' AND severity IS NULL"
-        f"  GROUP BY dataset, event_id"
+        f"  SELECT r.dataset, r.event_id, MIN(r.window_start) AS window_start, MAX(r.window_end) AS window_end,"
+        f"         MAX(CASE WHEN (r.state = 'DID_NOT_RUN' AND r.reason_category IN ({blocking})) OR {incomplete}"
+        f"                  THEN 1 ELSE 0 END) AS held,"
+        f"         collect_set(CASE WHEN r.state = 'DID_NOT_RUN' AND r.reason_category IN ({blocking})"
+        f"                          THEN r.reason_code"
+        f"                          WHEN {incomplete} THEN concat('run_', lower(u.status)) END) AS held_by"
+        f"  FROM {dq_database}.dq_check_result r"
+        f"  LEFT JOIN {dq_database}.v_latest_run u ON u.run_id = r.run_id"
+        f"  WHERE r.dataset IN ({names}) AND r.execution_type = 'NORMAL' AND r.severity IS NULL"
+        f"  GROUP BY r.dataset, r.event_id"
         f"), good AS (SELECT dataset, MAX(CASE WHEN held = 0 THEN window_end END) AS previous_end"
         f"            FROM events GROUP BY dataset) "
         f"SELECT g.dataset, g.previous_end, MIN(e.window_start) AS held_start, MIN(e.window_end) AS first_held_end,"
@@ -145,7 +152,9 @@ def release_hold(history: WindowHistory, dataset: str, window_end: datetime,
     if history.first_held_end is None:
         return history.previous_end, None
     if as_utc(window_end) - history.first_held_end < timedelta(hours=max_window_hours):
-        return history.previous_end, None
+        # held: start where the held span starts (its first event's start when the dataset has no
+        # good event yet, so a held first window is not re-anchored by the lookback and narrowed)
+        return history.previous_end or history.held_start, None
     start = history.previous_end or history.held_start
     return history.last_held_end, Event(dataset, start, history.last_held_end)
 

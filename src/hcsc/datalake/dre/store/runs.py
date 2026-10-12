@@ -26,8 +26,8 @@ STARTED, COMPLETED, PARTIAL, FAILED = "STARTED", "COMPLETED", "PARTIAL", "FAILED
 
 _SCHEMA = (
     "run_id STRING, started_at TIMESTAMP, ended_at TIMESTAMP, engine_version STRING, "
-    "config_commit STRING, status STRING, checks_expected INT, checks_written INT, execution_type STRING, "
-    "run_date DATE"
+    "config_commit STRING, status STRING, checks_expected INT, checks_written INT, "
+    "investigations_expected INT, investigations_done INT, execution_type STRING, run_date DATE"
 )
 
 
@@ -91,18 +91,24 @@ def finish_run(
     checks_written: int,
     failed: bool = False,
     now: datetime | None = None,
+    investigations: tuple[int, int] = (0, 0),
 ) -> str:
-    """Append the run's final row; return its status."""
+    """Append the run's final row; return its status. The status is about checks only; cause
+    investigations (expected, done) are recorded beside it, so an investigation that could not
+    finish never relabels a check, and the watchdog reports it."""
     status = run_status(checks_expected, checks_written, failed)
-    _append(spark, dq_database, run, now or datetime.now(timezone.utc), status, checks_expected, checks_written)
+    _append(spark, dq_database, run, now or datetime.now(timezone.utc), status, checks_expected, checks_written,
+            investigations)
     return status
 
 
 def _append(
     spark: SparkSession, dq_database: str, run: Run, ended_at: datetime | None, status: str,
     checks_expected: int | None, checks_written: int | None,
+    investigations: tuple[int, int] | None = None,
 ) -> None:
     validate_dq_database(dq_database)
+    expected, done = investigations if investigations is not None else (None, None)
     row = (run.run_id, run.started_at, ended_at, run.engine_version, run.config_commit, status,
-           checks_expected, checks_written, run.execution_type, run.run_date)
+           checks_expected, checks_written, expected, done, run.execution_type, run.run_date)
     writer.append(spark.createDataFrame([row], _SCHEMA), dq_database, "dq_run")

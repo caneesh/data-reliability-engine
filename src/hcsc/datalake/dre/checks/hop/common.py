@@ -6,7 +6,8 @@ Keys judged in a window: upstream keys whose latest load time + sla_hours falls 
 window (judged once, at their deadline); keys with a row here loaded in the window whose
 upstream deadline has passed (so a key that regresses here without an upstream change is
 judged again); and keys still open in v_open_keys. On the full sweep day, every upstream
-key past its deadline.
+key past its deadline. Upstream rows matching the dataset's hop_exclusions for the upstream
+are a business filter: hop checks do not expect them here, so they are never counted as lost.
 """
 
 from __future__ import annotations
@@ -65,8 +66,10 @@ def hop_params(ctx: CheckContext, event: Event, up_id: str, up: Dataset | None) 
     tz = ctx.default_timezone
     sla = timedelta(hours=ctx.settings.sla_hours)
     owned = [{"up": column_expr(up, u), "dn": column_expr(ds, d)} for u, d in ds.owned_columns.items()]
+    filters = [f"({up.feed_filter})" if up.feed_filter else None,
+               f"NOT coalesce(({ds.hop_exclusions[up_id]}), FALSE)" if up_id in ds.hop_exclusions else None]
     return {
-        "up_table": up.table, "up_filter": up.feed_filter,
+        "up_table": up.table, "up_filter": " AND ".join(f for f in filters if f) or None,
         "up_key": key_string([column_expr(up, mapping[c]) for c in ds.key]),
         "up_record": utc_expr(up.record_time, tz), "up_load": utc_expr(up.load_time, tz),
         "up_file": up.file_name_column,

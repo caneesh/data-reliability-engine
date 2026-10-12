@@ -1,6 +1,6 @@
-{# HOP_VALUE_AGREEMENT: for CURRENT keys judged in the window, every upstream row at the latest
-   record time (ties kept) must agree with this dataset's latest row on each owned column
-   (null-safe, compared as strings). population = CURRENT keys; violations = keys with a mismatch. #}
+{# HOP_VALUE_AGREEMENT: for CURRENT keys judged in the window, the set of owned-column values at the
+   latest record time (ties kept) must be the same upstream and here (hop_common.sql.j2 `mismatches`).
+   population = CURRENT keys; violations = keys whose sets differ. #}
 {% import "hop_common.sql.j2" as hop %}
 WITH {{ hop.ctes(p) }},
 {{ hop.mismatches(p) }}

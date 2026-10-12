@@ -4,7 +4,7 @@ Run 00000000-0000-0000-0000-000000000003, started 2026-01-16 12:05 UTC, for memb
 Changed since the last run
 - example_curated_enrollment HOP_FILE_COMPLETENESS [upstream=example_raw_enrollment]: first result -> FAILED
     observed: 1 of 4 upstream files have fewer rows here; expected: every upstream row of each file present here
-    cause not proven (DROPPED): ruled out NOT_RUN, FILE_SKIPPED, INVALID_KEY; not ready FILTERED, REJECTED
+    cause not proven (DROPPED, insufficient evidence): ruled out NOT_RUN, FILE_SKIPPED, INVALID_KEY; not ready FILTERED, REJECTED
 - example_curated_enrollment T1_KEY_DUPLICATES: FAILED -> PASSED
 - gold_member_coverage HOP_KEY_CURRENCY [upstream=example_curated_enrollment]: PASSED -> FAILED
     observed: 0 missing and 1 stale of 1 keys; expected: every upstream key present at its latest version

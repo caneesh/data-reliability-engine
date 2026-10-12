@@ -8,7 +8,9 @@ writes nothing.
 The expected run is the hour H = (now - watchdog_grace_minutes) floored to the hour. Alerts:
 - no NORMAL dq_run row started in [H, H + 1 hour) (a manual RERUN or REPLAY is not the scheduled run);
 - a run started then whose latest row is still STARTED more than the grace after it started;
-- a run started then that ended FAILED, or wrote fewer checks than it expected.
+- a run started then that ended FAILED, or wrote fewer checks than it expected;
+- a run started then whose cause investigations did not all finish (tracked apart from its
+  checks, so the checks keep their states; the next run retries the investigations).
 Alerts go to watchdog_owner's recipients, or every address in recipients when it is not set.
 Exit 0 healthy, 1 alert raised (sent, or printed when no mail relay is configured).
 """
@@ -36,6 +38,8 @@ class RunRow:
     checks_expected: int | None = None
     checks_written: int | None = None
     ended_at: datetime | None = None
+    investigations_expected: int | None = None
+    investigations_done: int | None = None
 
 
 def _utc(value: datetime) -> datetime:
@@ -72,6 +76,10 @@ def problems(rows: list[RunRow], now: datetime, grace_minutes: int) -> list[str]
         if last.status == "FAILED" or written < expected:
             found.append(f"run {run_id} (started {started:%H:%M} UTC) ended {last.status}: "
                          f"{written} of {expected} checks written")
+        wanted, done = last.investigations_expected or 0, last.investigations_done or 0
+        if done < wanted:
+            found.append(f"run {run_id} (started {started:%H:%M} UTC): {wanted - done} of {wanted} cause "
+                         f"investigations incomplete (the next run retries them)")
     return found
 
 
@@ -79,9 +87,10 @@ def read_runs(spark: SparkSession, dq_database: str, since: datetime) -> list[Ru
     dq_database = validate_dq_database(dq_database)
     stamp = _utc(since).strftime("%Y-%m-%d %H:%M:%S")
     return [RunRow(r.run_id, _utc(r.started_at), r.status, r.checks_expected, r.checks_written,
-                   _utc(r.ended_at) if r.ended_at else None)
+                   _utc(r.ended_at) if r.ended_at else None, r.investigations_expected, r.investigations_done)
             for r in spark.sql(
-                f"SELECT run_id, started_at, ended_at, status, checks_expected, checks_written "
+                f"SELECT run_id, started_at, ended_at, status, checks_expected, checks_written, "
+                f"investigations_expected, investigations_done "
                 f"FROM {dq_database}.dq_run WHERE started_at >= TIMESTAMP '{stamp}' "
                 f"AND coalesce(execution_type, 'NORMAL') = 'NORMAL'").collect()]
 

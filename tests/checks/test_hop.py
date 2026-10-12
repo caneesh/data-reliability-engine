@@ -363,3 +363,63 @@ def test_key_events_keep_key_value_in_the_store_only(spark) -> None:
     [row] = spark.sql(f"SELECT key_value, run_date FROM {DQ}.dq_key_event WHERE dataset = '{dn.dataset}'").collect()
     assert (row.key_value, row.run_date) == (KEY, date(2026, 1, 16))
     assert KEY not in f"{r.observed} {r.expected} {r.detail}"
+
+
+# --- latest-time ties and null record times (code review, October 2026) ---
+
+def test_value_agreement_compares_the_tied_latest_rows_as_sets(spark) -> None:
+    """Finding 1: two identical multi-row populations tied at the latest time pass; one changed row fails."""
+    tied_up = [curated_row(updated=IN_WINDOW, end="2026-06-30"), curated_row(updated=IN_WINDOW, end="2026-12-31")]
+    up, dn = tables(spark, "va_tie_ok", tied_up, [gold_row(record=IN_WINDOW, end="2026-06-30"),
+                                                  gold_row(record=IN_WINDOW, end="2026-12-31")])
+    [r] = run(spark, ValueAgreement(), dn, up)
+    assert (r.state, r.population, r.violations) == ("PASSED", 1, 0)
+    up, dn = tables(spark, "va_tie_bad", tied_up, [gold_row(record=IN_WINDOW, end="2026-06-30"),
+                                                   gold_row(record=IN_WINDOW, end="2027-01-31")])
+    [r] = run(spark, ValueAgreement(), dn, up)
+    assert (r.state, r.population, r.violations) == ("FAILED", 1, 1)
+
+
+RECORD_COLUMNS = [*CURATED_COLUMNS, ("record_ts", "TIMESTAMP")]
+
+
+def test_a_key_whose_upstream_record_times_are_all_null_is_unassessable_not_hidden(spark) -> None:
+    """Finding 2: the key stays in the judgement with an explicit state, never silently passed."""
+    rows = [{**curated_row(sub_id="1", updated=IN_WINDOW), "record_ts": None},             # no record time
+            {**curated_row(sub_id="2", updated=IN_WINDOW), "record_ts": IN_WINDOW}]
+    create_table(spark, "hop.kc_nullrec_cur", RECORD_COLUMNS, rows)
+    create_table(spark, "hop.kc_nullrec_gold", GOLD_COLUMNS,
+                 [gold_row(sub_id="0001", record=IN_WINDOW), gold_row(sub_id="0002", record=IN_WINDOW)])
+    up = curated("hop.kc_nullrec_cur", record_time=TimeColumn(column="record_ts", timezone="UTC"))
+    dn = gold("hop.kc_nullrec_gold", dataset="gold_kc_nullrec")
+    [r] = run(spark, KeyCurrency(), dn, up, secret=SECRET)
+    assert (r.state, r.population, r.violations) == ("FAILED", 2, 1)
+    assert r.observed == "0 missing, 0 stale and 1 unassessable (no record time) of 2 keys"
+    assert events_of(r) == [(key_hash(SECRET, "1|01|2026-01-01|AGR-A"), "FLAGGED", "UNASSESSABLE",
+                             "1|01|2026-01-01|AGR-A")]
+
+
+def test_a_synthetic_pipeline_with_two_upstreams_exclusions_late_data_and_a_missing_key(spark) -> None:
+    """Code review (October 2026), P1: one gold dataset fed by two upstreams.
+    curated_a: key 1 reached gold; key 2 is a test member a business rule excludes (not data loss);
+    key 3 never reached gold (MISSING); key 4 arrived late upstream, so it is not yet due (not judged).
+    curated_b: key 1 only, same version as gold. Each hop is judged on its own."""
+    late = datetime(2026, 1, 16, 9, 0)  # loaded upstream after the window's deadline range
+    a, b, dn = two_upstreams(
+        spark, "pipeline",
+        [curated_row(sub_id="1", updated=IN_WINDOW), curated_row(sub_id="9002", updated=IN_WINDOW),
+         curated_row(sub_id="3", updated=IN_WINDOW), curated_row(sub_id="4", updated=late)],
+        [curated_row(sub_id="1", updated=IN_WINDOW)],
+        [gold_row(sub_id="0001", record=IN_WINDOW)])
+    excluded = gold(dn.table, dataset=dn.dataset, upstream=["curated_a", "curated_b"], key_map=dn.key_map,
+                    hop_exclusions={"curated_a": "subscriberidnumber LIKE '9%'"})
+    results = run_hops(spark, KeyCurrency(), excluded, [a, b], secret=SECRET)
+    assert (results["curated_a"].state, results["curated_a"].population, results["curated_a"].violations) == (
+        "FAILED", 2, 1)  # keys 1 and 3 judged; key 2 excluded; key 4 not yet due
+    assert results["curated_a"].observed == "1 missing and 0 stale of 2 keys"
+    assert events_of(results["curated_a"]) == [(key_hash(SECRET, "3|01|2026-01-01|AGR-A"), "FLAGGED", "MISSING",
+                                                "3|01|2026-01-01|AGR-A")]
+    assert (results["curated_b"].state, results["curated_b"].population) == ("PASSED", 1)
+    # Without the exclusion, the test member would be reported as lost.
+    plain = run_hops(spark, KeyCurrency(), dn, [a, b])
+    assert (plain["curated_a"].population, plain["curated_a"].violations) == (3, 2)

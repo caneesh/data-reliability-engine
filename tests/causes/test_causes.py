@@ -445,9 +445,26 @@ def test_a_failure_that_cannot_be_listed_is_error_for_every_cause(spark) -> None
 
 def test_cause_lines() -> None:
     assert CauseLine("FILE_SKIPPED", True).text() == "cause: FILE_SKIPPED (confirmed)"
+    # Evidence quality (code review, October 2026): confirmed, suspected or insufficient evidence.
     line = CauseLine("DROPPED", False, ("NOT_RUN", "INVALID_KEY"), ("FILTERED",))
-    assert line.text() == "cause not proven (DROPPED): ruled out NOT_RUN, INVALID_KEY; not ready FILTERED"
-    assert CauseLine("EMPTY_LOAD", False).text() == "cause not proven (EMPTY_LOAD)"
+    assert line.text() == ("cause not proven (DROPPED, insufficient evidence): ruled out NOT_RUN, INVALID_KEY; "
+                           "not ready FILTERED")
+    suspected = CauseLine("DROPPED", False, ("NOT_RUN", "INVALID_KEY", "FILTERED"))
+    assert suspected.text() == "cause not proven (DROPPED, suspected): ruled out NOT_RUN, INVALID_KEY, FILTERED"
+    assert CauseLine("EMPTY_LOAD", False).text() == "cause not proven (EMPTY_LOAD, insufficient evidence)"
+    assert CauseLine("PASSED_OVER", False, ("A",), (), ("B",)).evidence == "insufficient evidence"
+
+
+def test_a_failure_with_nothing_to_explain_is_recorded_as_insufficient_evidence(spark) -> None:
+    """A FAILED result whose failing items carry no evidence (only UNASSESSABLE keys) still gets
+    rows, all NOT_READY, so the investigation is complete and says why nothing was proven."""
+    from unittest import mock
+
+    cx = context(spark, gold("causes.unused"), "HOP_KEY_CURRENCY", feed(), upstream=curated("causes.x"),
+                 secret=SECRET)
+    with mock.patch("hcsc.datalake.dre.causes.engine.failures_for", return_value=[]):
+        rows = explain(cx, CheckResult("FAILED", 1, 1), "e", "r", EVENT.window_end.date(), EVENT.window_end)
+    assert len(rows) == 6 and {(r["state"], r["failure_ref"]) for r in rows} == {("NOT_READY", None)}
 
 
 def test_file_value_compare_can_confirm_on_any_different_partition(spark, tmp_path) -> None:

@@ -29,6 +29,8 @@ Read this first when resuming. Then `CLAUDE.md` (working rules), `docs/spec.md` 
 
 4. Answers to review items 6 and 7 (2026-10-12). Done: NO_UPSTREAM_DATA over the load's business window, after WRONG_PARTITION; NORMAL, RERUN (`--window-start/--window-end`) and REPLAY (`--from/--to`), idempotent, with no key events from RERUN or REPLAY. `dq_run` has an `execution_type` column. See `docs/decisions.md`, "Review items 6 and 7, answered".
 
+5. A code-review document (October 2026), uploaded as a .docx. Done: findings 1 to 4 (value-agreement ties, UNASSESSABLE keys, evidence_incomplete and windows held after an incomplete run, investigation tracking and retry), evidence levels on cause lines, `hop_exclusions`, and `docs/architecture.md`. See `docs/decisions.md`, "Code review comments (October 2026 document)". Still open (P2): benchmarking the store reads that are not bounded, and full runs in a representative cluster.
+
 **Next action:** wait for the user's answers. Then turn each answer into configuration or a small change, with tests, CI green, and a summary that starts with the CI result. The release-1 milestone after that is the spec's two-week unattended run in a test environment, outside this repository.
 
 ## Waiting on answers

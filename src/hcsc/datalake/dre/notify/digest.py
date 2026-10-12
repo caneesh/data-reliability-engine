@@ -181,6 +181,9 @@ def owner_of(config: Config, row: dict[str, Any]) -> str | None:
     return ds.owner if ds is not None else None
 
 
+INCOMPLETE = "cause: investigation incomplete (the next run retries it)"
+
+
 def _cause_lines(config: Config, row: dict[str, Any], causes: list[dict[str, Any]]) -> list[str]:
     """One cause line per distinct resolved cause of the evaluation, with how many failures it covers."""
     from collections import Counter
@@ -190,8 +193,10 @@ def _cause_lines(config: Config, row: dict[str, Any], causes: list[dict[str, Any
     rows = [c for c in causes if c["evaluation_id"] == row["evaluation_id"]]
     feed = config.feeds.get(row.get("feed") or "")
     ft = failure_type(feed.pattern if feed else None, row["check_id"])
-    if not rows or ft is None:
+    if ft is None:
         return []
+    if not rows:  # the run could not store its investigation: say so, never leave it silent
+        return [INCOMPLETE] if row["state"] == "FAILED" else []
     counts = Counter(line.text() for line in summarise(rows, ft).values())
     return [text if len(counts) == 1 and n == 1 else f"{text} [{n} failing]" for text, n in sorted(counts.items())]
 

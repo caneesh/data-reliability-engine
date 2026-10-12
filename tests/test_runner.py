@@ -323,9 +323,9 @@ def test_a_failed_key_event_write_makes_the_run_partial_and_the_result_is_still_
     def failing_write(*args, **kwargs):
         raise OSError("synthetic write failure")
 
-    def spy(spark_, config, evaluation, rows, run):
+    def spy(spark_, config, evaluation, rows, run, *rest):
         explained.append(len(rows))
-        return real_explain(spark_, config, evaluation, rows, run)
+        return real_explain(spark_, config, evaluation, rows, run, *rest)
 
     monkeypatch.setattr(runner, "write_key_events", failing_write)
     monkeypatch.setattr(runner, "explain_failures", spy)

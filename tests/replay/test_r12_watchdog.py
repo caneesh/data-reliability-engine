@@ -109,3 +109,16 @@ def test_a_manual_rerun_is_not_the_scheduled_run(spark, tmp_path, capsys) -> Non
     runs.finish_run(spark, replay.dq, rerun, 5, 5, now=rerun.started_at + timedelta(minutes=4))
     code, out = watchdog(replay, capsys)
     assert code == 1 and "no dre run started in" in out
+
+
+def test_incomplete_cause_investigations_are_reported_apart_from_the_checks() -> None:
+    """Finding 4 (code review, October 2026): a run whose checks all completed but whose cause
+    investigations did not is still COMPLETED; the watchdog reports the investigations."""
+    now = datetime(2026, 1, 16, 12, 40, tzinfo=UTC)
+    started = datetime(2026, 1, 16, 12, 1, tzinfo=UTC)
+    rows = [RunRow("r3", started, "STARTED"),
+            RunRow("r3", started, "COMPLETED", 5, 5, started + timedelta(minutes=2), 3, 1)]
+    assert problems(rows, now, 30) == [
+        "run r3 (started 12:01 UTC): 2 of 3 cause investigations incomplete (the next run retries them)"]
+    done = [rows[0], RunRow("r3", started, "COMPLETED", 5, 5, started + timedelta(minutes=2), 3, 3)]
+    assert problems(done, now, 30) == []

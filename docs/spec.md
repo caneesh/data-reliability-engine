@@ -169,6 +169,8 @@ key_map:                          # how this table's key maps to its upstream's 
     mem_nbr: membernumber
     mbr_mbrshp_covrg_eff_dt: effectivedate
     covrg_agrmt_id: qualifiedhealthplanid
+hop_exclusions:                   # optional; per upstream, rows a business rule keeps out of this dataset:
+  # rms_curated_enrollment: "status = 'TEST'"   # hop checks do not expect them here (never counted as lost)
 winner_rule:                      # optional; how the merge chooses among versions
   order_by: ["sourcelastupdatets DESC", "enddate DESC"]
   # formats: { enddate: yyyy-MM-dd }  # optional: pattern of an upstream time column stored as a string;
@@ -212,7 +214,7 @@ Rule `params` shapes, where section 6 does not spell them out: `superseded_still
 **Evaluation event.** The thing a check evaluates. In release 1 there is one kind, a batch load event: one dataset, one load window, identified by `event_id = sha256(dataset + window_start + window_end)`. Streaming windows come later and must fit the same interface. Windows are UTC and half-open: they include `window_start` and exclude `window_end`. Each result row records its event's `window_start` and `window_end`.
 
 - `window_end` = the run's start minus `settle_minutes` (default 15), so rows still being written are left for the next run.
-- `window_start` = the latest `window_end` among the dataset's NORMAL events, skipping any event in which a check was DID\_NOT\_RUN for a PLATFORM or BUDGET reason (that window is held: evaluated again). On a dataset's first run, `window_end` minus `initial_lookback_hours` (default 24). CONFIGURATION reasons never hold a window: those checks report DID\_NOT\_RUN on every run until the configuration is fixed. Gold rule results neither move nor hold a window (rules run on their own schedule over the whole table); they are told apart by the row (only rule results carry a `severity`), so a renamed or deleted rule's results stay out too.
+- `window_start` = the latest `window_end` among the dataset's NORMAL events, skipping any event in which a check was DID\_NOT\_RUN for a PLATFORM or BUDGET reason, or that was evaluated by a run that did not finish COMPLETED (PARTIAL, FAILED, or died while STARTED), since such a run may not have stored all its evidence (that window is held: evaluated again). On a dataset's first run, `window_end` minus `initial_lookback_hours` (default 24). CONFIGURATION reasons never hold a window: those checks report DID\_NOT\_RUN on every run until the configuration is fixed. Gold rule results neither move nor hold a window (rules run on their own schedule over the whole table); they are told apart by the row (only rule results carry a `severity`), so a renamed or deleted rule's results stay out too.
 - A hold lasts at most `max_window_hours` (default 72), counted from the end of the first held event. When a run finds the cap reached, the window advances: it starts where the last held event ended, and one result with `check_id` WINDOW\_GAP, DID\_NOT\_RUN / window\_gap, records the unchecked span as its window (`detail`: unchecked hours and the reason codes that held it). The gap is never evaluated again.
 - Both bounds are truncated to `load_time.granularity`, counted in the load time's zone. A window never runs backwards: if the previous end is later than this end, the window is empty.
 
@@ -232,6 +234,7 @@ RERUN and REPLAY:
 - **No change to current state.** They neither read nor write the open-key state: HOP\_KEY\_CURRENCY judges the keys the window owns (at their deadline, or reloaded in it), writes no key events, and keeps the judged keys for the cause engine. They register no files in `dq_file`.
 - **No effect on windows.** They never move or hold a NORMAL window.
 - **No email.** They send no digest, because digests report scheduled runs.
+- **Best effort, not a snapshot.** They read the source tables as they are now: Hive tables keep no versions, so rows changed, merged over or purged since the window are not seen. A RERUN answers "what does this window look like against today's data", not "what did the run see then". The run prints this.
 
 `dq_run.execution_type` records the type.
 
@@ -248,7 +251,7 @@ RERUN and REPLAY:
 | Category | Codes |
 | --- | --- |
 | DATA\_UNAVAILABLE | partition\_missing, landing\_unreadable, empty\_population, window\_gap |
-| PLATFORM | metastore\_unavailable, hdfs\_unavailable, query\_failed |
+| PLATFORM | metastore\_unavailable, hdfs\_unavailable, query\_failed, evidence\_incomplete (the result was stored but its key events were not; written as a newer row under the same `evaluation_id`) |
 | CONFIGURATION | table\_missing, column\_missing, incompatible\_type, invalid\_config |
 | BUDGET | budget\_exceeded |
 | DEPENDENCY | upstream\_check\_failed, premise\_unconfirmed |
@@ -256,7 +259,7 @@ RERUN and REPLAY:
 
 **Denominator rule.** Every check records `population` (rows or keys it evaluated) and `violations`. `population = 0` means DID\_NOT\_RUN / empty\_population.
 
-**Cause result states**, for cause checks only: CONFIRMED, RULED\_OUT, NOT\_READY (a required config input is empty), ERROR. The cause of a failure is the first CONFIRMED in the pattern's order; if none, "cause not proven".
+**Cause result states**, for cause checks only: CONFIRMED, RULED\_OUT, NOT\_READY (a required config input is empty), ERROR. The cause of a failure is the first CONFIRMED in the pattern's order; if none, "cause not proven". Every cause line also says how far the evidence goes. **Confirmed**: a cause check proved it. **Suspected**: every cause check ran and was ruled out, so the fallback stands by elimination. **Insufficient evidence**: some cause check was NOT\_READY or ERROR. Root causes are never stated beyond the evidence. A FAILED result whose failing items carry nothing to investigate (only UNASSESSABLE keys) still gets one NOT\_READY row per cause check, so its investigation is complete and says so.
 
 **Times.** Three kinds, never compared with each other: record time (the source's version of a row), load time (when a layer wrote it), first-seen time (when DRE first saw a file or record). Every check declares which one it uses. Parse every time column with its configured format and convert it from its configured `timezone` (or the default in `defaults.yaml`) to UTC before comparing; never assume a source column is UTC, and never compare times as strings.
 
@@ -271,6 +274,7 @@ CREATE TABLE dq.dq_run (
   run_id STRING, started_at TIMESTAMP, ended_at TIMESTAMP,
   engine_version STRING, config_commit STRING, status STRING,  -- STARTED | COMPLETED | PARTIAL | FAILED
   checks_expected INT, checks_written INT,
+  investigations_expected INT, investigations_done INT,  -- cause investigations, tracked apart from checks
   execution_type STRING                 -- NORMAL | RERUN | REPLAY; the watchdog counts NORMAL runs only
 ) PARTITIONED BY (run_date DATE) STORED AS ORC;
 
@@ -341,8 +345,8 @@ T1\_ON\_TIME and T1\_ZERO\_ROWS count expected loads, not rows: with a load due 
 | Check id | Logic | FAILED when |
 | --- | --- | --- |
 | HOP\_FILE\_COMPLETENESS | For files loaded upstream in the window, compare row counts per `file_name_column` upstream and here | A file has rows upstream and none here, or fewer here than upstream after `feed_filter` |
-| HOP\_KEY\_CURRENCY | For each upstream key, take the latest record time (keeping every row tied at it); left-join to this dataset on the mapped, normalised key. States: MISSING (no row here), STALE (record time here is older), CURRENT | Any MISSING or STALE key older than `sla_hours`; each written to `dq_key_event` |
-| HOP\_VALUE\_AGREEMENT | For CURRENT keys, compare columns listed in `owned_columns` (upstream column to this column) with null-safe equality | Any mismatch |
+| HOP\_KEY\_CURRENCY | For each upstream key, take the latest record time (keeping every row tied at it); left-join to this dataset on the mapped, normalised key. States: MISSING (no row here), UNASSESSABLE (all of the key's upstream rows, or its rows here, have no usable record time: kept and reported, never passed), STALE (record time here is older), CURRENT | Any MISSING, STALE or UNASSESSABLE key older than `sla_hours`; each written to `dq_key_event`. UNASSESSABLE keys get no cause (the evidence to explain them is missing) |
+| HOP\_VALUE\_AGREEMENT | For CURRENT keys, compare columns listed in `owned_columns` (upstream column to this column). Grain: the key's latest version on each side, as the set of distinct owned-column values among the rows tied at that side's latest record time (as strings; null differs from empty). Equal sets agree whatever the number of tied rows | The sets differ |
 
 Add `owned_columns` to the dataset config when HOP\_VALUE\_AGREEMENT is wanted, for example `{enddate: mbr_mbrshp_covrg_end_dt}`.
 
@@ -352,7 +356,7 @@ Hop details:
 - **Keys judged.** An upstream key is judged once, in the window where its latest load time plus `sla_hours` falls (so a key younger than the SLA is never judged); a key with a row in this dataset loaded in the window is judged again once its upstream deadline has passed, so a key that regresses here without any upstream change (for example overwritten with an older version) is caught; and every key still open at this hop in `v_open_keys`. On `full_sweep_day` (the dataset's first window ending that day, in the `defaults.yaml` time zone, so once a day), every upstream key past its deadline. HOP\_FILE\_COMPLETENESS judges files the same way, by each file's first upstream load time.
 - **Ties.** Every upstream row at a key's latest record time is kept. HOP\_VALUE\_AGREEMENT requires each of them to match this dataset's latest row, so tied upstream rows that disagree with each other always fail.
 - **Population.** HOP\_KEY\_CURRENCY: keys judged. HOP\_VALUE\_AGREEMENT: judged keys that are CURRENT. HOP\_FILE\_COMPLETENESS: files judged; `detail` lists the short files (up to 100).
-- **Key events.** HOP\_KEY\_CURRENCY appends to `dq_key_event`, per hop (`hop` = `<upstream>-><dataset>`, so two upstreams of one dataset never clear each other's keys), and computes them inside the check, within its compute budget: FLAGGED (newly MISSING or STALE), STILL\_FLAGGED (open and still not CURRENT), CLEARED (open and now CURRENT; on the full sweep also open keys no longer upstream, with `state_detail` "no longer upstream"). `state_detail` holds MISSING, STALE or CURRENT. `key_hash` is computed in SQL by a function registered with the secret in its closure, so the secret never appears in SQL text or query plans. Without `hmac_secret_file` no events are written and a FAILED result says so in `detail`; a configured secret file that cannot be read, or is empty, stops `dre run` before it starts (exit 3).
+- **Key events.** HOP\_KEY\_CURRENCY appends to `dq_key_event`, per hop (`hop` = `<upstream>-><dataset>`, so two upstreams of one dataset never clear each other's keys), and computes them inside the check, within its compute budget: FLAGGED (newly MISSING, STALE or UNASSESSABLE), STILL\_FLAGGED (open and still not CURRENT), CLEARED (open and now CURRENT; on the full sweep also open keys no longer upstream, with `state_detail` "no longer upstream"). `state_detail` holds MISSING, STALE, UNASSESSABLE or CURRENT. `key_hash` is computed in SQL by a function registered with the secret in its closure, so the secret never appears in SQL text or query plans. Without `hmac_secret_file` no events are written and a FAILED result says so in `detail`; a configured secret file that cannot be read, or is empty, stops `dre run` before it starts (exit 3).
 
 **Gold rule templates** (one rule file per use):
 
@@ -488,7 +492,7 @@ Recipients come from each owner (a feed's, a table-wide dataset's or a rule's): 
 Digest details:
 
 - "Changed since the last run" compares each result with the previous result of the same dataset, check and group. A first result that FAILED counts as changed; recovered checks (now PASSED after FAILED or DID\_NOT\_RUN) are listed too. Subject: `<n>` is the checks newly FAILED, `<m>` the checks DID\_NOT\_RUN; `all clear` only when nothing is failing or did not run.
-- The cause line is the spec's form, naming the fallback when not proven: `cause not proven (DROPPED): ruled out NOT_RUN, INVALID_KEY; not ready FILTERED`. A check with several failing things shows one line per distinct cause with a count.
+- The cause line is the spec's form, naming the fallback when not proven: `cause not proven (DROPPED, insufficient evidence): ruled out NOT_RUN, INVALID_KEY; not ready FILTERED`. A check with several failing things shows one line per distinct cause with a count.
 - When T1\_ON\_TIME and T1\_ZERO\_ROWS fail for the same loads of a dataset, one alert is shown (under T1\_ON\_TIME, with a note) and counted once.
 - Groups the check's previous run reported and this run did not are listed, for configured group columns only (the dataset's or the rule's `group_by`, and a hop's `upstream`); per-load groups such as T1\_VOLUME's slot change every run.
 - "Date first failed" is the first FAILED result since the last result that was not FAILED. Approved rules show their violations against the previous run (`3 violations (was 1)`; the first result is the `baseline`).
@@ -500,7 +504,7 @@ Digest details:
 
 **Scheduling.** `dre run` is scheduled hourly; there is no per-feed schedule. Each run decides which feeds are due (see the command table) and skips the rest, writing nothing for them; a skipped feed's window simply carries on to the next run that evaluates it. A feed's `check_delay_minutes` (default 0) moves its window end back, so a slot is judged only once its deadline plus the delay has passed. Table-wide datasets run when a due feed's dataset shares their table, and every run when no feed dataset covers their table.
 
-**Watchdog.** A separate entry point with no dependency on the main run's code beyond the store schema. The expected run times are every hour. It alerts when no `dq_run` row exists for an expected hour plus grace, when a run's latest row is still STARTED after the grace, or when `checks_written < checks_expected`. Grace is `watchdog_grace_minutes` in `defaults.yaml` (default 30). Each watchdog run judges one hour: now minus the grace, floored to the hour; a run ending FAILED is an alert too. The alert goes to `watchdog_owner`'s recipients, or every address in `recipients` when it is not set, by the same mail relay as the digest (printed, and not sent, while the relay is unset); if `dq_run` cannot be read, that is the alert. It writes nothing. Schedule it separately from the main run (a different scheduler folder or host), so one scheduling failure doesn't stop both.
+**Watchdog.** A separate entry point with no dependency on the main run's code beyond the store schema. The expected run times are every hour. It alerts when no NORMAL `dq_run` row exists for an expected hour plus grace, when a run's latest row is still STARTED after the grace, when `checks_written < checks_expected`, or when `investigations_done < investigations_expected` (cause investigations are tracked apart from checks, so a failed investigation never relabels a check; each NORMAL run retries the FAILED results of the last `investigation_retry_days` (default 7) that are still their check's latest result and have no cause rows, and the digest shows `cause: investigation incomplete (the next run retries it)` until then). Grace is `watchdog_grace_minutes` in `defaults.yaml` (default 30). Each watchdog run judges one hour: now minus the grace, floored to the hour; a run ending FAILED is an alert too. The alert goes to `watchdog_owner`'s recipients, or every address in `recipients` when it is not set, by the same mail relay as the digest (printed, and not sent, while the relay is unset); if `dq_run` cannot be read, that is the alert. It writes nothing. Schedule it separately from the main run (a different scheduler folder or host), so one scheduling failure doesn't stop both.
 
 **Compute budget.** Each dataset has `compute_budget_minutes`. Before running, estimate the scan size from partition statistics; if a check exceeds its budget, cancel it and record DID\_NOT\_RUN / budget\_exceeded. Each check gets its dataset's full budget and runs in its own Spark job group; when the budget runs out the group is cancelled (its running Spark jobs are interrupted) and the result's `detail` gives the budget and the table's estimated scan size from Spark's table statistics (or says there are none). BUDGET holds the window, so the span is evaluated again, up to `max_window_hours` (section 4). `compute_budget_scope` (default `check`) set to `dataset` makes a dataset's checks share its budget in a run (a check with none left is not run). `scan_mb_per_minute` (default null), when set, refuses before running a check whose table's estimated scan would take longer than its budget. Hop checks read only keys changed in the window, plus a full sweep on the day set by `full_sweep_day` (default Sunday).
 

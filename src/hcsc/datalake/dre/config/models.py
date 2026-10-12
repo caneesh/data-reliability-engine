@@ -224,6 +224,8 @@ class Defaults(SettingsOverride):
     rule_weekly_day: Weekday | None = None  # weekly rules' day; null: the dataset's full_sweep_day
     # The watchdog (spec section 8) expects the hourly run's dq_run rows this long after the hour.
     watchdog_grace_minutes: int = Field(default=30, ge=1, le=59)
+    # How far back a run looks for FAILED results whose cause investigation never finished, to retry it.
+    investigation_retry_days: int = Field(default=7, ge=1)
     watchdog_owner: NonEmptyStr | None = None  # whose recipients get watchdog alerts; null: every recipient
     # Compute budget (spec section 8): each check gets its dataset's compute_budget_minutes
     # ("check"), or the dataset's checks in a run share it ("dataset").
@@ -346,6 +348,10 @@ class Dataset(SettingsOverride):
     key_map: dict[Identifier, dict[Identifier, Identifier]] = {}
     owned_columns: dict[Identifier, Identifier] = {}
     mismatch_probe_drop: list[Identifier] = []
+    # Business-rule exclusions per hop: upstream id -> SQL condition on the upstream's rows that
+    # this dataset is not expected to receive (a legitimate filter, not data loss). Hop checks
+    # leave those rows out of what they expect.
+    hop_exclusions: dict[Identifier, SqlFragment] = {}
     winner_rule: WinnerRule | None = None
 
 

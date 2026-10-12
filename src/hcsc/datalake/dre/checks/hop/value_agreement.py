@@ -1,8 +1,10 @@
 """HOP_VALUE_AGREEMENT: CURRENT keys agree with upstream on owned columns (spec section 6).
 
-For keys judged CURRENT, every upstream row at the latest record time (ties kept) must
-match this dataset's latest row on each owned column (upstream column -> this column),
-null-safe. Tied upstream rows that disagree with each other therefore always show up.
+For keys judged CURRENT, the key's latest version must be the same on both sides. The
+comparison grain is the set of distinct owned-column values (upstream column -> this column)
+among the rows tied at each side's latest record time: equal sets agree whatever the number
+of tied rows, so identical multi-row versions pass, while tied upstream versions that this
+dataset kept only one of (R06) still show up.
 Population: CURRENT keys judged; violations: keys with any mismatch.
 """
 

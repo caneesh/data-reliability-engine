@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_run (
   run_id STRING, started_at TIMESTAMP, ended_at TIMESTAMP,
   engine_version STRING, config_commit STRING, status STRING,  -- STARTED | COMPLETED | PARTIAL | FAILED
   checks_expected INT, checks_written INT,
+  investigations_expected INT, investigations_done INT,  -- cause investigations of FAILED results
   execution_type STRING                 -- NORMAL | RERUN | REPLAY
 ) PARTITIONED BY (run_date DATE) STORED AS ORC;
 
@@ -46,7 +47,7 @@ CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_file (
 -- FAILED) once written, otherwise STARTED.
 CREATE VIEW IF NOT EXISTS {{ dq_database }}.v_latest_run AS
 SELECT run_id, started_at, ended_at, engine_version, config_commit, status,
-       checks_expected, checks_written, execution_type, run_date
+       checks_expected, checks_written, investigations_expected, investigations_done, execution_type, run_date
 FROM (
   SELECT r.*,
          ROW_NUMBER() OVER (

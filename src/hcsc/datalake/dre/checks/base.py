@@ -33,6 +33,7 @@ REASONS: dict[str, str] = {
     "metastore_unavailable": "PLATFORM",
     "hdfs_unavailable": "PLATFORM",
     "query_failed": "PLATFORM",
+    "evidence_incomplete": "PLATFORM",  # the result was stored but its key events were not: evaluated again
     "table_missing": "CONFIGURATION",
     "column_missing": "CONFIGURATION",
     "incompatible_type": "CONFIGURATION",

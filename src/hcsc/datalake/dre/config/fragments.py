@@ -1,7 +1,8 @@
 """Parse SQL fragments from config against Spark (`dre dry-run`).
 
 `dre validate` only rejects `;`. Here `feed_filter` and rule `open_when` are
-resolved against their dataset's table (columns must exist), and probe
+resolved against their dataset's table, and `hop_exclusions` against the upstream's
+table (columns must exist), and probe
 conditions (`table_contains`) are parsed for syntax. Nothing is
 executed: Spark analyses each query when it is built. Problems are reported
 with file, line and field, like validate errors.
@@ -47,6 +48,13 @@ def check_fragments(spark: SparkSession, config: Config, feed_id: str | None = N
                 resolves(ds.table, ds.feed_filter)
             except Exception as exc:
                 report("dataset", ds_id, ("feed_filter",), "feed_filter", exc)
+        for up_id, condition in ds.hop_exclusions.items():
+            up = config.datasets.get(up_id)
+            if up is not None and table_ok(up.table):
+                try:
+                    resolves(up.table, condition)
+                except Exception as exc:
+                    report("dataset", ds_id, ("hop_exclusions", up_id), "hop_exclusions", exc)
     for rule_id, rule in config.rules.items():
         open_when = rule.params.get("open_when")
         ds = config.datasets.get(rule.dataset)

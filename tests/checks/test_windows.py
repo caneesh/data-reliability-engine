@@ -135,6 +135,11 @@ def test_a_held_window_is_evaluated_again_until_max_window_hours() -> None:
     assert release_hold(HELD, "gold", end, 72) == (HELD.previous_end, None)
     # Nothing held: the window follows on.
     assert release_hold(WindowHistory(previous_end=HELD.previous_end), "gold", end, 72) == (HELD.previous_end, None)
+    # A dataset's first window held: the retry starts where it started, not lookback hours before
+    # the new end, which would narrow it (found by tests/test_recovery.py).
+    first = WindowHistory(held_start=HELD.held_start, first_held_end=HELD.first_held_end,
+                          last_held_end=HELD.last_held_end, held_by=("query_failed",))
+    assert release_hold(first, "gold", end, 72) == (HELD.held_start, None)
 
 
 def test_a_hold_past_max_window_hours_is_released_as_a_gap() -> None:
