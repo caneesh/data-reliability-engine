@@ -18,7 +18,7 @@ from hcsc.datalake.dre.checks import registry
 from hcsc.datalake.dre.checks.base import Check, CheckContext, CheckResult, from_counts, run_check
 from hcsc.datalake.dre.checks.events import Event
 from hcsc.datalake.dre.checks.keys import NORMALISERS, Normaliser, NormaliserError, key_exprs, register_normaliser
-from hcsc.datalake.dre.checks.registry import CHECKS, PATTERNS, CauseEntry, checks_for, pattern_check_ids, register_check
+from hcsc.datalake.dre.checks.registry import CHECKS, CauseEntry, checks_for, pattern_check_ids, patterns, register_check
 from hcsc.datalake.dre.checks.rules.rule_check import RuleCheck
 from hcsc.datalake.dre.checks.rules.template import TEMPLATES, TemplateSpec, register_template
 from hcsc.datalake.dre.config.loader import load
@@ -53,7 +53,7 @@ def test_the_built_ins_are_discovered_without_a_central_list() -> None:
     assert CHECKS.ids() == ("HOP_FILE_COMPLETENESS", "HOP_KEY_CURRENCY", "HOP_VALUE_AGREEMENT", "T1_COLUMN_RANGE",
                             "T1_FILES_NOT_LOADED", "T1_FRESHNESS", "T1_KEY_DUPLICATES", "T1_KEY_NULLS", "T1_ON_TIME",
                             "T1_SCHEMA_DRIFT", "T1_VOLUME", "T1_ZERO_ROWS")
-    assert PATTERNS == ("FILE_CYCLIC", "FILE_PERIODIC", "TABLE_MERGE")
+    assert patterns() == ("FILE_CYCLIC", "FILE_PERIODIC", "TABLE_MERGE")
     assert PROBES.ids() == ("file_exists", "file_value_compare", "log_contains", "size_changed", "table_contains")
     assert BUILTINS.ids() == ("FILE_SKIPPED", "INVALID_KEY", "JOIN_UNMATCHED", "KEY_MISMATCH", "NOT_RUN",
                               "NO_UPSTREAM_DATA", "OLDER_VERSION_WRITTEN_LATER", "PIPELINE_STALLED",

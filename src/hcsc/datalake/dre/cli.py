@@ -77,10 +77,15 @@ def validate(conf: str) -> int:
     if errors:
         print(f"dre validate: {len(errors)} error(s), {len(warnings)} warning(s) in {conf}")
         return 1
+    from hcsc.datalake.dre.checks.registry import pattern_origin, patterns
+
     print(
         f"dre validate: {conf} is valid, {len(warnings)} warning(s) "
         f"({len(config.feeds)} feeds, {len(config.datasets)} datasets, {len(config.rules)} rules)"
     )
+    by_origin = {o: [p for p in patterns() if pattern_origin(p) == o] for o in ("packaged", "conf")}
+    print(f"patterns: packaged {by_origin['packaged']}" + (f", from {conf}/patterns {by_origin['conf']}"
+                                                            if by_origin["conf"] else ""))
     return 0
 
 

@@ -1,5 +1,6 @@
 # Checks for pattern FILE_CYCLIC, in run order (spec sections 6 and 7).
 pattern: FILE_CYCLIC
+kind: file            # file: data lands as files (the feed needs `landing`); table: it arrives in a table
 checks:
   - T1_ON_TIME
   - T1_ZERO_ROWS

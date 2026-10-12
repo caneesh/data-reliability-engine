@@ -304,6 +304,14 @@ Deferred to step 2: `causes/failures.py` still lists the failing things of a FAI
    - Neither has cause checks: like T1_VOLUME and T1_KEY_NULLS, a failure has no failing thing to probe; the retry of investigations skips checks without a failure type, so these never show as pending.
 5. **Sample config.** `gold_member_coverage` configures T1_FRESHNESS on load time (72 hours), so the e2e run has a parametrised check in it: 42 results. Four tests count the sample's results (R09, R11a, R11b, `test_run_writes_results_and_windows_follow_on`); each count went up by one, with its derivation comment updated. The new result fits each scenario (an empty table gives DID_NOT_RUN / empty_population).
 
+## Extensibility, step 3: patterns from configuration (2026-10-12)
+
+1. **`conf/patterns/*.yaml`.** The config loader points the pattern registry at the conf directory; a file there adds a pattern or, with a packaged name, replaces it. Nothing else changes: `pattern_check_ids`, `pattern_causes` and `probe_keys` read whichever file applies.
+2. **`kind: file | table`** on every pattern, packaged ones included. "File pattern" was inferred from the name (`FILE_*`) in three places (the landing rule on `Feed`, `dre validate`'s raw-dataset warning, and T1_FILES_NOT_LOADED's `applies_to`); all three now read the kind, so a conf pattern can be a file pattern under any name.
+3. **Validation.** `dre validate` reads every conf pattern (kind, checks, causes) and reports a problem as a config error naming the pattern file. A feed on an unknown pattern gets the known names, conf ones included, in its fix. A feed's `probes:` keys are still checked against its pattern's causes, so a feed moved to a pattern that uses none of them must drop them (the tests do).
+4. **One new pattern rule:** a failure type needs at least one cause check before its fallback. A fallback-only list would write no cause rows, and the investigation retry would then treat every such FAILED result as unfinished, every run.
+5. **`dre validate` prints** which patterns are packaged and which come from `conf/patterns`.
+
 ## Notes for later steps
 
 - **Step 4:** done: `dre dry-run` parses SQL fragments (`config/fragments.py`).

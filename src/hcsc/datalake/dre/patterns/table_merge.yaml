@@ -1,6 +1,7 @@
 # Checks for pattern TABLE_MERGE, in run order (spec sections 6 and 7).
 # T1_FILES_NOT_LOADED is for file patterns only.
 pattern: TABLE_MERGE
+kind: table            # file: data lands as files (the feed needs `landing`); table: it arrives in a table
 checks:
   - T1_ON_TIME
   - T1_ZERO_ROWS

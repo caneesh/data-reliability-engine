@@ -77,6 +77,8 @@ def cross_check(config: Config, feeds_complete: bool = True) -> list[ConfigError
         err("defaults", "defaults", ("watchdog_owner",), f"watchdog_owner {defaults.watchdog_owner!r} has no recipients",
             f"add `{defaults.watchdog_owner}: [address]` under recipients, or set watchdog_owner: null")
 
+    errors.extend(_check_patterns(config))
+
     # Feeds: dataset references, one feed per dataset, owner recipients.
     member_of: dict[str, str] = {}
     for feed_id, feed in config.feeds.items():
@@ -92,7 +94,7 @@ def cross_check(config: Config, feeds_complete: bool = True) -> list[ConfigError
         check_owner("feed", feed_id, feed.owner)
         errors.extend(_check_probes(config, feed_id))
         errors.extend(_check_check_params(config, "feed", feed_id, feed.pattern, feed, None))
-        if feed.pattern in ("FILE_CYCLIC", "FILE_PERIODIC") and not any(
+        if _is_file_pattern(feed.pattern) and not any(
             datasets[d].layer == "RAW" and datasets[d].file_name_column for d in feed.datasets if d in datasets
         ):
             err("feed", feed_id, ("datasets",),
@@ -274,6 +276,34 @@ def cross_check(config: Config, feeds_complete: bool = True) -> list[ConfigError
                     f"add datasets/{related}.yaml or fix {field_name}")
 
     return errors
+
+
+def _is_file_pattern(pattern: str) -> bool:
+    from hcsc.datalake.dre.checks.registry import is_file_pattern
+
+    try:
+        return is_file_pattern(pattern)
+    except ValueError:
+        return False
+
+
+def _check_patterns(config: Config) -> list[ConfigError]:
+    """Each conf/patterns file loads: `pattern` matches its name, `kind` is set, every check, probe
+    type and builtin cause it names is registered, cause lists are well formed."""
+    from hcsc.datalake.dre.checks.registry import (
+        _conf_names, _pattern_checks, pattern_causes, pattern_file, pattern_kind,
+    )
+
+    found = []
+    for pattern in sorted(_conf_names()):
+        for read in (pattern_kind, _pattern_checks, pattern_causes):
+            try:
+                read(pattern)
+            except ValueError as exc:
+                found.append(ConfigError(pattern_file(pattern), 1, "", str(exc).replace(pattern_file(pattern) + ": ", ""),
+                                         "fix the pattern file; the packaged patterns/*.yaml are the examples"))
+                break
+    return found
 
 
 def _check_check_params(config: Config, kind: str, obj_id: str, pattern: str | None, feed: Any,

@@ -113,6 +113,7 @@ data-reliability-engine/
   conf/
     defaults.yaml
     feeds/  datasets/  rules/
+    patterns/                # optional: patterns of this instance; a packaged name replaces that pattern (section 3)
   tests/
     fixtures/                # synthetic data builders
     replay/                  # one test per replay scenario (section 9)
@@ -195,6 +196,19 @@ check_params:                     # optional; a parametrised check runs only whe
 ```
 
 **Parametrised checks** (release 3). A check may declare a parameter model (`Check.params_model`). It is listed by the patterns like any check, but runs only where something configures it: the pattern's own entry (`{check: T1_FRESHNESS, params: {max_age_hours: 6}}` in `patterns/*.yaml`), the feed's `check_params` or the dataset's, each overriding the one before field by field. `dre validate` rejects an unknown check id, parameters on a check that takes none, and bad values, with file and line; a field missing at every level is reported on the dataset. A parametrised check configured for a dataset whose pattern does not list it is a warning (it will not run). At run time the merged parameters are validated again, and a bad set makes the check DID\_NOT\_RUN / invalid\_config.
+
+**Patterns from configuration** (release 3). A pattern is data: the checks in run order and the cause checks per failure type (section 7). The engine packages `FILE_CYCLIC`, `FILE_PERIODIC`, `TABLE_MERGE` and `TABLE_WIDE`; a deployed instance may add its own under `conf/patterns/<name>.yaml` with the same layout, and a file named like a packaged pattern replaces it. A pattern file declares:
+
+```yaml
+pattern: TABLE_RELOAD             # the file's name, upper case
+kind: table                       # file: data lands as files (the feed needs `landing`, and gets T1_FILES_NOT_LOADED
+                                  #   and the landing probes); table: data arrives in a table
+checks: [T1_ON_TIME, T1_ZERO_ROWS, T1_VOLUME, T1_KEY_DUPLICATES, {check: T1_FRESHNESS, params: {max_age_hours: 30}}]
+causes:                           # as in section 7; each failure type needs one cause check at least, then its fallback
+  load_wrote_nothing: { checks: [T1_ZERO_ROWS], order: [{code: NO_UPSTREAM_DATA, probe: builtin}, {code: EMPTY_LOAD, fallback: true}] }
+```
+
+Every check, probe type and builtin cause code a pattern names must be registered (section 2, "Extension points"); `dre validate` reports a malformed pattern file by name, and says which patterns are packaged and which come from `conf/patterns`. A feed's `pattern` must be one of them; its `probes:` keys must be ones the pattern's causes use. Whether a feed lands files is the pattern's `kind`, never its name.
 
 **Table-wide datasets.** A dataset that no feed lists covers a whole table, for example to run gold rules across every source system. It must set `owner` (whose recipients get its results) and `expectation_version` (it has no feed to take one from), has no `feed_filter`, and takes its settings from `defaults.yaml`. It gets the checks in `patterns/table_wide.yaml`: T1\_SCHEMA\_DRIFT, T1\_KEY\_NULLS and T1\_KEY\_DUPLICATES only, plus gold rules. A dataset that a feed lists takes its owner and expectation version from the feed and must set neither. Each dataset is listed by at most one feed.
 
@@ -448,7 +462,7 @@ When a check FAILS, the cause engine runs every cause check listed for that fail
 | `size_changed` | none | The file's size changed after it was first seen (`dq_file`) |
 | `builtin` | none | Engine logic over DRE's own evidence (tables, `dq_file`, dataset config) |
 
-Each pattern's YAML lists, per failure type, the checks it covers and the cause entries in order: `{code, probe, params}`, where `params` names a key in the feed's `probes:` that supplies the parameters, and the last entry is the fallback. A feed configures its probes by key; a key may hold one parameter set or a list (any one confirming confirms the cause; if none confirms and any set is not configured, the cause is NOT\_READY, never RULED\_OUT). `dre validate` checks every key against the feed's pattern and the probe type's parameters. Adding a cause never touches the engine; a new kind of evidence is a new generic probe type.
+Each pattern's YAML lists, per failure type, the checks it covers and the cause entries in order: `{code, probe, params}`, where `params` names a key in the feed's `probes:` that supplies the parameters, and the last entry is the fallback. A feed configures its probes by key; a key may hold one parameter set or a list (any one confirming confirms the cause; if none confirms and any set is not configured, the cause is NOT\_READY, never RULED\_OUT). `dre validate` checks every key against the feed's pattern and the probe type's parameters. A failure type lists at least one cause check before its fallback: a fallback alone explains nothing, and a FAILED result with no cause rows would be retried as an unfinished investigation. Adding a cause never touches the engine; a new kind of evidence is a new generic probe type.
 
 ```yaml
 # feed config

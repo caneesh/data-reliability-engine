@@ -227,9 +227,12 @@ def read_yaml(path: Path, display: str) -> tuple[Any, yaml.Node | None, list[Con
 
 def load(conf_dir: Path | str) -> tuple[Config, list[ConfigError]]:
     """Load and validate each file on its own. Cross-file checks are in validate.py."""
+    from hcsc.datalake.dre.checks.registry import use_conf_patterns
+
     conf_dir = Path(conf_dir)
     config = Config(conf_dir=conf_dir)
     errors: list[ConfigError] = []
+    use_conf_patterns(conf_dir)  # patterns/*.yaml in the conf directory add to or replace the packaged ones
 
     defaults_path = conf_dir / "defaults.yaml"
     display = str(defaults_path)

@@ -17,13 +17,12 @@ from typing import TYPE_CHECKING
 from hcsc.datalake.dre.checks.base import (
     Check, CheckContext, CheckResult, did_not_run, from_counts, render_sql, utc_literal,
 )
-from hcsc.datalake.dre.checks.registry import register_check
+from hcsc.datalake.dre.checks.registry import is_file_pattern, register_check
 
 if TYPE_CHECKING:
     from hcsc.datalake.dre.checks.events import Event
     from hcsc.datalake.dre.config.models import Dataset
 
-FILE_PATTERNS = ("FILE_CYCLIC", "FILE_PERIODIC")
 LISTED = 100
 
 
@@ -31,7 +30,7 @@ class FilesNotLoaded(Check):
     check_id = "T1_FILES_NOT_LOADED"
 
     def applies_to(self, dataset: Dataset, pattern: str | None) -> bool:
-        return pattern in FILE_PATTERNS and dataset.layer == "RAW" and dataset.file_name_column is not None
+        return is_file_pattern(pattern) and dataset.layer == "RAW" and dataset.file_name_column is not None
 
     def required_columns(self, dataset: Dataset) -> list[str]:
         return [dataset.file_name_column] if dataset.file_name_column else []

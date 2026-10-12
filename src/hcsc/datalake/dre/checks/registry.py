@@ -2,7 +2,9 @@
 
 Checks register themselves (`register_check`) in the module that defines them; the built-in
 modules under checks/tier1 and checks/hop are imported on first use. Patterns are the
-packaged patterns/*.yaml files.
+packaged patterns/*.yaml files plus, once `use_conf_patterns` names a conf directory, its
+patterns/*.yaml: a file with a packaged name replaces that pattern, a new name adds one. Each
+pattern declares `kind: file | table` (spec section 3).
 """
 
 from __future__ import annotations
@@ -10,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import cache
 from importlib.resources import files
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import yaml
@@ -29,20 +32,67 @@ def register_check(check: Check) -> Check:
     return CHECKS.register(check.check_id, check)
 
 
-def _pattern_files() -> tuple[str, ...]:
+KINDS = ("file", "table")
+_CONF_PATTERNS: Path | None = None  # <conf>/patterns, set by the config loader
+
+
+def use_conf_patterns(conf_dir: Path | str | None) -> None:
+    """Read patterns from <conf_dir>/patterns as well as the packaged ones (None: packaged only)."""
+    global _CONF_PATTERNS
+    _CONF_PATTERNS = None if conf_dir is None else Path(conf_dir) / "patterns"
+    clear_pattern_caches()
+
+
+def clear_pattern_caches() -> None:
+    _pattern_checks.cache_clear()
+    pattern_causes.cache_clear()
+
+
+def _packaged_names() -> set[str]:
     folder = files("hcsc.datalake.dre").joinpath("patterns")
-    names = (entry.name[:-5].upper() for entry in folder.iterdir() if entry.name.endswith(".yaml"))
-    return tuple(sorted(n for n in names if n != TABLE_WIDE))
+    return {entry.name[:-5].upper() for entry in folder.iterdir() if entry.name.endswith(".yaml")}
 
 
-PATTERNS: tuple[str, ...] = _pattern_files()  # the feed patterns (a feed's `pattern` must be one)
+def _conf_names() -> set[str]:
+    if _CONF_PATTERNS is None or not _CONF_PATTERNS.is_dir():
+        return set()
+    return {path.name[:-5].upper() for path in _CONF_PATTERNS.glob("*.yaml")}
+
+
+def patterns() -> tuple[str, ...]:
+    """The feed patterns (a feed's `pattern` must be one), packaged and from conf, without TABLE_WIDE."""
+    return tuple(sorted((_packaged_names() | _conf_names()) - {TABLE_WIDE}))
+
+
+def pattern_origin(pattern: str) -> str:
+    """Where the pattern is read from: "conf" (a conf/patterns file) or "packaged"."""
+    return "conf" if pattern in _conf_names() else "packaged"
+
+
+def pattern_file(pattern: str) -> str:
+    """The pattern's file, for error messages."""
+    if pattern_origin(pattern) == "conf":
+        return str(_CONF_PATTERNS / f"{pattern.lower()}.yaml")
+    return f"patterns/{pattern.lower()}.yaml"
+
+
+def pattern_kind(pattern: str) -> str:
+    """`file` (data lands as files, listed and registered) or `table` (data arrives in a table)."""
+    kind = _load_pattern(pattern).get("kind")
+    if kind not in KINDS:
+        raise ValueError(f"{pattern_file(pattern)}: kind must be one of {list(KINDS)}, not {kind!r}")
+    return kind
+
+
+def is_file_pattern(pattern: str | None) -> bool:
+    return pattern is not None and pattern != TABLE_WIDE and pattern_kind(pattern) == "file"
 
 
 @cache
 def _pattern_checks(pattern: str) -> tuple[tuple[str, dict[str, Any] | None], ...]:
     """(check id, the pattern's default params or None) per entry of the pattern's `checks:` list.
     An entry is a check id, or {check: id, params: {...}} for a parametrised check."""
-    where = f"patterns/{pattern.lower()}.yaml"
+    where = pattern_file(pattern)
     found = []
     for raw in _load_pattern(pattern).get("checks") or ():
         check_id, params = (raw, None) if isinstance(raw, str) else (raw.get("check"), raw.get("params"))
@@ -105,8 +155,21 @@ class FailureType:
 
 
 def _load_pattern(pattern: str) -> dict:
-    text = files("hcsc.datalake.dre").joinpath("patterns", f"{pattern.lower()}.yaml").read_text(encoding="utf-8")
-    return yaml.safe_load(text) or {}
+    """The pattern's YAML: the conf file when there is one, else the packaged one."""
+    name = f"{pattern.lower()}.yaml"
+    if _CONF_PATTERNS is not None and (_CONF_PATTERNS / name).is_file():
+        text = (_CONF_PATTERNS / name).read_text(encoding="utf-8")
+    else:
+        try:
+            text = files("hcsc.datalake.dre").joinpath("patterns", name).read_text(encoding="utf-8")
+        except FileNotFoundError:
+            raise ValueError(f"unknown pattern {pattern!r}; known: {list(patterns())}") from None
+    data = yaml.safe_load(text) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"{pattern_file(pattern)}: a pattern file is a mapping")
+    if str(data.get("pattern", "")).upper() != pattern:
+        raise ValueError(f"{pattern_file(pattern)}: `pattern` must be {pattern} (the file's name)")
+    return data
 
 
 @cache
@@ -115,7 +178,7 @@ def pattern_causes(pattern: str) -> dict[str, FailureType]:
     from hcsc.datalake.dre.causes.base import BUILTINS
     from hcsc.datalake.dre.config.probes import BUILTIN, PROBES
 
-    where = f"patterns/{pattern.lower()}.yaml"
+    where = pattern_file(pattern)
     found: dict[str, FailureType] = {}
     for name, body in (_load_pattern(pattern).get("causes") or {}).items():
         entries = []
@@ -134,6 +197,8 @@ def pattern_causes(pattern: str) -> dict[str, FailureType]:
             entries.append(entry)
         if not entries or not entries[-1].fallback or sum(e.fallback for e in entries) != 1:
             raise ValueError(f"{where}: failure type {name} must end with exactly one fallback")
+        if len(entries) < 2:
+            raise ValueError(f"{where}: failure type {name} needs at least one cause check before the fallback")
         if len({e.code for e in entries}) != len(entries):
             raise ValueError(f"{where}: failure type {name} repeats a cause code")
         found[name] = FailureType(name, tuple(body.get("checks") or ()), tuple(entries))
@@ -147,6 +212,5 @@ def probe_keys(pattern: str) -> dict[str, str]:
         for entry in failure.order:
             if entry.params:
                 if keys.setdefault(entry.params, entry.probe) != entry.probe:
-                    raise ValueError(f"patterns/{pattern.lower()}.yaml: params key {entry.params} "
-                                     f"is used by two probe types")
+                    raise ValueError(f"{pattern_file(pattern)}: params key {entry.params} is used by two probe types")
     return keys
