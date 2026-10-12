@@ -28,7 +28,7 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
 | Extensibility step 3: patterns from configuration, `kind` | `c1f2811` | #35 |
 | Extensibility step 4: rule templates from configuration, guard rule 10 | `31fa034` | #36 |
 | Extensibility step 5: named calendars | `80317cf` | #37 |
-| Extensibility steps 6 and 7: notification sinks, extension packages, `dre guard`, testing kit | `122b76a` | #38 |
+| Extensibility steps 6 and 7: notification sinks, extension packages, `dre guard`, testing kit | `122b76a` | #38 (one run for the push of both commits) |
 | Extensibility step 8: `docs/extending.md` | `6a35456` | #39 |
 
 Each row has a section in `docs/decisions.md` saying what was decided and why.
