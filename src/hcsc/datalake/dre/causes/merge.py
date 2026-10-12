@@ -13,6 +13,7 @@ from typing import Any
 
 from hcsc.datalake.dre.causes.base import CauseContext, Failure, Outcome, confirmed, not_ready, ruled_out
 from hcsc.datalake.dre.checks.base import render_sql, utc_literal
+from hcsc.datalake.dre.checks.derived import UNMATCHED_COLUMN, source_of
 from hcsc.datalake.dre.checks.hop.common import hop_params, register_key_hash
 from hcsc.datalake.dre.checks.keys import column_expr, key_string
 from hcsc.datalake.dre.checks.times import as_utc, sql_string, utc_expr
@@ -156,6 +157,25 @@ def winner_order(cx: CauseContext) -> str:
     return ", ".join(terms)
 
 
+def join_unmatched(cx: CauseContext, failure: Failure) -> Outcome:
+    """MISSING keys of a hop from a derived upstream with joins: CONFIRMED when a joined dataset had
+    no match for the key's group (a left join; with an inner join the row is never expected)."""
+    up = cx.upstream()
+    if up is None or up.derived is None or not up.derived.joins:
+        return not_ready("the upstream is not a derived dataset with joins")
+    if failure.key["key_state"] != "MISSING":
+        return ruled_out(reason="the key is present here")
+
+    def query() -> dict[str, list[str]]:
+        sql = render_sql("cause_join_unmatched.sql.j2", p=hop(cx), unmatched=UNMATCHED_COLUMN,
+                         hashes=hash_literals(cx.cache["failure_hashes"]))
+        return {r.key_hash: list(r.unmatched) for r in cx.spark.sql(sql).collect()}
+    hit = cx.cached("join_unmatched", query).get(failure.ref)
+    if hit:
+        return confirmed(unmatched=hit)
+    return ruled_out(joins=[j.dataset for j in up.derived.joins])
+
+
 def tie_resolved_by_rule(cx: CauseContext, failure: Failure) -> Outcome:
     """CURRENT keys: CONFIRMED when several upstream rows tie at the latest record time with
     different owned-column values, and this dataset kept the row the winner rule ranks first."""
@@ -232,7 +252,9 @@ def no_upstream_data(cx: CauseContext, failure: Failure) -> Outcome:
         counts = {}
         for up_id in ds.upstream:
             up = cx.config.datasets[up_id]
-            sql = render_sql("cause_upstream_rows.sql.j2", table=up.table, feed_filter=up.feed_filter,
+            sql = render_sql("cause_upstream_rows.sql.j2",
+                             table=source_of(up, cx.config.datasets, cx.ctx.default_timezone),
+                             feed_filter=up.feed_filter,
                              load_expr=utc_expr(up.load_time, cx.ctx.default_timezone),
                              window_start=utc_literal(start), window_end=utc_literal(end))
             counts[up_id] = cx.spark.sql(sql).collect()[0].loaded

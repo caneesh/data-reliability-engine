@@ -34,6 +34,7 @@ BUILTINS = {
     "FILE_SKIPPED": merge.file_skipped,
     "INVALID_KEY": merge.invalid_key,
     "KEY_MISMATCH": merge.key_mismatch,
+    "JOIN_UNMATCHED": merge.join_unmatched,
     "TIE_RESOLVED_BY_RULE": merge.tie_resolved_by_rule,
     "OLDER_VERSION_WRITTEN_LATER": merge.older_version_written_later,
     "NO_UPSTREAM_DATA": merge.no_upstream_data,

@@ -20,6 +20,8 @@ Repository copy: production paths, file names, and database and table names are 
 
 **Not in release 1:** learned baselines, Kafka checks, reconciliation across every layer (release 1 compares adjacent layers only where a dataset has a key\_map), UI, alert acknowledgement, integrations other than email, blocking or quarantine of any kind.
 
+**Release 2 (added October 2026, after the architecture review):** derived datasets, so a hop can compare at a grain other than the upstream's rows: an aggregate (one gold row per group of upstream rows) or a join (upstream rows looked up against another dataset). Section 3 ("Derived dataset") and section 6 ("Derived upstreams"). Still out: one-to-many hops (one upstream row to several target rows), and a derived dataset as a downstream.
+
 ## 2. Stack and repository layout
 
 **Default stack** (confirm against the cluster; see section 11):
@@ -179,6 +181,28 @@ compute_budget_minutes: 8
 ```
 
 **Table-wide datasets.** A dataset that no feed lists covers a whole table, for example to run gold rules across every source system. It must set `owner` (whose recipients get its results) and `expectation_version` (it has no feed to take one from), has no `feed_filter`, and takes its settings from `defaults.yaml`. It gets the checks in `patterns/table_wide.yaml`: T1\_SCHEMA\_DRIFT, T1\_KEY\_NULLS and T1\_KEY\_DUPLICATES only, plus gold rules. A dataset that a feed lists takes its owner and expectation version from the feed and must set neither. Each dataset is listed by at most one feed.
+
+**Derived dataset** (release 2). A dataset that has no table of its own but a query over other datasets, used only as an upstream. It declares the grain at which a downstream is compared: its `key` is the grain. The engine builds the query; expressions are SQL fragments, validated and parsed like `feed_filter`, and name columns as `<dataset id>.<column>`.
+
+```yaml
+dataset: claims_by_member_month   # virtual: never checked itself, only read as an upstream
+layer: CURATED
+key: [memberid, service_month]    # the grain: group_by outputs only
+derived:
+  from: curated_claims            # rows after its feed_filter
+  joins:                          # optional; each after its own feed_filter
+    - { dataset: curated_members, match: { memberid: memberid }, type: left }   # match: from column -> joined column; left | inner
+  where: "curated_claims.status <> 'VOID'"                                   # optional
+  group_by:                       # output name -> expression
+    memberid: curated_claims.memberid
+    service_month: "substr(curated_claims.servicedate, 1, 7)"
+  columns:                        # output name -> aggregate expression
+    claim_count: "count(*)"
+    paid_total: "sum(cast(curated_claims.paidamount as decimal(18,2)))"
+    plan: "max(curated_members.plan)"
+```
+
+The engine adds `record_ts` and `load_ts` (UTC): the latest record and load time of the `from` rows in each group, so `from` needs both. They are the derived dataset's `record_time` and `load_time`; it sets neither (nor `feed_filter`, `file_name_column`, `partition_column`, `upstream`, `key_map` or `owned_columns`). No feed lists it, no rule targets it, and it gets no checks: the dataset that names it in `upstream` and `key_map` is checked against it like any upstream. `from` and `joins` name table datasets (not derived ones). Join type `left` keeps rows the lookup did not match, so their absence downstream is MISSING, and JOIN\_UNMATCHED (section 7) explains it; `inner` drops them, so they are never expected. Measures are compared as strings by HOP\_VALUE\_AGREEMENT: cast sums to the target's DECIMAL scale.
 
 **Watchdog** (in `defaults.yaml`): `watchdog_grace_minutes` (default 30).
 
@@ -353,6 +377,7 @@ Add `owned_columns` to the dataset config when HOP\_VALUE\_AGREEMENT is wanted, 
 Hop details:
 
 - **A hop** is this dataset and one upstream in its `key_map`; each hop check writes one result per upstream (group `upstream`). Keys on both sides are built from the mapped columns with each side's `key_normalise`, as one string (parts joined with `|`, null written as `<null>`). Each side's `feed_filter` applies. Both datasets need `record_time` and the upstream needs `load_time`; otherwise DID\_NOT\_RUN / invalid\_config.
+- **Derived upstreams** (release 2). When the upstream is a derived dataset, the hop reads its relation (the query built from its `derived` contract, section 3) wherever it would read a table, and nothing else changes: HOP\_KEY\_CURRENCY judges groups (a group MISSING here, STALE when newer rows reached the group upstream), HOP\_VALUE\_AGREEMENT compares the measures, `hop_exclusions` apply to the relation's columns, and `dre trace` reports the derived layer at its grain. A group's load time is its latest row's, so a group still receiving rows is pending until it has been quiet for `sla_hours`. HOP\_FILE\_COMPLETENESS does not apply (a derived dataset has no files). The relation aggregates the whole `from` table each run, within the compute budget.
 - **Keys judged.** An upstream key is judged once, in the window where its latest load time plus `sla_hours` falls (so a key younger than the SLA is never judged); a key with a row in this dataset loaded in the window is judged again once its upstream deadline has passed, so a key that regresses here without any upstream change (for example overwritten with an older version) is caught; and every key still open at this hop in `v_open_keys`. On `full_sweep_day` (the dataset's first window ending that day, in the `defaults.yaml` time zone, so once a day), every upstream key past its deadline. HOP\_FILE\_COMPLETENESS judges files the same way, by each file's first upstream load time.
 - **Ties.** Every upstream row at a key's latest record time is kept. HOP\_VALUE\_AGREEMENT requires each of them to match this dataset's latest row, so tied upstream rows that disagree with each other always fail.
 - **Population.** HOP\_KEY\_CURRENCY: keys judged. HOP\_VALUE\_AGREEMENT: judged keys that are CURRENT. HOP\_FILE\_COMPLETENESS: files judged; `detail` lists the short files (up to 100).
@@ -447,10 +472,11 @@ probes:
 | --- | --- | --- | --- |
 | 1 | NOT\_RUN | No row in this dataset has a load time after the upstream record's load time | `builtin` |
 | 2 | KEY\_MISMATCH | The key matches once a column in `mismatch_probe_drop` is ignored | `builtin` (NOT\_READY without `mismatch_probe_drop` on the dataset) |
-| 3 | TIE\_RESOLVED\_BY\_RULE | Several upstream rows share the latest record time, and applying `winner_rule` picks a row other than the one expected (for example the open row over a termination) | `builtin` (NOT\_READY without `winner_rule`) |
-| 4 | OLDER\_VERSION\_WRITTEN\_LATER | STALE only: this row's load time is later than the newer upstream record's load time, compared at `load_time.granularity` | `builtin` |
-| 5 | FILTERED | Matches a configured filter rule | `table_contains` (`filter_rules`) |
-| 6 | REJECTED | In the rejects table | `table_contains` (`rejects`) |
+| 3 | JOIN\_UNMATCHED | MISSING only, upstream a derived dataset with joins: a joined dataset had no match for the key's group (a left join; with an inner join the row is never expected) | `builtin` (NOT\_READY unless the upstream is derived with joins) |
+| 4 | TIE\_RESOLVED\_BY\_RULE | Several upstream rows share the latest record time, and applying `winner_rule` picks a row other than the one expected (for example the open row over a termination) | `builtin` (NOT\_READY without `winner_rule`) |
+| 5 | OLDER\_VERSION\_WRITTEN\_LATER | STALE only: this row's load time is later than the newer upstream record's load time, compared at `load_time.granularity` | `builtin` |
+| 6 | FILTERED | Matches a configured filter rule | `table_contains` (`filter_rules`) |
+| 7 | REJECTED | In the rejects table | `table_contains` (`rejects`) |
 | fallback | MERGE\_NOT\_APPLIED | No cause confirmed |  |
 
 **Load wrote nothing** (T1\_ZERO\_ROWS)

@@ -19,6 +19,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Callable
 
 from hcsc.datalake.dre.checks.base import CheckContext, CheckResult, did_not_run, from_exception, utc_literal
+from hcsc.datalake.dre.checks.derived import source_of
 from hcsc.datalake.dre.checks.keys import column_expr, key_string
 from hcsc.datalake.dre.checks.times import utc_expr
 
@@ -64,12 +65,17 @@ def hop_params(ctx: CheckContext, event: Event, up_id: str, up: Dataset | None) 
                            group_values={"upstream": up_id})
     mapping = ds.key_map[up_id]  # this column -> upstream column
     tz = ctx.default_timezone
+    try:
+        up_source = source_of(up, ctx.upstreams, tz)  # the table, or a derived dataset's relation
+    except (KeyError, ValueError) as exc:
+        return did_not_run("invalid_config", detail=f"upstream {up_id} cannot be read: {type(exc).__name__}",
+                           group_values={"upstream": up_id})
     sla = timedelta(hours=ctx.settings.sla_hours)
     owned = [{"up": column_expr(up, u), "dn": column_expr(ds, d)} for u, d in ds.owned_columns.items()]
     filters = [f"({up.feed_filter})" if up.feed_filter else None,
                f"NOT coalesce(({ds.hop_exclusions[up_id]}), FALSE)" if up_id in ds.hop_exclusions else None]
     return {
-        "up_table": up.table, "up_filter": " AND ".join(f for f in filters if f) or None,
+        "up_table": up_source, "up_filter": " AND ".join(f for f in filters if f) or None,
         # for counting what the exclusions keep out: the upstream's own filter, and the exclusion
         "up_base_filter": up.feed_filter, "up_exclusion": ds.hop_exclusions.get(up_id),
         "up_key": key_string([column_expr(up, mapping[c]) for c in ds.key]),

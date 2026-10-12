@@ -121,8 +121,8 @@ def plan(config: Config, feed_id: str | None = None, per_table: bool = True) -> 
         listed = {ds for feed in config.feeds.values() for ds in feed.datasets}
         work += [
             Planned(None, ds, check)
-            for ds_id, ds in config.datasets.items() if ds_id not in listed
-            for check in checks_for(ds, None)
+            for ds_id, ds in config.datasets.items() if ds_id not in listed and ds.derived is None
+            for check in checks_for(ds, None)  # derived datasets are read as upstreams, never checked
         ]
     work += plan_rules(config, feed_id)
     return once_per_table(work, SCHEMA_DRIFT) if per_table else work
@@ -324,6 +324,17 @@ def refresh_landing(spark: SparkSession, config: Config, work: list[Planned], ru
     return problems
 
 
+def upstreams_of(config: Config, ds: Dataset) -> dict[str, Dataset]:
+    """The datasets a check on `ds` reads: each key_map upstream and, when one is derived, the
+    datasets it is derived from."""
+    from hcsc.datalake.dre.checks.derived import base_datasets
+
+    found = {u: config.datasets[u] for u in ds.key_map if u in config.datasets}
+    for up in list(found.values()):
+        found.update(base_datasets(up, config.datasets))
+    return found
+
+
 def check_context(spark: SparkSession, config: Config, planned: Planned, event: Event,
                   landing_problems: dict[str, CheckResult] | None = None, key_secret: bytes | None = None,
                   budget_minutes: float | None = None, record_key_events: bool = True) -> CheckContext:
@@ -332,7 +343,7 @@ def check_context(spark: SparkSession, config: Config, planned: Planned, event: 
     return CheckContext(
         spark, ds, planned.feed, config.dataset_settings(ds.dataset), config.defaults.timezone,
         config.defaults.dq_database, landing_problem,
-        upstreams={u: config.datasets[u] for u in ds.key_map if u in config.datasets},
+        upstreams=upstreams_of(config, ds),
         key_secret=key_secret,
         full_sweep=is_full_sweep(config, ds.dataset, event),
         budget_minutes=budget_minutes, scan_mb_per_minute=config.defaults.scan_mb_per_minute,

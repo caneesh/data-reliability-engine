@@ -33,6 +33,8 @@ Read this first when resuming. Then `CLAUDE.md` (working rules), `docs/spec.md` 
 
 6. A review of an uploaded architecture-principles document (October 2026), checked against the code. Built after the user said yes: counts of excluded and pending items on hop results, and a three-layer acceptance test. What was not taken, and why, is in `docs/decisions.md`, "Architecture principles document (October 2026)"; the acceptance-criteria table is in `docs/architecture.md`.
 
+7. Derived datasets (release 2): designed, agreed and built on 2026-10-12. `docs/design/derived-datasets.md`, spec sections 1, 3, 6 and 7. The sample config has no derived dataset; the examples are in the spec and the tests. The user said real keys come in later iterations.
+
 **Next action:** wait for the user's answers. Then turn each answer into configuration or a small change, with tests, CI green, and a summary that starts with the CI result. The release-1 milestone after that is the spec's two-week unattended run in a test environment, outside this repository.
 
 ## Waiting on answers

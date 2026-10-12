@@ -67,12 +67,16 @@ def chain(config: Config, ds: Dataset, values: dict[str, str]) -> list[Layer]:
     return layers
 
 
-def look_up(spark: SparkSession, layer: Layer, default_tz: str) -> None:
+def look_up(spark: SparkSession, layer: Layer, config: Config) -> None:
+    from hcsc.datalake.dre.checks.derived import source_of
+
     ds = layer.dataset
+    default_tz = config.defaults.timezone
     if ds.record_time is None:
         raise ValueError(f"{ds.dataset} has no record_time")
     match = [(column_expr(ds, c), sql_string(v)) for c, v in layer.values.items()]
-    sql = render_sql("trace_layer.sql.j2", table=ds.table, feed_filter=ds.feed_filter, match=match,
+    sql = render_sql("trace_layer.sql.j2", table=source_of(ds, config.datasets, default_tz),
+                     feed_filter=ds.feed_filter, match=match,
                      record_expr=utc_expr(ds.record_time, default_tz),
                      load_expr=utc_expr(ds.load_time, default_tz) if ds.load_time else None,
                      file_column=ds.file_name_column)
@@ -136,8 +140,8 @@ def trace(spark: SparkSession, config: Config, dataset_id: str, raw_key: list[st
     layers = chain(config, ds, normalise_values(spark, ds, raw_key))
     lines = []
     for layer in layers:
-        look_up(spark, layer, config.defaults.timezone)
-        where = f"{layer.dataset.dataset} ({layer.dataset.table})"
+        look_up(spark, layer, config)
+        where = f"{layer.dataset.dataset} ({layer.dataset.table or 'derived'})"
         if not layer.rows:
             lines.append(f"{where}: absent")
             continue

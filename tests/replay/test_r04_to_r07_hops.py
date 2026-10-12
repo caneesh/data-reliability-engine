@@ -134,7 +134,7 @@ def test_r05_gold_ran_but_did_not_apply_the_termination_is_merge_not_applied(spa
     line = cause(spark, replay, "HOP_KEY_CURRENCY")
     assert (line.code, line.proven) == ("MERGE_NOT_APPLIED", False)
     assert line.ruled_out == ("NOT_RUN", "TIE_RESOLVED_BY_RULE", "OLDER_VERSION_WRITTEN_LATER")
-    assert line.not_ready == ("KEY_MISMATCH", "FILTERED", "REJECTED")
+    assert line.not_ready == ("KEY_MISMATCH", "JOIN_UNMATCHED", "FILTERED", "REJECTED")
 
 
 def test_r06_tied_open_and_terminated_rows_is_value_agreement_failed(spark, tmp_path) -> None:
@@ -172,8 +172,9 @@ def test_r07_older_version_loaded_after_a_newer_one_reached_curated_is_stale(spa
     assert (line.code, line.proven) == ("OLDER_VERSION_WRITTEN_LATER", True)
     # Every cause check ran and was recorded, in order: gold did run after the newer version.
     states = [(r.cause_code, r.state) for r in cause_rows(spark, replay, "gold_member_coverage", "HOP_KEY_CURRENCY")]
-    assert states == [("NOT_RUN", "RULED_OUT"), ("KEY_MISMATCH", "NOT_READY"), ("TIE_RESOLVED_BY_RULE", "RULED_OUT"),
-                      ("OLDER_VERSION_WRITTEN_LATER", "CONFIRMED"), ("FILTERED", "NOT_READY"), ("REJECTED", "NOT_READY")]
+    assert states == [("NOT_RUN", "RULED_OUT"), ("KEY_MISMATCH", "NOT_READY"), ("JOIN_UNMATCHED", "NOT_READY"),
+                      ("TIE_RESOLVED_BY_RULE", "RULED_OUT"), ("OLDER_VERSION_WRITTEN_LATER", "CONFIRMED"),
+                      ("FILTERED", "NOT_READY"), ("REJECTED", "NOT_READY")]
 
 
 def test_hops_pass_when_gold_is_current_and_agrees(spark, tmp_path) -> None:

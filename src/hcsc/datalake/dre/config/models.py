@@ -329,9 +329,44 @@ class WinnerRule(Model):
     formats: dict[Identifier, NonEmptyStr] = {}
 
 
+class Join(Model):
+    """One joined dataset of a derived dataset. `match` maps a column of `from` to a column of
+    the joined dataset (not `on`: YAML reads an unquoted `on` as a boolean). type left: unmatched
+    rows stay (a dropped row downstream is MISSING, and JOIN_UNMATCHED can explain it); inner:
+    unmatched rows are not expected downstream."""
+
+    dataset: Identifier
+    match: Annotated[dict[Identifier, Identifier], Field(min_length=1)]
+    type: Literal["left", "inner"] = "left"
+
+
+class Derived(Model):
+    """A derived dataset's query, built by the engine (spec section 3, release 2): the rows of
+    `from` (after its feed_filter), joined to each of `joins` (after theirs), filtered by `where`,
+    grouped by `group_by` (output name -> expression), with `columns` (output name -> aggregate
+    expression). The engine adds record_ts and load_ts: the latest record and load time of the
+    `from` rows in each group, in UTC. Tables are referenced by their dataset id in expressions.
+    Expressions are SQL fragments, validated and parsed like feed_filter."""
+
+    from_: Identifier = Field(alias="from")
+    joins: list[Join] = []
+    where: SqlFragment | None = None
+    group_by: Annotated[dict[Identifier, SqlFragment], Field(min_length=1)]
+    columns: dict[Identifier, SqlFragment] = {}
+
+    @property
+    def sources(self) -> list[str]:
+        return [self.from_, *(j.dataset for j in self.joins)]
+
+
+DERIVED_RECORD = TimeColumn(column="record_ts", timezone="UTC")
+DERIVED_LOAD = TimeColumn(column="load_ts", granularity="minute", timezone="UTC")
+
+
 class Dataset(SettingsOverride):
     dataset: Identifier
-    table: TableName
+    table: TableName | None = None    # a real table; or
+    derived: Derived | None = None    # a query over other datasets (release 2): an upstream only
     layer: Layer
     upstream: list[Identifier] = []
     feed_filter: SqlFragment | None = None
@@ -353,6 +388,24 @@ class Dataset(SettingsOverride):
     # leave those rows out of what they expect.
     hop_exclusions: dict[Identifier, SqlFragment] = {}
     winner_rule: WinnerRule | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _derived_times(cls, data: Any) -> Any:
+        """A derived dataset's times are the engine's record_ts and load_ts (UTC), unless set."""
+        if isinstance(data, dict) and data.get("derived") is not None:
+            data = dict(data)
+            data.setdefault("record_time", DERIVED_RECORD.model_dump())
+            data.setdefault("load_time", DERIVED_LOAD.model_dump())
+            data.setdefault("upstream", [])
+        return data
+
+    @model_validator(mode="after")
+    def _table_or_derived(self) -> Dataset:
+        if (self.table is None) == (self.derived is None):
+            raise invalid("a dataset is either a table or derived, not both or neither",
+                          "set table: database.table, or derived: {from, group_by, ...}")
+        return self
 
 
 # --- rules ---

@@ -22,7 +22,7 @@ from hcsc.datalake.dre.config.loader import (
     format_loc,
     load,
 )
-from hcsc.datalake.dre.config.models import TEMPLATE_PARAMS
+from hcsc.datalake.dre.config.models import DERIVED_LOAD, DERIVED_RECORD, TEMPLATE_PARAMS
 from hcsc.datalake.dre.config.probes import PROBE_PARAMS, parameter_sets
 
 # Checks whose evaluation window is defined by load time (spec section 6).
@@ -100,6 +100,52 @@ def cross_check(config: Config, feeds_complete: bool = True) -> list[ConfigError
     # Datasets.
     for ds_id, ds in datasets.items():
         key = set(ds.key)
+
+        # Derived datasets (release 2): a query over other datasets, used only as an upstream.
+        if ds.derived is not None:
+            d = ds.derived
+            if ds_id in member_of:
+                err("dataset", ds_id, ("derived",), f"feed {member_of[ds_id]!r} lists this derived dataset",
+                    "remove it from the feed: a derived dataset is checked only as another dataset's upstream")
+            for i, src in enumerate(d.sources):
+                loc = ("derived", "from") if i == 0 else ("derived", "joins", i - 1, "dataset")
+                if src == ds_id:
+                    err("dataset", ds_id, loc, "a derived dataset reads itself", "name another dataset")
+                elif src not in datasets:
+                    err("dataset", ds_id, loc, f"unknown dataset {src!r}", f"add datasets/{src}.yaml")
+                elif datasets[src].derived is not None:
+                    err("dataset", ds_id, loc, f"{src!r} is itself derived", "derive from table datasets only")
+            base = datasets.get(d.from_)
+            if base is not None and base.derived is None:
+                for what in ("record_time", "load_time"):
+                    if getattr(base, what) is None:
+                        err("dataset", d.from_, (what,), f"{what} is not set, and {ds_id!r} derives record_ts and "
+                            f"load_ts from it", "add " + what + ": {column: ..., format: ...}")
+            for i, c in enumerate(ds.key):
+                if c not in d.group_by:
+                    err("dataset", ds_id, ("key", i), f"{c!r} is not a group_by output",
+                        "a derived dataset's key is its grain: name group_by outputs only")
+            for name in d.columns:
+                if name in d.group_by:
+                    err("dataset", ds_id, ("derived", "columns", name), "named both in group_by and columns",
+                        "use each output name once")
+            for what, fixed in (("record_time", DERIVED_RECORD), ("load_time", DERIVED_LOAD)):
+                col = getattr(ds, what)
+                if col is not None and (col.column != fixed.column or col.format is not None
+                                        or (col.timezone or "UTC") != "UTC"):
+                    err("dataset", ds_id, (what,), f"{what} of a derived dataset is the engine's {fixed.column} (UTC)",
+                        f"leave {what} out, or set column: {fixed.column} with no format and timezone UTC")
+            for what in ("feed_filter", "file_name_column", "partition_column"):
+                if getattr(ds, what) is not None:
+                    err("dataset", ds_id, (what,), f"a derived dataset has no {what}",
+                        "filter with derived.where; derived datasets have no files or partitions")
+            if ds.key_map or ds.upstream or ds.owned_columns:
+                err("dataset", ds_id, ("key_map",), "a derived dataset cannot be a downstream (no key_map, upstream or "
+                    "owned_columns)", "derive it as an upstream of the dataset that compares against it")
+            if feeds_complete and not any(ds_id in other.upstream for other in datasets.values()):
+                err("dataset", ds_id, ("dataset",), "no dataset names this derived dataset as an upstream",
+                    "add it to the upstream and key_map of the dataset it feeds, or remove it", level="warning")
+            continue
 
         # Feed datasets take their owner from the feed; table-wide datasets need their own.
         if ds_id in member_of:

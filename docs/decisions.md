@@ -268,6 +268,15 @@ Deferred:
 - **Scheduler history as cause evidence:** waits on the platform team saying where it can be read.
 - **Criterion 7** (an outage and heavy load don't affect sources): by design, but it can only be demonstrated in a representative cluster.
 
+## Derived datasets (release 2, 2026-10-12)
+
+Planned in a design discussion, agreed by the user (structured contract, upstream only, a synthetic example until real keys arrive, and spec section 1 amended for release 2), then built. The reasoning and the choices are in `docs/design/derived-datasets.md`; the contract is in spec section 3. What changed:
+
+1. **Config.** A dataset is either a `table` or `derived` (from, joins, where, group_by, columns). A derived dataset's `record_time` and `load_time` are the engine's `record_ts` and `load_ts` (UTC); it sets no filter, files, partitions, upstream or key_map; no feed lists it; `dre validate` checks all of this and warns when nothing uses it.
+2. **Rendering.** `checks/derived.py` renders the relation from `checks/sql/derived_relation.sql.j2`. Hop parameters, `dre trace`, NO_UPSTREAM_DATA and `dre dry-run` read a derived dataset through it. The checks get the derived dataset's base datasets through `CheckContext.upstreams`.
+3. **Planning.** Derived datasets are never planned: they are read as upstreams only.
+4. **Cause.** JOIN_UNMATCHED (builtin) is order 3 in every pattern's key_missing_or_stale: NOT_READY unless the upstream is derived with joins, CONFIRMED when a joined dataset had no match for the MISSING key's group. The existing tests that encode the cause order were updated for the new entry.
+
 ## Notes for later steps
 
 - **Step 4:** done: `dre dry-run` parses SQL fragments (`config/fragments.py`).

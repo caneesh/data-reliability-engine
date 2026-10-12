@@ -39,8 +39,21 @@ def check_fragments(spark: SparkSession, config: Config, feed_id: str | None = N
         except Exception:
             return False
 
+    from hcsc.datalake.dre.checks.derived import relation
+
     feeds = [config.feeds[feed_id]] if feed_id else list(config.feeds.values())
     dataset_ids = {ds for feed in feeds for ds in feed.datasets if ds in config.datasets}
+    # derived upstreams of the feeds' datasets: their whole query is parsed
+    derived_ids = {up for ds_id in dataset_ids for up in config.datasets[ds_id].key_map
+                   if up in config.datasets and config.datasets[up].derived is not None}
+    for ds_id in sorted(derived_ids):
+        ds = config.datasets[ds_id]
+        bases = [config.datasets.get(s) for s in ds.derived.sources]
+        if all(b is not None and b.table and table_ok(b.table) for b in bases):
+            try:
+                spark.sql(f"SELECT * FROM {relation(ds, config.datasets, config.defaults.timezone)} LIMIT 0")
+            except Exception as exc:
+                report("dataset", ds_id, ("derived",), "derived", exc)
     for ds_id in sorted(dataset_ids):
         ds = config.datasets[ds_id]
         if ds.feed_filter and table_ok(ds.table):

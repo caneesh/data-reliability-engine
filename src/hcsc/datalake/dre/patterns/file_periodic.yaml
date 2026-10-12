@@ -41,6 +41,7 @@ causes:
     order:
       - {code: NOT_RUN, probe: builtin}
       - {code: KEY_MISMATCH, probe: builtin}
+      - {code: JOIN_UNMATCHED, probe: builtin}
       - {code: TIE_RESOLVED_BY_RULE, probe: builtin}
       - {code: OLDER_VERSION_WRITTEN_LATER, probe: builtin}
       - {code: FILTERED, probe: table_contains, params: filter_rules}

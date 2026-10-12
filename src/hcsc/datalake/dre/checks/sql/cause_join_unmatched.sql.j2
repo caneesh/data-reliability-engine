@@ -1,0 +1,5 @@
+{# JOIN_UNMATCHED: for the failing keys (by hash) of a hop from a derived upstream, the joined
+   datasets that had no match for the key's group ({{ unmatched }}, from the derived relation). #}
+SELECT {{ p.hash_fn }}({{ p.up_key }}) AS key_hash, {{ unmatched }} AS unmatched
+FROM {{ p.up_table }}
+WHERE size({{ unmatched }}) > 0 AND {{ p.hash_fn }}({{ p.up_key }}) IN ({{ hashes | join(', ') }})

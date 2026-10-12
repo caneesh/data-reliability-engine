@@ -26,6 +26,7 @@ This page answers the architecture concerns of the October 2026 code review. For
 | Columns the hop must carry | `owned_columns` | HOP\_VALUE\_AGREEMENT compares only these |
 | Allowed exclusions on a hop | `hop_exclusions` (per upstream: a SQL condition on the upstream's rows) | Hop checks do not expect those rows, so they are never counted as lost |
 | How versions are chosen | `winner_rule` (with `formats`) | Explains ties (TIE\_RESOLVED\_BY\_RULE) |
+| Aggregation or join to a coarser grain | A derived dataset (`derived`: from, joins, where, group\_by, columns) named as the upstream | The derived dataset's `key` is the comparison grain; its measures are compared by HOP\_VALUE\_AGREEMENT; `inner` joins declare rows that are not expected, `left` joins make an unmatched lookup a MISSING key with cause JOIN\_UNMATCHED |
 | Expected cardinality | `key_unique`, gold rules (`max_rows_per_key`, `max_open_rows_per_key`) | Duplicates are a check of their own |
 
 **Comparison grain:**
@@ -33,10 +34,12 @@ This page answers the architecture concerns of the October 2026 code review. For
 - **HOP\_KEY\_CURRENCY:** one row of judgement per upstream key: its latest record time, upstream against here.
 - **HOP\_VALUE\_AGREEMENT:** the key's latest version on each side, taken as the set of distinct owned-column values among the rows tied at that side's latest record time. Identical multi-row versions agree.
 - **HOP\_FILE\_COMPLETENESS:** row counts per upstream file, after filters and exclusions.
+- **A derived upstream:** one row of judgement per group of the derived dataset's `key`; a group's load time is its latest row's, so a group still receiving rows is pending.
 
 **Open:**
 
-- **Joins and aggregations.** Hops are key-preserving (one upstream key to one key here). A downstream table built by joining or aggregating several upstreams needs a contract kind the engine does not have yet. Such a dataset should not be given a `key_map`.
+- **One-to-many hops** (one upstream row exploded into several target rows): `key_map` cannot express a wider target key.
+- **A derived dataset as a downstream** (reconciling counts-per-month of gold against counts-per-month of curated): derived datasets are upstreams only, for now.
 - **Scheduler history.** Job status is never used to pass a check, which is right: checks read the data. As evidence for causes (NOT\_RUN, PIPELINE\_STALLED), scheduler history would help, but it waits on the platform team saying where it can be read.
 
 **What a hop result says it left out.** HOP\_KEY\_CURRENCY and HOP\_FILE\_COMPLETENESS append what they did not judge, and why, to `observed`: keys or rows excluded by `hop_exclusions`, and keys or files pending (loaded upstream within `sla_hours`, so not due yet). For example: `1 missing and 0 stale of 2 keys; 1 key excluded by hop_exclusions, 1 key pending (within sla_hours)`. When nothing was judged, the DID\_NOT\_RUN result's `detail` says the same. So a raw-to-gold difference is accounted for in the digest:
@@ -45,7 +48,7 @@ This page answers the architecture concerns of the October 2026 code review. For
 | --- | --- |
 | Delivered | CURRENT key; file with all its rows |
 | Legitimately excluded | Counted as excluded by `hop_exclusions` |
-| Transformed / aggregated | Not supported yet (see "Joins and aggregations" above) |
+| Transformed / aggregated | A derived dataset at the target's grain; its groups and measures are judged like keys and owned columns |
 | Delayed / pending | Counted as pending; judged once its deadline passes |
 | Unexplained | MISSING or STALE, with a cause line that is not confirmed |
 | Insufficient evidence | UNASSESSABLE keys; cause lines marked "insufficient evidence" |

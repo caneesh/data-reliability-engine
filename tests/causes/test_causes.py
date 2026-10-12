@@ -404,7 +404,7 @@ def test_key_causes_without_a_secret_are_not_ready(spark) -> None:
     cx = context(spark, dn, "HOP_KEY_CURRENCY", feed(), upstream=up)
     result = CheckResult("FAILED", population=1, violations=1, group_values={"upstream": up.dataset})
     rows = explain(cx, result, "eval-1", "run-1", EVENT.window_end.date(), EVENT.window_end)
-    assert len(rows) == 6 and {r["failure_ref"] for r in rows} == {None}
+    assert len(rows) == 7 and {r["failure_ref"] for r in rows} == {None}
     assert {(r["state"], json.loads(r["evidence"])["reason"]) for r in rows} == {
         ("NOT_READY", "hmac_secret_file is not set, so failing keys cannot be referenced")}
 
@@ -416,8 +416,9 @@ def test_explain_writes_every_cause_check_in_order(spark) -> None:
     result = CheckResult("FAILED", population=1, violations=1, group_values={"upstream": up.dataset})
     rows = explain(cx, result, "eval-1", "run-1", EVENT.window_end.date(), EVENT.window_end)
     assert [(r["order_no"], r["cause_code"], r["state"]) for r in rows] == [
-        (1, "NOT_RUN", "RULED_OUT"), (2, "KEY_MISMATCH", "NOT_READY"), (3, "TIE_RESOLVED_BY_RULE", "NOT_READY"),
-        (4, "OLDER_VERSION_WRITTEN_LATER", "CONFIRMED"), (5, "FILTERED", "NOT_READY"), (6, "REJECTED", "NOT_READY")]
+        (1, "NOT_RUN", "RULED_OUT"), (2, "KEY_MISMATCH", "NOT_READY"), (3, "JOIN_UNMATCHED", "NOT_READY"),
+        (4, "TIE_RESOLVED_BY_RULE", "NOT_READY"), (5, "OLDER_VERSION_WRITTEN_LATER", "CONFIRMED"),
+        (6, "FILTERED", "NOT_READY"), (7, "REJECTED", "NOT_READY")]
     assert {r["hop"] for r in rows} == {"example_curated_enrollment->gold_ex"}
     assert {r["failure_ref"] for r in rows} == {key_hash(SECRET, KEY)}
     assert KEY not in json.dumps(rows, default=str)  # key values never leave memory
@@ -440,7 +441,7 @@ def test_a_failure_that_cannot_be_listed_is_error_for_every_cause(spark) -> None
     cx = context(spark, gold("causes.no_such_table"), "HOP_KEY_CURRENCY", feed(),
                  upstream=curated("causes.x", load_time=None), secret=SECRET)
     rows = explain(cx, CheckResult("FAILED", 1, 1), "e", "r", EVENT.window_end.date(), EVENT.window_end)
-    assert {r["state"] for r in rows} == {"ERROR"} and len(rows) == 6
+    assert {r["state"] for r in rows} == {"ERROR"} and len(rows) == 7
 
 
 def test_cause_lines() -> None:
@@ -464,7 +465,7 @@ def test_a_failure_with_nothing_to_explain_is_recorded_as_insufficient_evidence(
                  secret=SECRET)
     with mock.patch("hcsc.datalake.dre.causes.engine.failures_for", return_value=[]):
         rows = explain(cx, CheckResult("FAILED", 1, 1), "e", "r", EVENT.window_end.date(), EVENT.window_end)
-    assert len(rows) == 6 and {(r["state"], r["failure_ref"]) for r in rows} == {("NOT_READY", None)}
+    assert len(rows) == 7 and {(r["state"], r["failure_ref"]) for r in rows} == {("NOT_READY", None)}
 
 
 def test_file_value_compare_can_confirm_on_any_different_partition(spark, tmp_path) -> None:
