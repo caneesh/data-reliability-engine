@@ -7,7 +7,7 @@ The Data Reliability Engine (DRE) is a read-only engine for data quality checks 
 - Open decisions and defaults taken: [`docs/decisions.md`](docs/decisions.md)
 - Design notes: [`docs/design/`](docs/design/) (derived datasets: join and aggregate hops)
 - Guarantees and limits (isolation, reconciliation contracts, lineage, evidence quality, recovery, replay, safeguards): [`docs/architecture.md`](docs/architecture.md)
-- Where the build stands and what is waiting: [`docs/handoff.md`](docs/handoff.md)
+- Where the build stands and what is waiting: [`docs/handoff.md`](docs/handoff.md); the prompt to paste after compacting: [`docs/resume-prompt.md`](docs/resume-prompt.md)
 
 ## Development
 
