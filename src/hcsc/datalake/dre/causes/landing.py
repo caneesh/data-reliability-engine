@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from hcsc.datalake.dre.causes.base import (
-    CauseContext, Failure, Outcome, confirmed, not_ready, ruled_out,
+    CauseContext, Failure, Outcome, builtin, confirmed, not_ready, ruled_out,
 )
 from hcsc.datalake.dre.checks.base import error_detail, render_sql
 from hcsc.datalake.dre.checks.times import as_utc
@@ -43,6 +43,7 @@ def unloaded_files_after(cx: CauseContext, after: datetime) -> tuple[str, ...] |
                         if r.raw_rows == 0 and as_utc(r.first_seen_at) >= as_utc(after)))
 
 
+@builtin("PIPELINE_STALLED")
 def pipeline_stalled(cx: CauseContext, failure: Failure) -> Outcome:
     """CONFIRMED when other files were first seen with or after this one (or since the missed
     slot) and none of them has raw rows either. No such file at all: RULED_OUT (nothing shows the
@@ -85,6 +86,7 @@ def _missing(exc: BaseException) -> bool:
     return "FileNotFoundException" in text or "PATH_NOT_FOUND" in text or "does not exist" in text
 
 
+@builtin("UNREADABLE")
 def unreadable(cx: CauseContext, failure: Failure) -> Outcome:
     """CONFIRMED when a file of the failure has no readable header for the feed's file_format."""
     if cx.feed is None or cx.feed.landing is None:

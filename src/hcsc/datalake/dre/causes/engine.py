@@ -4,7 +4,8 @@ When a check FAILS, every cause check its pattern lists for that failure type ru
 for each failing thing (causes/failures.py), and one dq_cause_result row is written per cause
 check. The cause is the first CONFIRMED; with none, the pattern's fallback, "not proven".
 A cause check whose parameters are missing or null is NOT_READY, never RULED_OUT; one that
-raises is ERROR, and never stops the run.
+raises is ERROR, and never stops the run. Probe types come from the probe registry
+(config/probes.py) and builtin causes from the builtin registry (causes/base.py).
 """
 
 from __future__ import annotations
@@ -14,31 +15,17 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Any
 
-from hcsc.datalake.dre.causes import landing, merge
 from hcsc.datalake.dre.causes.base import (
-    CONFIRMED, ERROR, NOT_READY, RULED_OUT, CauseContext, Failure, Outcome, error, not_ready,
+    BUILTINS, CONFIRMED, ERROR, NOT_READY, RULED_OUT, CauseContext, Failure, Outcome, error, not_ready,
 )
 from hcsc.datalake.dre.causes.failures import failures_for
-from hcsc.datalake.dre.causes.probes import PROBES
 from hcsc.datalake.dre.checks.hop.common import hop_label as hop_label_of
 from hcsc.datalake.dre.checks.registry import CauseEntry, FailureType, pattern_causes
-from hcsc.datalake.dre.config.probes import PROBE_PARAMS, is_ready, parameter_sets
+from hcsc.datalake.dre.config.probes import BUILTIN, PROBES, is_ready, parameter_sets
 
 if TYPE_CHECKING:
     from hcsc.datalake.dre.checks.base import CheckResult
 
-BUILTINS = {
-    "PIPELINE_STALLED": landing.pipeline_stalled,
-    "UNREADABLE": landing.unreadable,
-    "NOT_RUN": merge.not_run,
-    "FILE_SKIPPED": merge.file_skipped,
-    "INVALID_KEY": merge.invalid_key,
-    "KEY_MISMATCH": merge.key_mismatch,
-    "JOIN_UNMATCHED": merge.join_unmatched,
-    "TIE_RESOLVED_BY_RULE": merge.tie_resolved_by_rule,
-    "OLDER_VERSION_WRITTEN_LATER": merge.older_version_written_later,
-    "NO_UPSTREAM_DATA": merge.no_upstream_data,
-}
 NO_SECRET = "hmac_secret_file is not set, so failing keys cannot be referenced"
 NOTHING_TO_EXPLAIN = "no failing item carries the evidence a cause check needs (for example only UNASSESSABLE keys)"
 
@@ -58,20 +45,20 @@ def run_entry(cx: CauseContext, entry: CauseEntry, failure: Failure) -> Outcome:
     try:
         if failure.ref is None and failure.key is None and cx.check_id in ("HOP_KEY_CURRENCY", "HOP_VALUE_AGREEMENT"):
             return not_ready(NO_SECRET)
-        if entry.probe == "builtin":
+        if entry.probe == BUILTIN:
             return BUILTINS[entry.code](cx, failure)
         if entry.params:
             raw = (cx.feed.probes if cx.feed else {}).get(entry.params)
             sets = parameter_sets(raw)
         else:
             sets = [{}]
-        model = PROBE_PARAMS[entry.probe]
+        probe = PROBES[entry.probe]
         outcomes = []
         unready = 0
         for raw_set in sets:
-            params = model.model_validate(raw_set or {})
+            params = probe.params.model_validate(raw_set or {})
             if is_ready(params):
-                outcomes.append(PROBES[entry.probe](cx, params, failure))
+                outcomes.append(probe.run(cx, params, failure))
             else:
                 unready += 1
         if not outcomes:

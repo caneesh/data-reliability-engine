@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 
 from hcsc.datalake.dre.checks.base import Check, CheckContext, CheckResult, from_counts, render_sql
 from hcsc.datalake.dre.checks.hop.common import hop_params, not_judged, per_hop, register_key_hash, upstream_pairs
+from hcsc.datalake.dre.checks.registry import register_check
 
 if TYPE_CHECKING:
     from hcsc.datalake.dre.checks.events import Event
@@ -80,3 +81,6 @@ class KeyCurrency(Check):
         if result.state == "FAILED":
             return replace(result, detail="key events not recorded: hmac_secret_file is not set")
         return result
+
+
+register_check(KeyCurrency())

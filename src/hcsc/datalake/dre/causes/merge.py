@@ -11,7 +11,7 @@ import re
 from datetime import datetime
 from typing import Any
 
-from hcsc.datalake.dre.causes.base import CauseContext, Failure, Outcome, confirmed, not_ready, ruled_out
+from hcsc.datalake.dre.causes.base import CauseContext, Failure, Outcome, builtin, confirmed, not_ready, ruled_out
 from hcsc.datalake.dre.checks.base import render_sql, utc_literal
 from hcsc.datalake.dre.checks.derived import UNMATCHED_COLUMN, source_of
 from hcsc.datalake.dre.checks.hop.common import hop_params, register_key_hash
@@ -72,6 +72,7 @@ def _upstream_load(cx: CauseContext, failure: Failure) -> datetime | None:
     return None if row is None else row.first_load
 
 
+@builtin("NOT_RUN")
 def not_run(cx: CauseContext, failure: Failure) -> Outcome:
     """CONFIRMED when nothing loaded into this dataset at or after the upstream rows' load."""
     if cx.dataset.load_time is None:
@@ -85,6 +86,7 @@ def not_run(cx: CauseContext, failure: Failure) -> Outcome:
     return confirmed(**evidence) if latest is None or latest < upstream_load else ruled_out(**evidence)
 
 
+@builtin("FILE_SKIPPED")
 def file_skipped(cx: CauseContext, failure: Failure) -> Outcome:
     """CONFIRMED when none of the file's rows are here while a later upstream file's rows are."""
     files = hop_files(cx)
@@ -101,6 +103,7 @@ def file_skipped(cx: CauseContext, failure: Failure) -> Outcome:
     return confirmed(later_files_loaded=len(later)) if later else ruled_out(rows_here=0, later_files_loaded=0)
 
 
+@builtin("INVALID_KEY")
 def invalid_key(cx: CauseContext, failure: Failure) -> Outcome:
     """CONFIRMED when the file has upstream rows with a null, empty or unparseable key column."""
     row = hop_files(cx).get(failure.file_name)
@@ -110,6 +113,7 @@ def invalid_key(cx: CauseContext, failure: Failure) -> Outcome:
     return confirmed(**evidence) if row.invalid_rows else ruled_out(**evidence)
 
 
+@builtin("KEY_MISMATCH")
 def key_mismatch(cx: CauseContext, failure: Failure) -> Outcome:
     """MISSING keys: CONFIRMED when the key matches a key here once one column listed in
     mismatch_probe_drop is left out (on both sides)."""
@@ -157,6 +161,7 @@ def winner_order(cx: CauseContext) -> str:
     return ", ".join(terms)
 
 
+@builtin("JOIN_UNMATCHED")
 def join_unmatched(cx: CauseContext, failure: Failure) -> Outcome:
     """MISSING keys of a hop from a derived upstream with joins: CONFIRMED when a joined dataset had
     no match for the key's group (a left join; with an inner join the row is never expected)."""
@@ -176,6 +181,7 @@ def join_unmatched(cx: CauseContext, failure: Failure) -> Outcome:
     return ruled_out(joins=[j.dataset for j in up.derived.joins])
 
 
+@builtin("TIE_RESOLVED_BY_RULE")
 def tie_resolved_by_rule(cx: CauseContext, failure: Failure) -> Outcome:
     """CURRENT keys: CONFIRMED when several upstream rows tie at the latest record time with
     different owned-column values, and this dataset kept the row the winner rule ranks first."""
@@ -195,6 +201,7 @@ def tie_resolved_by_rule(cx: CauseContext, failure: Failure) -> Outcome:
     return confirmed(**evidence) if row.variants > 1 and row.winner_here else ruled_out(**evidence)
 
 
+@builtin("OLDER_VERSION_WRITTEN_LATER")
 def older_version_written_later(cx: CauseContext, failure: Failure) -> Outcome:
     """STALE keys: CONFIRMED when this dataset's row for the key was loaded after the newer
     upstream version was loaded, compared at this dataset's load_time granularity."""
@@ -228,6 +235,7 @@ def business_window(cx: CauseContext, slot: datetime) -> tuple[datetime, datetim
     return start, as_utc(slot) + timedelta(hours=cx.ctx.settings.sla_hours)
 
 
+@builtin("NO_UPSTREAM_DATA")
 def no_upstream_data(cx: CauseContext, failure: Failure) -> Outcome:
     """CONFIRMED only when the upstream data is genuinely absent: every upstream dataset loaded
     no rows in the failing load's business window (business_window), not the run's execution

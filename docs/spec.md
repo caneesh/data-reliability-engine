@@ -22,6 +22,8 @@ Repository copy: production paths, file names, and database and table names are 
 
 **Release 2 (added October 2026, after the architecture review):** derived datasets, so a hop can compare at a grain other than the upstream's rows: an aggregate (one gold row per group of upstream rows) or a join (upstream rows looked up against another dataset). Section 3 ("Derived dataset") and section 6 ("Derived upstreams"). Still out: one-to-many hops (one upstream row to several target rows), and a derived dataset as a downstream.
 
+**Release 3 (extensibility, October 2026; `docs/design/extensibility.md`):** the engine's capabilities (checks, cause probes, builtin causes, gold rule templates, key normalisers) register themselves where they are defined, so adding one is adding a module (section 2, "Extension points"). Later steps of that design add check parameters, patterns and rule templates from configuration, named calendars, notification sinks and extension packages; each amends this spec when built.
+
 ## 2. Stack and repository layout
 
 **Default stack** (confirm against the cluster; see section 11):
@@ -36,6 +38,8 @@ Repository copy: production paths, file names, and database and table names are 
 
 All check logic is SQL rendered from templates and run through `spark.sql`, so the same logic runs on the cluster's Hive tables and on local test tables.
 
+**Extension points** (release 3). Five kinds of capability each have one registry (`registry.py`, class `Registry`): checks (`checks/registry.py`, `register_check`), cause probes (`config/probes.py`, `@probe(name, params_model)`), builtin cause checks (`causes/base.py`, `@builtin(code)`), gold rule templates (`checks/rules/template.py`, `register_template(TemplateSpec)`) and key normalisers (`checks/keys.py`, `register_normaliser`). A capability registers itself in the module that defines it; nothing central lists them. The built-in ones are found by importing the engine's own packages on first use (`checks/tier1`, `checks/hop`, `causes`, `checks/rules/templates`). An id registered twice is an error, because check ids go into `evaluation_id` and cause codes into `dq_cause_result`. A feed's `pattern` must be a packaged pattern file, a rule's `template` a registered template, a `key_normalise` entry a registered normaliser; `dre validate` reports anything else with the known names in its fix. Pattern YAML is checked against the registries when loaded: an unknown check, probe type or builtin cause code is an error. Every capability keeps the hard constraints: a check writes exactly PASSED, FAILED or DID\_NOT\_RUN through `from_counts` or `did_not_run`; a probe is NOT\_READY without its parameters and never raises out of the engine; a template's SQL returns `population` and `violations`.
+
 ```text
 data-reliability-engine/
   README.md
@@ -49,11 +53,13 @@ data-reliability-engine/
           cli.py             # validate, install, dry-run, run, trace, watchdog
           session.py         # the Spark session (active one, or a new one with Hive support)
           runner.py          # dre run and dre dry-run: plan, evaluate, append results, run rows
+          registry.py        # the Registry class: capabilities register themselves; built-ins found by import
           config/
             models.py        # Pydantic models for feeds, datasets, rules, defaults
             loader.py        # load YAML, apply defaults and overrides
             validate.py      # static and runtime validation
             fragments.py     # dry-run: parse SQL fragments from config against Spark
+            probes.py        # the probe registry (type name, params model, function) and readiness
           patterns/
             file_cyclic.yaml # checks and cause checks per pattern
             file_periodic.yaml
@@ -61,20 +67,21 @@ data-reliability-engine/
             table_wide.yaml  # checks for table-wide datasets (no feed)
           checks/
             rules/schedule.py  # when a gold rule is due (frequency)
+            rules/template.py  # TemplateSpec and the template registry; rules/templates/: one module per template
             base.py          # Check interface, result building, denominator rule, preconditions, run_check
             budget.py        # compute budget: a check in its own Spark job group, cancelled when over
-            keys.py          # key expressions with key_normalise applied
+            keys.py          # key expressions with key_normalise applied; the normaliser registry
             times.py         # time columns to UTC; window bounds truncated to granularity
             cadence.py       # cadence slots (expected loads) in UTC
             events.py        # batch load events, event_id and evaluation_id
-            registry.py      # which checks run, from patterns/*.yaml
+            registry.py      # the check registry; which checks run, from patterns/*.yaml
             tier1/           # one module per Tier 1 check
             hop/             # hop checks: common.py (the two sides of a hop, judged keys, key_hash), one module per check
-            rules/           # rule_check.py: each gold rule as a check over its template
+            rules/           # rule_check.py: each gold rule as a check over its TemplateSpec
             sql/             # Jinja2 SQL templates
           causes/
             engine.py        # runs cause checks in order, writes dq_cause_result rows, resolves the cause
-            base.py          # outcomes, failures and the cause context
+            base.py          # outcomes, failures, the cause context and the builtin-cause registry
             failures.py      # the failing things of a FAILED check (files, slots, keys)
             probes.py        # the generic probe types
             landing.py merge.py  # builtin cause checks by hop type
@@ -155,7 +162,9 @@ layer: GOLD                       # RAW | CURATED | CDC | GOLD
 upstream: [rms_curated_enrollment]
 feed_filter: "src_sys_nm = 'RMS'" # rows belonging to this feed, when a table holds several
 key: [sub_id, mem_nbr, mbr_mbrshp_covrg_eff_dt, covrg_agrmt_id]
-key_normalise: { sub_id: strip_leading_zeros }   # strip_leading_zeros, or { parse_date: MM/dd/yyyy } (a date string read as yyyy-MM-dd)
+key_normalise: { sub_id: strip_leading_zeros }   # a registered normaliser: strip_leading_zeros, trim, upper, lower,
+                                  # { parse_date: MM/dd/yyyy } (a date string read as yyyy-MM-dd), or
+                                  # { regex_replace: { pattern: '-', replacement: '' } }
 record_time: { column: src_lcts, format: null }  # same shape as load_time; format null when the column is DATE or TIMESTAMP
 load_time: { column: gld_lcts, format: "yyyy-MM-dd HH:mm:ss:SSSSSS", granularity: minute, timezone: America/Chicago }
                                   # timezone: IANA zone the values are written in; null uses defaults.yaml `timezone`

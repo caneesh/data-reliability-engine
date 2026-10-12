@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 from hcsc.datalake.dre.checks.base import (
     Check, CheckContext, CheckResult, did_not_run, from_counts, render_sql, utc_literal,
 )
+from hcsc.datalake.dre.checks.registry import register_check
 
 if TYPE_CHECKING:
     from hcsc.datalake.dre.checks.events import Event
@@ -58,3 +59,6 @@ class FilesNotLoaded(Check):
             result = replace(result, detail=json.dumps({"not_loaded": paths, "listed": len(paths),
                                                         "total": row.violations}))
         return [result]
+
+
+register_check(FilesNotLoaded())

@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from hcsc.datalake.dre.checks.base import Check, CheckContext, CheckResult
+from hcsc.datalake.dre.checks.registry import register_check
 from hcsc.datalake.dre.checks.tier1.due_loads import judge_due_slots
 
 if TYPE_CHECKING:
@@ -27,3 +28,6 @@ class OnTime(Check):
             observed="{violations} of {population} due loads had no load within the SLA",
             expected=f"a load within {ctx.settings.sla_hours:g} hours of each cadence slot",
         )
+
+
+register_check(OnTime())

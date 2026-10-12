@@ -18,14 +18,14 @@ from hcsc.datalake.dre.causes import landing, merge
 from hcsc.datalake.dre.causes.base import CauseContext, Failure
 from hcsc.datalake.dre.causes.engine import CauseLine, explain, failure_type, resolve, run_entry
 from hcsc.datalake.dre.causes.probes import (
-    file_exists, file_value_compare, log_contains, size_changed, table_contains,
+    FileExists, FileValueCompare, LogContains, SizeChanged, TableContains, file_exists, file_value_compare,
+    log_contains, size_changed, table_contains,
 )
 from hcsc.datalake.dre.checks.base import CheckContext, CheckResult
 from hcsc.datalake.dre.checks.events import Event
 from hcsc.datalake.dre.checks.hop.common import key_hash
 from hcsc.datalake.dre.checks.registry import CauseEntry
 from hcsc.datalake.dre.config.models import Cadence, Dataset, Feed, Landing, TimeColumn
-from hcsc.datalake.dre.config.probes import FileExists, FileValueCompare, LogContains, SizeChanged, TableContains
 from hcsc.datalake.dre.store.local_setup import create_store
 from tests.checks.test_hop import curated, gold
 from tests.fixtures.landing import land_sequence_files

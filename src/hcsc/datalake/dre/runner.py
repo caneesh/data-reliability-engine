@@ -152,6 +152,7 @@ def rules_due(spark: SparkSession, config: Config, planned: list[Planned], run_s
 def plan_rules(config: Config, feed_id: str | None = None) -> list[Planned]:
     """One check per gold rule that is not retired, on its dataset (with the dataset's feed, if any)."""
     from hcsc.datalake.dre.checks.rules.rule_check import RuleCheck
+    from hcsc.datalake.dre.checks.rules.template import TEMPLATES
 
     planned = []
     for rule in config.rules.values():
@@ -160,9 +161,10 @@ def plan_rules(config: Config, feed_id: str | None = None) -> list[Planned]:
         feed = config.feed_of(rule.dataset)
         if feed_id is not None and (feed is None or feed.feed != feed_id):
             continue
-        parent_id = rule.params.get("parent_dataset") if rule.template == "child_within_parent" else None
-        check = RuleCheck(rule, config.datasets.get(parent_id) if parent_id else None)
-        planned.append(Planned(feed, config.datasets[rule.dataset], check))
+        spec = TEMPLATES[rule.template]
+        named = spec.related(spec.params.model_validate(rule.params)).values()
+        related = {d: config.datasets[d] for d in named if d in config.datasets}
+        planned.append(Planned(feed, config.datasets[rule.dataset], RuleCheck(rule, related)))
     return planned
 
 

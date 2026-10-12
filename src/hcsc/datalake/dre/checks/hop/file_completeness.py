@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from hcsc.datalake.dre.checks.base import Check, CheckContext, CheckResult, did_not_run, from_counts, render_sql
 from hcsc.datalake.dre.checks.hop.common import hop_params, not_judged, per_hop, upstream_pairs
+from hcsc.datalake.dre.checks.registry import register_check
 
 if TYPE_CHECKING:
     from hcsc.datalake.dre.checks.events import Event
@@ -59,3 +60,6 @@ class FileCompleteness(Check):
             short = [{"file": r.f, "upstream_rows": r.up_rows, "rows_here": r.dn_rows} for r in row.short or []]
             result = replace(result, detail=json.dumps({"short_files": short}))
         return result
+
+
+register_check(FileCompleteness())

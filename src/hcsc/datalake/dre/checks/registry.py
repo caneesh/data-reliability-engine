@@ -1,4 +1,9 @@
-"""Which checks run for a dataset: the pattern's list in patterns/*.yaml (spec section 2)."""
+"""Which checks run for a dataset: the pattern's list in patterns/*.yaml (spec section 2).
+
+Checks register themselves (`register_check`) in the module that defines them; the built-in
+modules under checks/tier1 and checks/hop are imported on first use. Patterns are the
+packaged patterns/*.yaml files.
+"""
 
 from __future__ import annotations
 
@@ -9,28 +14,28 @@ from typing import TYPE_CHECKING
 
 import yaml
 
-from hcsc.datalake.dre.checks.base import Check
-from hcsc.datalake.dre.checks.hop.file_completeness import FileCompleteness
-from hcsc.datalake.dre.checks.hop.key_currency import KeyCurrency
-from hcsc.datalake.dre.checks.hop.value_agreement import ValueAgreement
-from hcsc.datalake.dre.checks.tier1.files_not_loaded import FilesNotLoaded
-from hcsc.datalake.dre.checks.tier1.key_duplicates import KeyDuplicates
-from hcsc.datalake.dre.checks.tier1.key_nulls import KeyNulls
-from hcsc.datalake.dre.checks.tier1.on_time import OnTime
-from hcsc.datalake.dre.checks.tier1.schema_drift import SchemaDrift
-from hcsc.datalake.dre.checks.tier1.volume import Volume
-from hcsc.datalake.dre.checks.tier1.zero_rows import ZeroRows
+from hcsc.datalake.dre.registry import Registry
 
 if TYPE_CHECKING:
+    from hcsc.datalake.dre.checks.base import Check
     from hcsc.datalake.dre.config.models import Dataset
 
-CHECKS: dict[str, Check] = {
-    check.check_id: check
-    for check in (OnTime(), ZeroRows(), Volume(), FilesNotLoaded(), SchemaDrift(), KeyNulls(), KeyDuplicates(),
-                  FileCompleteness(), KeyCurrency(), ValueAgreement())
-}
-PATTERNS = ("FILE_CYCLIC", "FILE_PERIODIC", "TABLE_MERGE")
+CHECKS: Registry[Check] = Registry("check", ("hcsc.datalake.dre.checks.tier1", "hcsc.datalake.dre.checks.hop"))
 TABLE_WIDE = "TABLE_WIDE"  # pseudo-pattern for datasets that no feed lists
+
+
+def register_check(check: Check) -> Check:
+    """Called by a check's module; the check's `check_id` must be unique."""
+    return CHECKS.register(check.check_id, check)
+
+
+def _pattern_files() -> tuple[str, ...]:
+    folder = files("hcsc.datalake.dre").joinpath("patterns")
+    names = (entry.name[:-5].upper() for entry in folder.iterdir() if entry.name.endswith(".yaml"))
+    return tuple(sorted(n for n in names if n != TABLE_WIDE))
+
+
+PATTERNS: tuple[str, ...] = _pattern_files()  # the feed patterns (a feed's `pattern` must be one)
 
 
 @cache
@@ -52,7 +57,7 @@ def checks_for(dataset: Dataset, pattern: str | None) -> list[Check]:
 @dataclass(frozen=True)
 class CauseEntry:
     code: str
-    probe: str | None  # a probe type from config/probes.py, or "builtin"; None for the fallback
+    probe: str | None  # a registered probe type, or "builtin"; None for the fallback
     params: str | None  # the feed's `probes:` key with this probe's parameters
     fallback: bool = False
 
@@ -72,7 +77,8 @@ def _load_pattern(pattern: str) -> dict:
 @cache
 def pattern_causes(pattern: str) -> dict[str, FailureType]:
     """The pattern's failure types and their ordered cause checks. Raises ValueError on a malformed list."""
-    from hcsc.datalake.dre.config.probes import PROBE_PARAMS, PROBE_TYPES
+    from hcsc.datalake.dre.causes.base import BUILTINS
+    from hcsc.datalake.dre.config.probes import BUILTIN, PROBES
 
     where = f"patterns/{pattern.lower()}.yaml"
     found: dict[str, FailureType] = {}
@@ -83,9 +89,12 @@ def pattern_causes(pattern: str) -> dict[str, FailureType]:
             if entry.fallback:
                 if entry.probe or entry.params:
                     raise ValueError(f"{where}: fallback {entry.code} takes no probe")
-            elif entry.probe not in PROBE_TYPES:
+            elif entry.probe == BUILTIN:
+                if entry.code not in BUILTINS:
+                    raise ValueError(f"{where}: {entry.code} names no builtin cause check")
+            elif entry.probe not in PROBES:
                 raise ValueError(f"{where}: {entry.code} has unknown probe {entry.probe!r}")
-            elif entry.probe in PROBE_PARAMS and PROBE_PARAMS[entry.probe].model_fields and not entry.params:
+            elif PROBES[entry.probe].params.model_fields and not entry.params:
                 raise ValueError(f"{where}: {entry.code} uses probe {entry.probe} but names no params key")
             entries.append(entry)
         if not entries or not entries[-1].fallback or sum(e.fallback for e in entries) != 1:

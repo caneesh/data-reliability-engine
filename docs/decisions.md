@@ -277,6 +277,22 @@ Planned in a design discussion, agreed by the user (structured contract, upstrea
 3. **Planning.** Derived datasets are never planned: they are read as upstreams only.
 4. **Cause.** JOIN_UNMATCHED (builtin) is order 3 in every pattern's key_missing_or_stale: NOT_READY unless the upstream is derived with joins, CONFIRMED when a joined dataset had no match for the MISSING key's group. The existing tests that encode the cause order were updated for the new entry.
 
+## Extensibility, step 1: self-registering capabilities (2026-10-12)
+
+The user asked for the framework to be made extendable and agreed to the eight-step plan in `docs/design/extensibility.md`, in order. Step 1, as built:
+
+1. **One registry class** (`registry.py`). Each kind of capability has a `Registry`: register, look up, reject a duplicate id, and find the built-ins by importing the engine's own packages on first use. `temporary` registers for one test.
+2. **Checks** register themselves at the end of their module (`register_check(OnTime())`); the import list in `checks/registry.py` is gone. `PATTERNS` is read from the packaged `patterns/*.yaml` files, not typed by hand.
+3. **Probes** are defined once: the parameter model and the function together in `causes/probes.py`, with `@probe(name, model)`. The two dicts (`PROBE_PARAMS`, `PROBES`) are gone.
+4. **Builtin causes** are `@builtin(code)` on the function in `causes/landing.py` or `causes/merge.py`; the `BUILTINS` dict in the engine is gone. A pattern naming a builtin code that is not registered is rejected when the pattern loads (before, it would have been an ERROR row at run time).
+5. **Rule templates** are `TemplateSpec` records (`checks/rules/template.py`), one module per template under `checks/rules/templates/`, each with its params model. `RuleCheck` is one generic path: the two `if` chains (`evaluate`, `required_columns`) are gone. A template declares the other datasets it reads (`related`, e.g. `parent_dataset`), so `dre validate` and the planner handle any such template, not only `child_within_parent`.
+6. **Key normalisers** are a registry too, with four generic ones added because sources will need them without code: `trim`, `upper`, `lower` and `{regex_replace: {pattern, replacement}}`. Values are escaped through `sql_string`.
+7. **Config validation.** `Pattern` and `Template` were `Literal`s; they are now validated against the registries, with the same "is not allowed; use one of [...]" error, file and line. `key_normalise` errors come from the registry and name the known forms.
+
+Not changed: evaluation ids (check ids and cause codes are the same strings), the guard rules, the store, and any test's expectations other than three that encoded the closed sets (`trim` as an invalid normaliser, `A` as a builtin cause code, the parent passed as a positional argument).
+
+Deferred to step 2: `causes/failures.py` still lists the failing things of a FAILED result by `check_id`, so a new check gets causes only through that list. Step 2 (check parameters) gives a check a `failures` hook along with its params model.
+
 ## Notes for later steps
 
 - **Step 4:** done: `dre dry-run` parses SQL fragments (`config/fragments.py`).

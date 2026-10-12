@@ -72,7 +72,7 @@ CASES = [
     ("bad-identifier", GOLD, "key: [sub_id,", 'key: ["sub-id",', "key[0]", "key: [", "not a plain identifier", "letters"),
     ("bad-table", GOLD, "table: gold_db.member_coverage", "table: member_coverage", "table", "table:", "database>.<table", "database.table"),
     ("sql-semicolon", GOLD, "src_sys_nm = 'SRC_A'", "src_sys_nm = 'SRC_A'; DROP TABLE x", "feed_filter", "feed_filter", "';'", "single SQL expression"),
-    ("bad-normaliser", GOLD, "strip_leading_zeros", "trim", "key_normalise.sub_id", "key_normalise", "not allowed", "strip_leading_zeros"),
+    ("bad-normaliser", GOLD, "strip_leading_zeros", "reverse", "key_normalise.sub_id", "key_normalise", "not allowed", "strip_leading_zeros"),
     ("normalise-non-key", GOLD, "{ sub_id: strip", "{ src_sys_nm: strip", "key_normalise.src_sys_nm", "key_normalise", "not a key column", "key columns only"),
     ("unknown-dataset-in-feed", FEED, "datasets: [", "datasets: [missing_ds, ", "datasets[0]", "datasets: [", "unknown dataset", "datasets/missing_ds.yaml"),
     ("unknown-upstream", CURATED, "upstream: []", "upstream: [nowhere]", "upstream[0]", "upstream:", "unknown dataset", "datasets/nowhere.yaml"),

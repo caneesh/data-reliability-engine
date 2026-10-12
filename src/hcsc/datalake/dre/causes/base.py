@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from hcsc.datalake.dre.checks.base import error_detail
 from hcsc.datalake.dre.checks.times import column_timezone, truncate
+from hcsc.datalake.dre.registry import Registry
 
 if TYPE_CHECKING:
     from pyspark.sql import SparkSession
@@ -24,6 +25,18 @@ if TYPE_CHECKING:
     from hcsc.datalake.dre.config.models import Dataset, Feed
 
 CONFIRMED, RULED_OUT, NOT_READY, ERROR = "CONFIRMED", "RULED_OUT", "NOT_READY", "ERROR"
+
+# Builtin cause checks by cause code: engine logic over DRE's own evidence, needing no probe
+# parameters. Registered with `builtin` where defined (causes/landing.py, causes/merge.py).
+BUILTINS: Registry[Callable[[CauseContext, Failure], Outcome]] = Registry("builtin cause", ("hcsc.datalake.dre.causes",))
+
+
+def builtin(code: str) -> Callable[[Callable[..., Outcome]], Callable[..., Outcome]]:
+    """Register the decorated function as the builtin cause check for `code`."""
+    def register(fn: Callable[..., Outcome]) -> Callable[..., Outcome]:
+        BUILTINS.register(code, fn)
+        return fn
+    return register
 
 
 @dataclass(frozen=True)

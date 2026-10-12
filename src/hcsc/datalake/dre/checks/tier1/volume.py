@@ -22,6 +22,7 @@ from hcsc.datalake.dre.checks.base import (
     needs_load_time, render_sql, utc_literal,
 )
 from hcsc.datalake.dre.checks.cadence import UnsupportedCalendar, previous_slot, slot_label, slots
+from hcsc.datalake.dre.checks.registry import register_check
 from hcsc.datalake.dre.checks.times import utc_expr
 
 if TYPE_CHECKING:
@@ -85,3 +86,6 @@ class Volume(Check):
                            observed=observed, group_values=groups,
                            expected=f"{row.low:g} to {row.high:g} rows (median {row.median_rows:g} "
                                     f"of the last {row.loads} loads)")
+
+
+register_check(Volume())

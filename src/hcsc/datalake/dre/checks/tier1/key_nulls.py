@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from hcsc.datalake.dre.checks.base import (
     Check, CheckContext, CheckResult, from_counts, group_values, needs_load_time, render_sql, utc_literal,
 )
+from hcsc.datalake.dre.checks.registry import register_check
 from hcsc.datalake.dre.checks.times import utc_expr
 
 if TYPE_CHECKING:
@@ -46,3 +47,6 @@ class KeyNulls(Check):
                         group_values=group_values(row, ds.group_by))
             for row in ctx.spark.sql(sql).collect()
         ]
+
+
+register_check(KeyNulls())

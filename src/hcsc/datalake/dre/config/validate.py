@@ -22,8 +22,8 @@ from hcsc.datalake.dre.config.loader import (
     format_loc,
     load,
 )
-from hcsc.datalake.dre.config.models import DERIVED_LOAD, DERIVED_RECORD, TEMPLATE_PARAMS
-from hcsc.datalake.dre.config.probes import PROBE_PARAMS, parameter_sets
+from hcsc.datalake.dre.config.models import DERIVED_LOAD, DERIVED_RECORD
+from hcsc.datalake.dre.config.probes import PROBES, parameter_sets
 
 # Checks whose evaluation window is defined by load time (spec section 6).
 LOAD_TIME_CHECKS = ("T1_ON_TIME", "T1_ZERO_ROWS", "T1_VOLUME", "T1_KEY_NULLS")
@@ -246,22 +246,25 @@ def cross_check(config: Config, feeds_complete: bool = True) -> list[ConfigError
 
     errors.extend(_upstream_cycles(config))
 
-    # Rules: dataset, owner, template params, parent dataset.
+    # Rules: dataset, owner, template params, the datasets the template names.
+    from hcsc.datalake.dre.checks.rules.template import TEMPLATES
+
     for rule_id, rule in config.rules.items():
         if rule.dataset not in datasets:
             err("rule", rule_id, ("dataset",), f"unknown dataset {rule.dataset!r}",
                 f"add datasets/{rule.dataset}.yaml or point the rule at an existing dataset")
         check_owner("rule", rule_id, rule.owner)
+        spec = TEMPLATES[rule.template]
         try:
-            params = TEMPLATE_PARAMS[rule.template].model_validate(rule.params)
+            params = spec.params.model_validate(rule.params)
         except ValidationError as exc:
             source = config.sources[("rule", rule_id)]
             errors.extend(errors_from_validation(exc, source.file, source.node, prefix=("params",)))
             continue
-        parent = getattr(params, "parent_dataset", None)
-        if parent is not None and parent not in datasets:
-            err("rule", rule_id, ("params", "parent_dataset"), f"unknown dataset {parent!r}",
-                f"add datasets/{parent}.yaml or fix parent_dataset")
+        for field_name, related in spec.related(params).items():
+            if related not in datasets:
+                err("rule", rule_id, ("params", field_name), f"unknown dataset {related!r}",
+                    f"add datasets/{related}.yaml or fix {field_name}")
 
     return errors
 
@@ -281,9 +284,10 @@ def _check_probes(config: Config, feed_id: str) -> list[ConfigError]:
                                      f"pattern {feed.pattern} has no cause that uses probe key {key!r}",
                                      f"use one of {sorted(keys)}, or remove it"))
             continue
-        model = PROBE_PARAMS.get(keys[key])
-        if model is None:
+        probe = PROBES.get(keys[key])
+        if probe is None:
             continue
+        model = probe.params
         many = isinstance(raw, list)
         for i, params in enumerate(parameter_sets(raw)):
             try:

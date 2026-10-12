@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 from hcsc.datalake.dre.checks.base import (
     DID_NOT_RUN, FAILED, PASSED, REASONS, Check, CheckContext, CheckResult, did_not_run, render_sql,
 )
+from hcsc.datalake.dre.checks.registry import register_check
 
 if TYPE_CHECKING:
     from hcsc.datalake.dre.checks.events import Event
@@ -66,3 +67,6 @@ class SchemaDrift(Check):
         changed = len(record["added"]) + len(record["removed"]) + len(record["retyped"])
         return [CheckResult(FAILED, population=len(columns), violations=max(changed, 1), observed=current,
                             expected=before_hash, detail=json.dumps(record))]
+
+
+register_check(SchemaDrift())

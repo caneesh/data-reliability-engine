@@ -16,7 +16,7 @@ from pathlib import PurePosixPath, PureWindowsPath
 from typing import Annotated, Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 from pydantic_core import PydanticCustomError
 
 from hcsc.datalake.dre.store.names import DQ_TABLES, validate_dq_database
@@ -105,18 +105,31 @@ def _calendar(value: str) -> str:
 
 
 def _normaliser(value: Any) -> Any:
-    """strip_leading_zeros, or {parse_date: <Spark date format>} (a date string read as an ISO date)."""
-    if value == "strip_leading_zeros":
-        return value
-    if isinstance(value, dict) and set(value) == {"parse_date"} and isinstance(value["parse_date"], str) \
-            and value["parse_date"] and "'" not in value["parse_date"]:
-        return value
-    raise invalid(f"{value!r} is not allowed",
-                  "use strip_leading_zeros, or { parse_date: <format> } such as { parse_date: MM/dd/yyyy }")
+    """A registered key normaliser (checks/keys.py): a bare name, or {name: argument}."""
+    from hcsc.datalake.dre.checks.keys import NormaliserError, validate_normaliser
+
+    try:
+        return validate_normaliser(value)
+    except NormaliserError as exc:
+        raise invalid(exc.problem, exc.fix) from None
 
 
-def _str_to_list(value: Any) -> Any:
-    return [value] if isinstance(value, str) else value
+def _pattern(value: str) -> str:
+    """A packaged feed pattern (checks/registry.py)."""
+    from hcsc.datalake.dre.checks.registry import PATTERNS
+
+    if value not in PATTERNS:
+        raise invalid(f"{value!r} is not allowed", f"use one of {list(PATTERNS)}")
+    return value
+
+
+def _template(value: str) -> str:
+    """A registered gold rule template (checks/rules/template.py)."""
+    from hcsc.datalake.dre.checks.rules.template import TEMPLATES
+
+    if value not in TEMPLATES:
+        raise invalid(f"{value!r} is not allowed", f"use one of {list(TEMPLATES.ids())}")
+    return value
 
 
 Identifier = Annotated[str, AfterValidator(_identifier)]
@@ -129,21 +142,13 @@ TimeZone = Annotated[str, AfterValidator(_timezone)]
 NonEmptyStr = Annotated[str, Field(min_length=1)]
 Regex = Annotated[str, Field(min_length=1), AfterValidator(_regex)]  # a regular expression that compiles
 
-Pattern = Literal["FILE_CYCLIC", "FILE_PERIODIC", "TABLE_MERGE"]
+Pattern = Annotated[str, AfterValidator(_pattern)]  # a packaged feed pattern
 FileFormat = Literal["sequence", "text", "xml", "csv", "parquet", "orc"]
 CadenceKind = Literal["times", "interval", "calendar_dates", "monthly"]
 Layer = Literal["RAW", "CURATED", "CDC", "GOLD"]
 Granularity = Literal["second", "minute", "hour", "day"]
 Weekday = Literal["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"]
-Template = Literal[
-    "max_rows_per_key",
-    "max_open_rows_per_key",
-    "column_order",
-    "superseded_still_open",
-    "child_within_parent",
-    "value_format",
-    "null_rate_max",
-]
+Template = Annotated[str, AfterValidator(_template)]  # a registered gold rule template
 RuleStatus = Literal["proposed", "approved", "retired"]
 RuleFrequency = Literal["every_run", "daily", "weekly"]
 Severity = Literal["high", "medium", "low"]
@@ -421,56 +426,3 @@ class Rule(Model):
     status: RuleStatus
     severity: Severity
     frequency: RuleFrequency = "daily"
-
-
-class MaxRowsPerKey(Model):
-    max: int = Field(ge=0)
-
-
-class MaxOpenRowsPerKey(Model):
-    open_when: SqlFragment
-    max: int = Field(ge=0)
-
-
-class ColumnOrder(Model):
-    lower: Identifier
-    upper: Identifier
-    nulls_fail: bool = False
-    format: NonEmptyStr | None = None  # parse both columns as times with this format (never compare as strings)
-
-
-class SupersededStillOpen(Model):
-    group_key: Annotated[list[Identifier], Field(min_length=1), BeforeValidator(_str_to_list)]
-    order_column: Identifier
-    open_when: SqlFragment
-    format: NonEmptyStr | None = None  # parse order_column as a time with this format
-
-
-class ChildWithinParent(Model):
-    parent_dataset: Identifier
-    join: Annotated[dict[Identifier, Identifier], Field(min_length=1)]  # child column: parent column
-    child_start: Identifier
-    parent_start: Identifier
-    parent_end: Identifier
-    format: NonEmptyStr | None = None  # parse the three time columns with this format
-
-
-class ValueFormat(Model):
-    column: Identifier
-    pattern: Regex
-
-
-class NullRateMax(Model):
-    column: Identifier
-    max_rate: float = Field(ge=0, le=1)
-
-
-TEMPLATE_PARAMS: dict[str, type[Model]] = {
-    "max_rows_per_key": MaxRowsPerKey,
-    "max_open_rows_per_key": MaxOpenRowsPerKey,
-    "column_order": ColumnOrder,
-    "superseded_still_open": SupersededStillOpen,
-    "child_within_parent": ChildWithinParent,
-    "value_format": ValueFormat,
-    "null_rate_max": NullRateMax,
-}

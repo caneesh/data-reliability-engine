@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from hcsc.datalake.dre.checks.base import Check, CheckContext, CheckResult, from_counts, render_sql
 from hcsc.datalake.dre.checks.hop.common import hop_params, per_hop, upstream_pairs
+from hcsc.datalake.dre.checks.registry import register_check
 
 if TYPE_CHECKING:
     from hcsc.datalake.dre.checks.events import Event
@@ -49,3 +50,6 @@ class ValueAgreement(Check):
             expected="owned columns equal to every upstream row at the latest version",
             group_values={"upstream": up_id},
         )
+
+
+register_check(ValueAgreement())
