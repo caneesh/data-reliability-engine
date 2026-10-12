@@ -5,7 +5,8 @@ The Data Reliability Engine (DRE) is a read-only engine for data quality checks 
 - Build spec: [`docs/spec.md`](docs/spec.md) (source of truth)
 - Working rules for Claude Code: [`CLAUDE.md`](CLAUDE.md)
 - Open decisions and defaults taken: [`docs/decisions.md`](docs/decisions.md)
-- Design notes: [`docs/design/`](docs/design/) (derived datasets: join and aggregate hops)
+- Extending the engine, by configuration or by code: [`docs/extending.md`](docs/extending.md)
+- Design notes: [`docs/design/`](docs/design/) (derived datasets: join and aggregate hops; extensibility)
 - Guarantees and limits (isolation, reconciliation contracts, lineage, evidence quality, recovery, replay, safeguards): [`docs/architecture.md`](docs/architecture.md)
 - Where the build stands and what is waiting: [`docs/handoff.md`](docs/handoff.md); the prompt to paste after compacting: [`docs/resume-prompt.md`](docs/resume-prompt.md)
 
@@ -19,7 +20,7 @@ pytest                 # all tests, local-mode Spark
 pytest tests/guard     # guard tests only
 ```
 
-Release 1 is built (spec section 10, steps 1 to 11). Commands: `dre validate`, `dre install --print|--apply|--check`, `dre run [--feed F]` (plus `--execution-type RERUN --window-start T --window-end T` or `REPLAY --from T --to T` for historical windows), `dre dry-run --feed F`, `dre trace --dataset D --key "k1,k2,..."`, `dre watchdog` and `dre retention [--apply]`, each with `--conf DIR`.
+Release 1 is built (spec section 10, steps 1 to 11). Commands: `dre validate`, `dre install --print|--apply|--check`, `dre run [--feed F]` (plus `--execution-type RERUN --window-start T --window-end T` or `REPLAY --from T --to T` for historical windows), `dre dry-run --feed F`, `dre trace --dataset D --key "k1,k2,..."`, `dre watchdog` and `dre retention [--apply]`, each with `--conf DIR`; and `dre guard PATH`, which scans a source tree (an extension package) under the engine's read-only and append-only rules. Release 3 adds the extension points: [`docs/extending.md`](docs/extending.md).
 
 ## Deploying with spark-submit
 

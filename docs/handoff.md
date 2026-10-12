@@ -8,7 +8,7 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
 - **Branch.** The working branch, `claude/claude-md-documentation-a2lxt0` (repo `caneesh/data-reliability-engine`), was restarted from `main` after the merge. New work goes there. Open a pull request only when the user asks; then merge with a merge commit, because the docs cite commit SHAs.
 - **Release 1** (spec section 10, steps 1 to 11) is done. It was then extended by two code reviews and an architecture review.
 - **Release 2** has started. Derived datasets (join and aggregate hops) are built.
-- **Release 3** (extensibility) is in progress: the eight-step plan in `docs/design/extensibility.md`, agreed by the user, built in order. Each step amends the spec and `docs/decisions.md`.
+- **Release 3** (extensibility) is built: the eight-step plan in `docs/design/extensibility.md`, agreed by the user, built in order; each step has a spec amendment and a `docs/decisions.md` entry, and `docs/extending.md` is the how-to.
 - **Tests:** 515, all passing. A full local run takes about 18 minutes; CI takes about 15. Replay scenarios R01 to R13 all pass, plus a three-layer acceptance test.
 
 ## History, in order (each step green in CI)
@@ -27,6 +27,9 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
 | Extensibility step 2: check parameters, T1_FRESHNESS, T1_COLUMN_RANGE | `d4f452d` (#33 red: four result counts) and `30fffda` | #34 |
 | Extensibility step 3: patterns from configuration, `kind` | `c1f2811` | #35 |
 | Extensibility step 4: rule templates from configuration, guard rule 10 | `31fa034` | #36 |
+| Extensibility step 5: named calendars | `80317cf` | #37 |
+| Extensibility steps 6 and 7: notification sinks, extension packages, `dre guard`, testing kit | `122b76a` | #38 |
+| Extensibility step 8: `docs/extending.md` | `6a35456` | #39 |
 
 Each row has a section in `docs/decisions.md` saying what was decided and why.
 
@@ -136,6 +139,9 @@ Production table, column and path names stay null: CLAUDE.md forbids inventing t
   - `trace.py` follows one key through the layers.
   - `watchdog.py` counts NORMAL runs only and alerts on incomplete investigations.
 - **Packaging.** `python scripts/package.py` builds `dist/` for `spark-submit`; the README covers deployment.
+- **Extension points** (release 3). Registries (`registry.py`) for checks, probes, builtin causes, rule templates, normalisers, calendars and sinks; each capability registers itself where it is defined.
+  - By configuration: `check_params` (parametrised checks T1_FRESHNESS, T1_COLUMN_RANGE), `conf/patterns/` (with `kind: file | table`), `conf/templates/` (SQL rule templates, run only as a subquery: guard rule 10), `conf/calendars/`, and `notify:` sinks (email, stdout).
+  - By code: an extension package with an entry point in `dre.extensions`, loaded only when `defaults.yaml` lists it; `dre guard <path>` runs the guard scanner (now `hcsc.datalake.dre.guard`) over its source; `hcsc.datalake.dre.testing` holds the contracts.
 
 ## Working conventions (learned the hard way)
 
