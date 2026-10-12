@@ -302,7 +302,7 @@ Deferred to step 2: `causes/failures.py` still lists the failing things of a FAI
    - **T1_FRESHNESS** (`max_age_hours`, `time: record | load`): the latest time against the event's window end, not the clock, so a RERUN answers for its window. No usable time in any row is FAILED, never PASSED (the evidence principle from the code-review document).
    - **T1_COLUMN_RANGE** (`column`, numeric `min`/`max`, `allowed` strings, `nulls_fail`): rows loaded in the window, so it needs `load_time` like T1_KEY_NULLS. Nulls are left out unless `nulls_fail`.
    - Neither has cause checks: like T1_VOLUME and T1_KEY_NULLS, a failure has no failing thing to probe; the retry of investigations skips checks without a failure type, so these never show as pending.
-5. **Sample config.** `gold_member_coverage` configures T1_FRESHNESS on load time (72 hours), so the e2e run has a parametrised check in it: 42 results.
+5. **Sample config.** `gold_member_coverage` configures T1_FRESHNESS on load time (72 hours), so the e2e run has a parametrised check in it: 42 results. Four tests count the sample's results (R09, R11a, R11b, `test_run_writes_results_and_windows_follow_on`); each count went up by one, with its derivation comment updated. The new result fits each scenario (an empty table gives DID_NOT_RUN / empty_population).
 
 ## Notes for later steps
 
