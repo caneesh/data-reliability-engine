@@ -329,6 +329,24 @@ Deferred to step 2: `causes/failures.py` still lists the failing things of a FAI
 4. **Two tests changed:** `test_named_calendar_is_rejected_by_config_and_guarded_here` and the `named-calendar-file` validate case encoded "named calendars are not supported"; both now check that an *unknown* calendar is rejected, which is the rule that remains.
 5. **A loader bug found on the way:** PyYAML builds date literals itself, so `2026-13-01` raised a bare `ValueError` out of `dre validate` instead of a config error. `read_yaml` now reports it with the file.
 
+## Extensibility, step 6: notification sinks (2026-10-12)
+
+1. **The seam.** `notify/sinks.py`: a `Message` (owner, subject, body, recipients), a `Sink` with `send(messages) -> status lines`, and a registry of sink kinds, each with its config model. `deliver` sends through every configured sink and turns an exception into a status line. The runner's digests and the watchdog's alert both go through it.
+2. **Configuration.** `notify:` lists sinks in order; each entry is validated by its kind's model, with the kind's name in the error. With no `notify:`, the `email` block is one email sink, so existing configuration behaves as before (the email sink's status lines are unchanged).
+3. **Two sinks, not three.** The plan had a `file` sink. Dropped: the guard rules forbid plain file `.write(...)` outside `store/writer.py`, the digest already goes to the run's stdout (which the scheduler captures), and a guard exception for a sink of little use is the wrong trade. `stdout` makes today's "built but not sent" path an explicit sink. A webhook sink is a module away when someone asks.
+4. **Hard rule 6 for every sink:** the guard that nothing in `notify/` references the key column covers the sinks module and any sink added there.
+
+## Extensibility, step 7: extension packages (2026-10-12)
+
+1. **Entry points, allowlisted.** An extension declares one entry point in the group `dre.extensions`; it loads only when `defaults.yaml` lists its name under `extensions:`. The loader loads extensions right after `defaults.yaml`, before anything validates against the registries. A missing or failing extension, or a colliding id, is a config error on the `extensions` line, and the engine runs with what loaded. `dre validate` prints what each extension registered.
+2. **`dre guard <path>`.** The scanner moved from `tests/guard/scan.py` into the package (`hcsc.datalake.dre.guard`); the test module re-exports it. Two exemptions, both tested: the scan skips the scanner module (its text is the patterns), and the "never references local_setup" guard allows it (it names the file as an allowance, not an import). Scanned from `src/`, the engine is clean under its own scanner.
+3. **The testing kit** (`hcsc.datalake.dre.testing`): `check_contract` (FAIL, PASS, DID_NOT_RUN / empty_population, well-formed results), `probe_contract` (NOT_READY unconfigured, one of the four states, no key values in evidence) and `template_contract` (a query returning population and violations). No table builders: the engine's source may not create or drop tables, so an extension copies `tests/fixtures/layers.py`.
+4. **Tested without pip.** `tests/test_extensions.py` installs the example package (`tests/extensions/dre_ext_example`, one capability of each kind) through a `.dist-info` with an `entry_points.txt` on `sys.path`, which is what pip would produce. `extensions.unload` exists for tests only, so the example's ids never leak into other tests.
+
+## Extensibility, step 8: documentation (2026-10-12)
+
+`docs/extending.md`: one section per extension point, by configuration first (feeds, check parameters, patterns, templates, calendars, sinks) then by code (the registries, the contracts, extension packages), and what is not extensible on purpose. The README links it. Each step's spec amendments are in sections 2, 3, 7, 8 and 9.
+
 ## Notes for later steps
 
 - **Step 4:** done: `dre dry-run` parses SQL fragments (`config/fragments.py`).

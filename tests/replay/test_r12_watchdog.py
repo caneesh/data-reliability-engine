@@ -79,13 +79,17 @@ def test_a_run_still_within_its_grace_is_not_an_alert() -> None:
 
 
 def test_the_watchdog_does_not_depend_on_the_main_run_s_code() -> None:
-    """Spec section 8: no dependency beyond the store schema (and config and mail)."""
+    """Spec section 8: no dependency beyond the store schema (and config and the notification sinks)."""
     tree = ast.parse(Path(PACKAGE_ROOT / "watchdog.py").read_text(encoding="utf-8"))
     imported = {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
     imported |= {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}
     engine = {m for m in imported if m and m.startswith("hcsc.datalake.dre")}
     assert engine == {"hcsc.datalake.dre.store.names", "hcsc.datalake.dre.config.loader",
-                      "hcsc.datalake.dre.notify.email"}
+                      "hcsc.datalake.dre.notify.sinks"}
+    sinks = ast.parse(Path(PACKAGE_ROOT / "notify" / "sinks.py").read_text(encoding="utf-8"))
+    deps = {n.module for n in ast.walk(sinks) if isinstance(n, ast.ImportFrom) and n.module
+            and n.module.startswith("hcsc.datalake.dre") and n.module != "hcsc.datalake.dre.notify.email"}
+    assert deps <= {"hcsc.datalake.dre.config.models", "hcsc.datalake.dre.registry", "hcsc.datalake.dre.notify.digest"}
 
 
 def test_watchdog_owner_gets_the_alerts(spark, tmp_path, capsys) -> None:

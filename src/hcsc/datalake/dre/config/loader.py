@@ -309,8 +309,6 @@ def load(conf_dir: Path | str) -> tuple[Config, list[ConfigError]]:
     config = Config(conf_dir=conf_dir)
     errors: list[ConfigError] = []
     use_conf_patterns(conf_dir)  # patterns/*.yaml in the conf directory add to or replace the packaged ones
-    errors.extend(_load_templates(config))  # before the rules, which name them
-    errors.extend(_load_calendars(config))  # before the feeds, whose cadences name them
 
     defaults_path = conf_dir / "defaults.yaml"
     display = str(defaults_path)
@@ -325,6 +323,16 @@ def load(conf_dir: Path | str) -> tuple[Config, list[ConfigError]]:
                 config.sources[("defaults", "defaults")] = Source(display, node)
             except ValidationError as exc:
                 errors.extend(errors_from_validation(exc, display, node))
+
+    if config.defaults is not None and config.defaults.extensions:
+        from hcsc.datalake.dre.extensions import load_extensions
+
+        _, problems = load_extensions(config.defaults.extensions)  # before anything that validates against the registries
+        source = config.sources[("defaults", "defaults")]
+        errors.extend(ConfigError(source.file, line_of(source.node, ("extensions",)), "extensions", problem,
+                                  "install the extension, or remove it from the list") for problem in problems)
+    errors.extend(_load_templates(config))  # before the rules, which name them
+    errors.extend(_load_calendars(config))  # before the feeds, whose cadences name them
 
     for directory, (id_field, model) in KINDS.items():
         kind = id_field

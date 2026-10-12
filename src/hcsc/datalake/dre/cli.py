@@ -21,6 +21,7 @@ COMMANDS: dict[str, str] = {
     "trace": "Trace one key along the upstream chain",
     "watchdog": "Check the last expected run exists and is complete",
     "retention": "List (or with --apply drop) dq store partitions older than retention_months",
+    "guard": "Scan a source tree (an extension package) for writes the engine's rules forbid",
 }
 CONF_HELP = "configuration directory (default: conf)"
 
@@ -40,7 +41,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
     for name, help_text in COMMANDS.items():
         cmd = sub.add_parser(name, help=help_text)
-        cmd.add_argument("--conf", default="conf", help=CONF_HELP)
+        if name != "guard":
+            cmd.add_argument("--conf", default="conf", help=CONF_HELP)
         if name == "dry-run":
             cmd.add_argument("--feed", required=True, help="the feed to check")
         if name == "trace":
@@ -57,6 +59,8 @@ def build_parser() -> argparse.ArgumentParser:
             cmd.add_argument("--to", dest="range_to", type=utc_time, help="REPLAY: the range's end, excluded")
         if name == "retention":
             cmd.add_argument("--apply", action="store_true", help="drop the expired partitions (default: list them)")
+        if name == "guard":
+            cmd.add_argument("path", help="the directory (or file) to scan")
         if name == "install":
             mode = cmd.add_mutually_exclusive_group(required=True)
             mode.add_argument("--print", dest="mode", action="store_const", const="print",
@@ -86,6 +90,10 @@ def validate(conf: str) -> int:
     by_origin = {o: [p for p in patterns() if pattern_origin(p) == o] for o in ("packaged", "conf")}
     print(f"patterns: packaged {by_origin['packaged']}" + (f", from {conf}/patterns {by_origin['conf']}"
                                                             if by_origin["conf"] else ""))
+    from hcsc.datalake.dre.extensions import loaded
+
+    for record in loaded():
+        print(f"extensions: {record.summary()}")
     return 0
 
 
@@ -163,6 +171,10 @@ def main(argv: list[str] | None = None) -> int:
         return watch(get_spark("dre-watchdog"), args.conf)
     if args.command == "retention":
         return retention(args.conf, args.apply)
+    if args.command == "guard":
+        from hcsc.datalake.dre.guard import guard_command
+
+        return guard_command(Path(args.path))
     parser.error(f"unknown command {args.command}")  # argparse rejects these first
     return 2
 

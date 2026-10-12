@@ -99,7 +99,7 @@ def watch(spark: SparkSession, conf: str, now: datetime | None = None) -> int:
     from pathlib import Path
 
     from hcsc.datalake.dre.config.loader import load
-    from hcsc.datalake.dre.notify.email import send_text
+    from hcsc.datalake.dre.notify.sinks import Message, deliver
 
     config, errors = load(Path(conf))
     defaults = config.defaults
@@ -125,5 +125,6 @@ def watch(spark: SparkSession, conf: str, now: datetime | None = None) -> int:
         recipients = list(defaults.recipients.get(defaults.watchdog_owner, []))
     else:
         recipients = sorted({address for addresses in defaults.recipients.values() for address in addresses})
-    print(send_text("watchdog", subject, body, recipients, defaults.email))
+    for line in deliver([Message("watchdog", subject, body, recipients)], defaults):
+        print(line)
     return 1

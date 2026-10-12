@@ -1,6 +1,6 @@
 # Design: making the engine extendable
 
-Status: agreed by the user on 2026-10-12, all eight steps in order. Step 1 is built; the rest follow one at a time.
+Status: agreed by the user on 2026-10-12, all eight steps in order; all eight are built (docs/decisions.md, "Extensibility, step 1" to "step 8"; the how-to is docs/extending.md). Two departures from the plan, both recorded there: no `file` sink (step 6), and no table builders in the testing kit (step 7).
 
 ## What "extendable" means here
 

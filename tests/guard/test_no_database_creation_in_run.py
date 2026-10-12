@@ -13,10 +13,14 @@ from tests.conftest import PACKAGE_ROOT
 from tests.guard.scan import files_mentioning
 
 SETUP = "store/local_setup.py"
+# The guard scanner names local_setup.py as the one file allowed to create the database; it holds
+# the rule, not a reference that could run it (tests/test_extensions.py proves the module has no
+# Spark or file operations of its own).
+SCANNER = "guard.py"
 
 
 def _offenders(root: Path) -> list[str]:
-    return [f for f in files_mentioning(root, "local_setup") if f != SETUP]
+    return [f for f in files_mentioning(root, "local_setup") if f not in (SETUP, SCANNER)]
 
 
 def test_engine_never_references_local_setup() -> None:

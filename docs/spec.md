@@ -40,6 +40,8 @@ All check logic is SQL rendered from templates and run through `spark.sql`, so t
 
 **Extension points** (release 3). Five kinds of capability each have one registry (`registry.py`, class `Registry`): checks (`checks/registry.py`, `register_check`), cause probes (`config/probes.py`, `@probe(name, params_model)`), builtin cause checks (`causes/base.py`, `@builtin(code)`), gold rule templates (`checks/rules/template.py`, `register_template(TemplateSpec)`) and key normalisers (`checks/keys.py`, `register_normaliser`). A capability registers itself in the module that defines it; nothing central lists them. The built-in ones are found by importing the engine's own packages on first use (`checks/tier1`, `checks/hop`, `causes`, `checks/rules/templates`). An id registered twice is an error, because check ids go into `evaluation_id` and cause codes into `dq_cause_result`. A feed's `pattern` must be a packaged pattern file, a rule's `template` a registered template, a `key_normalise` entry a registered normaliser; `dre validate` reports anything else with the known names in its fix. Pattern YAML is checked against the registries when loaded: an unknown check, probe type or builtin cause code is an error. A check may declare a params model (`params_model`, section 3) and may list its own failing things for the cause engine (`failures`, section 7). Every capability keeps the hard constraints: a check writes exactly PASSED, FAILED or DID\_NOT\_RUN through `from_counts` or `did_not_run`; a probe is NOT\_READY without its parameters and never raises out of the engine; a template's SQL returns `population` and `violations`.
 
+**Extension packages** (release 3). A separately installed package may add capabilities of any of these kinds, and notification sinks (section 8) and calendars (section 3): it registers them the way the engine's modules do and declares one entry point in the group `dre.extensions` whose value is the module to import. Nothing loads unless `defaults.yaml` lists the entry point's name under `extensions:`; a name that is not installed, a module that fails to import, or an id that collides with an existing one is a config error naming `defaults.yaml`. `dre validate` prints what each extension registered. An extension is held to the hard constraints by `dre guard <path>` (section 9) in its own CI, and to the capability contracts by the testing kit `hcsc.datalake.dre.testing` (`check_contract`, `probe_contract`, `template_contract`). The kit holds no table builders, because the engine's source may not create or drop tables; an extension builds its synthetic tables itself. `docs/extending.md` is the how-to.
+
 ```text
 data-reliability-engine/
   README.md
@@ -50,10 +52,13 @@ data-reliability-engine/
       datalake/              # namespace package: no __init__.py
         dre/
           __init__.py
-          cli.py             # validate, install, dry-run, run, trace, watchdog
+          cli.py             # validate, install, dry-run, run, trace, watchdog, retention, guard
           session.py         # the Spark session (active one, or a new one with Hive support)
           runner.py          # dre run and dre dry-run: plan, evaluate, append results, run rows
           registry.py        # the Registry class: capabilities register themselves; built-ins found by import
+          extensions.py      # extension packages: entry points in the group dre.extensions, loaded when listed
+          guard.py           # the read-only and append-only scanner, behind `dre guard` and the guard tests
+          testing.py         # the testing kit: the contracts a check, probe or template must meet
           config/
             models.py        # Pydantic models for feeds, datasets, rules, defaults
             loader.py        # load YAML, apply defaults and overrides
@@ -107,6 +112,7 @@ data-reliability-engine/
             digest.py        # digest builder: one digest per owner per run, from the dq store
             digest.txt.j2    # the digest's plain-text layout
             email.py         # sender (SMTP, standard library)
+            sinks.py         # notification sinks: email, stdout; the sink registry and `notify:`
           trace.py           # dre trace: one key along the upstream chain
           watchdog.py        # dre watchdog: reads dq_run only; no dependency on the run's code
   scripts/
@@ -594,6 +600,7 @@ Digest details:
 - With `email_sample_keys: true`, a failing hop check lists up to 5 `key_hash` values flagged in the run; never the key itself.
 - `email.all_clear_digest` (default `every_run`): an owner's digest with nothing failing or not run is sent every run, `daily` (only from the run starting in the hour from `rule_run_at`) or `never`; digests with problems are always sent.
 - `email` in `defaults.yaml` names the mail relay (`smtp_host`, `smtp_port`, `sender`). Unset, digests are built but not sent and the run says so. A failed send is reported and never stops the run.
+- **Sinks** (release 3). `notify:` in `defaults.yaml` lists where digests and watchdog alerts go, in order: `{kind: email, smtp_host, smtp_port, sender}` or `{kind: stdout}` (printed, for an environment without a relay). With no `notify:`, the `email` block is one email sink. A sink is a registered capability (`notify/sinks.py`), so a webhook sink is a module that registers itself; every sink gets the same text, with counts, check ids and table names only, and a sink that raises is reported with the exception type and never stops the run.
 
 **Trace.** `dre trace` normalises the given key (in D's key order) with each layer's `key_normalise` and follows D's `key_map` upstream. One line per layer, most upstream first: `present, <n> rows; record <UTC>; loaded <UTC>; file <base name>` for the latest version, or `absent`. Then the first hop where the key is absent downstream (MISSING) or held at an older record time (STALE), or `no gap`; then that hop's latest HOP\_KEY\_CURRENCY cause line for the key, found by its `key_hash` (so it needs `hmac_secret_file`). The key itself is never printed. Exit 3 for an unknown dataset or a key with the wrong number of parts.
 
@@ -632,7 +639,7 @@ All tests run on local-mode Spark against synthetic tables built by fixtures in 
 | R11b | Empty tables, a load due in the window | T1\_ON\_TIME and T1\_ZERO\_ROWS FAILED; row-based checks DID\_NOT\_RUN / empty\_population; never PASSED | n/a |
 | R12 | Main run never happens | Watchdog alerts | n/a |
 
-**Guard tests.** Tests in `tests/guard/` scan every file under `src/` (scanner: `tests/guard/scan.py`) and fail on any breach of these rules. Each rule has a snippet test that is caught and one that is allowed. The reasons are in `docs/decisions.md`.
+**Guard tests.** Tests in `tests/guard/` scan every file under `src/` (scanner: `hcsc.datalake.dre.guard`, re-exported by `tests/guard/scan.py`; `dre guard <path>` runs the same scan over any source tree, for extension packages) and fail on any breach of these rules. The scanner module itself is the one file the scan skips, because its text is the patterns; a test proves it holds no Spark or file operations of its own. Each rule has a snippet test that is caught and one that is allowed. The reasons are in `docs/decisions.md`.
 
 1. **Naming the dq store.** SQL names the store as the literal `dq`, or as `{{ dq_database }}` (Jinja) or `{dq_database}` (Python f-string), because the real name comes from config. A write target the scanner cannot read (for example one built by string concatenation) fails. The configured dq database name must be a plain identifier (`store/names.py`, `validate_dq_database`).
 2. **Read-only outside dq.** Flagged unless the target is the dq store: INSERT INTO; `insertInto` and `writeTo`; DataFrameWriter path writes (`.save`, `.orc`, `.parquet`, `.csv`, `.json`, `.text` on a `.write` chain); Hadoop FileSystem `delete`, `rename`, `mkdirs`; `os.remove`, `unlink`, `rmdir`, `removedirs`, `rename`, `replace`; `shutil.rmtree`, `shutil.move`. The dq store is addressed by table name, so a path target never qualifies. `hdfs dfs` / `hadoop fs` `-rm`, `-rmr`, `-rmdir`, `-mv` and `-mkdir` are always flagged.

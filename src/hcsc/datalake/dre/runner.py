@@ -517,14 +517,14 @@ def drop_judged_views(spark: SparkSession, evaluation: Evaluation) -> None:
 def email_digests(spark: SparkSession, config: Config, run: runs.Run) -> list[str]:
     """Build this run's digests from the store and send them; never stops the run."""
     from hcsc.datalake.dre.notify.digest import digests_for_run, to_send
-    from hcsc.datalake.dre.notify.email import send
+    from hcsc.datalake.dre.notify.sinks import deliver, from_digests
 
     try:
         digests = digests_for_run(spark, config, run)
         kept = to_send(digests, config.defaults, run.started_at)
         skipped = [f"email for {d.owner}: {d.subject} (not sent: email.all_clear_digest is "
                    f"{config.defaults.email.all_clear_digest})" for d in digests if d not in kept]
-        return send(kept, config.defaults.email) + skipped
+        return deliver(from_digests(kept), config.defaults) + skipped
     except Exception as exc:
         log.error("could not build the digests for run %s: %s", run.run_id, error_detail(exc))
         return [f"email: not sent ({type(exc).__name__})"]

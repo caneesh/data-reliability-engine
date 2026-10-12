@@ -95,6 +95,15 @@ def _regex(value: str) -> str:
     return value
 
 
+def _sink_config(value: Any) -> Any:
+    from hcsc.datalake.dre.notify.sinks import validate_sink_config
+
+    try:
+        return validate_sink_config(value)
+    except ValueError as exc:
+        raise invalid(str(exc), "write { kind: email | stdout, ... }; see docs/spec.md section 8") from None
+
+
 def _stem(value: str) -> str:
     name = value.lower()
     return name[:-5] if name.endswith(".yaml") else name[:-4] if name.endswith(".yml") else name
@@ -222,6 +231,11 @@ class Defaults(SettingsOverride):
     retention_months: dict[str, Annotated[int, Field(ge=1)]]
     recipients: dict[NonEmptyStr, Annotated[list[Email], Field(min_length=1)]] = {}
     email: EmailServer = EmailServer()
+    # Notification sinks in order (spec section 8); empty: one email sink from `email`. Each entry
+    # is validated by its kind's model (notify/sinks.py).
+    notify: list[Annotated[Any, AfterValidator(_sink_config)]] = []
+    # Extension packages to load, by entry-point name in the group dre.extensions (spec section 2).
+    extensions: list[NonEmptyStr] = []
     # Spec defaults (sections 6 and 8, constraint 6).
     email_sample_keys: bool | None = False
     volume_tolerance_pct: float | None = Field(default=50, gt=0)
