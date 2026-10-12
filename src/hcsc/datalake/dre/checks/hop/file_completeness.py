@@ -13,7 +13,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from hcsc.datalake.dre.checks.base import Check, CheckContext, CheckResult, did_not_run, from_counts, render_sql
-from hcsc.datalake.dre.checks.hop.common import hop_params, per_hop, upstream_pairs
+from hcsc.datalake.dre.checks.hop.common import hop_params, not_judged, per_hop, upstream_pairs
 
 if TYPE_CHECKING:
     from hcsc.datalake.dre.checks.events import Event
@@ -45,12 +45,16 @@ class FileCompleteness(Check):
         if isinstance(params, CheckResult):
             return params
         row = ctx.spark.sql(render_sql("hop_file_completeness.sql.j2", p=params, limit=LISTED)).collect()[0]
+        left_out = not_judged(row.pending, row.excluded, "file", excluded_unit="row")
         result = from_counts(
             row.population, row.violations,
-            observed=f"{row.violations or 0} of {row.population} upstream files have fewer rows here",
+            observed=f"{row.violations or 0} of {row.population} upstream files have fewer rows here"
+                     + (f"; {left_out}" if left_out else ""),
             expected="every upstream row of each file present here",
             group_values=groups,
         )
+        if result.state == "DID_NOT_RUN" and left_out:
+            return replace(result, detail=f"no file judged; {left_out}")
         if result.state == "FAILED":
             short = [{"file": r.f, "upstream_rows": r.up_rows, "rows_here": r.dn_rows} for r in row.short or []]
             result = replace(result, detail=json.dumps({"short_files": short}))

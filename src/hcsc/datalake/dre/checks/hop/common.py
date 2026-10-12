@@ -70,6 +70,8 @@ def hop_params(ctx: CheckContext, event: Event, up_id: str, up: Dataset | None) 
                f"NOT coalesce(({ds.hop_exclusions[up_id]}), FALSE)" if up_id in ds.hop_exclusions else None]
     return {
         "up_table": up.table, "up_filter": " AND ".join(f for f in filters if f) or None,
+        # for counting what the exclusions keep out: the upstream's own filter, and the exclusion
+        "up_base_filter": up.feed_filter, "up_exclusion": ds.hop_exclusions.get(up_id),
         "up_key": key_string([column_expr(up, mapping[c]) for c in ds.key]),
         "up_record": utc_expr(up.record_time, tz), "up_load": utc_expr(up.load_time, tz),
         "up_file": up.file_name_column,
@@ -86,6 +88,19 @@ def hop_params(ctx: CheckContext, event: Event, up_id: str, up: Dataset | None) 
         "hashed": ctx.key_secret is not None, "use_open": ctx.key_secret is not None and ctx.record_key_events,
         "dq_database": ctx.dq_database, "dataset": ds.dataset, "hop": hop_label(up_id, ds.dataset),
     }
+
+
+def not_judged(pending: int | None, excluded: int | None, unit: str, excluded_unit: str | None = None) -> str:
+    """What a hop result did not judge and why, e.g. `1 key excluded by hop_exclusions, 2 keys pending
+    (within sla_hours)`; empty when nothing was left out."""
+    def counted(n: int, what: str) -> str:
+        return f"{n} {what}{'' if n == 1 else 's'}"
+    parts = []
+    if excluded:
+        parts.append(f"{counted(excluded, excluded_unit or unit)} excluded by hop_exclusions")
+    if pending:
+        parts.append(f"{counted(pending, unit)} pending (within sla_hours)")
+    return ", ".join(parts)
 
 
 def key_hash(secret: bytes, key: str) -> str:

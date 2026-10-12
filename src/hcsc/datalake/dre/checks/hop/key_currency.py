@@ -5,8 +5,10 @@ it kept) against this dataset's latest record time for the mapped key: MISSING (
 here), UNASSESSABLE (no usable record time on a side, so currency cannot be judged: a
 violation, never passed, and given no cause), STALE (older here) or CURRENT. Population:
 keys judged; violations: MISSING, STALE or UNASSESSABLE. One result per upstream (group
-`upstream`). Key events (FLAGGED, STILL_FLAGGED, CLEARED) go to dq_key_event, per hop, when an HMAC secret is configured, in NORMAL runs only:
-a RERUN or REPLAY of a historical window judges the keys that window owns (at their deadline,
+`upstream`). Keys not judged are counted in `observed` with the reason: excluded by
+hop_exclusions, or pending (loaded upstream within sla_hours). Key events (FLAGGED,
+STILL_FLAGGED, CLEARED) go to dq_key_event, per hop, when an HMAC secret is configured, in
+NORMAL runs only: a RERUN or REPLAY of a historical window judges the keys that window owns (at their deadline,
 or reloaded in it) without reading or changing the open-key state.
 
 With a secret, the judged keys are computed once and materialised (a local checkpoint) inside
@@ -20,7 +22,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from hcsc.datalake.dre.checks.base import Check, CheckContext, CheckResult, from_counts, render_sql
-from hcsc.datalake.dre.checks.hop.common import hop_params, per_hop, register_key_hash, upstream_pairs
+from hcsc.datalake.dre.checks.hop.common import hop_params, not_judged, per_hop, register_key_hash, upstream_pairs
 
 if TYPE_CHECKING:
     from hcsc.datalake.dre.checks.events import Event
@@ -58,14 +60,18 @@ class KeyCurrency(Check):
             judged = ctx.spark.sql(render_sql("hop_key_currency.sql.j2", p=params, mode="judged", source=None))
             judged.localCheckpoint().createOrReplaceTempView(view)
         row = ctx.spark.sql(render_sql("hop_key_currency.sql.j2", p=params, mode="summary", source=view)).collect()[0]
+        left_out = not_judged(row.pending, row.excluded, "key")
+        observed = (f"{row.missing or 0} missing, {row.stale or 0} stale and {row.unassessable} unassessable "
+                    f"(no record time) of {row.population} keys" if row.unassessable else
+                    f"{row.missing or 0} missing and {row.stale or 0} stale of {row.population} keys")
         result = from_counts(
             row.population, row.violations,
-            observed=(f"{row.missing or 0} missing, {row.stale or 0} stale and {row.unassessable} unassessable "
-                      f"(no record time) of {row.population} keys" if row.unassessable else
-                      f"{row.missing or 0} missing and {row.stale or 0} stale of {row.population} keys"),
+            observed=observed + (f"; {left_out}" if left_out else ""),
             expected="every upstream key present at its latest version",
             group_values={"upstream": up_id},
         )
+        if result.state == "DID_NOT_RUN" and left_out:  # nothing judged: say what was left out, and why
+            result = replace(result, detail=f"no key judged; {left_out}")
         if view is not None and not ctx.record_key_events:  # RERUN, REPLAY: the judgement serves causes only
             return replace(result, judged_view=view)
         if view is not None:

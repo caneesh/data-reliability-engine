@@ -37,7 +37,33 @@ This page answers the architecture concerns of the October 2026 code review. For
 **Open:**
 
 - **Joins and aggregations.** Hops are key-preserving (one upstream key to one key here). A downstream table built by joining or aggregating several upstreams needs a contract kind the engine does not have yet. Such a dataset should not be given a `key_map`.
-- **Counting exclusions.** Excluded rows are left out, not counted: the check result does not say how many rows an exclusion kept out.
+- **Scheduler history.** Job status is never used to pass a check, which is right: checks read the data. As evidence for causes (NOT\_RUN, PIPELINE\_STALLED), scheduler history would help, but it waits on the platform team saying where it can be read.
+
+**What a hop result says it left out.** HOP\_KEY\_CURRENCY and HOP\_FILE\_COMPLETENESS append what they did not judge, and why, to `observed`: keys or rows excluded by `hop_exclusions`, and keys or files pending (loaded upstream within `sla_hours`, so not due yet). For example: `1 missing and 0 stale of 2 keys; 1 key excluded by hop_exclusions, 1 key pending (within sla_hours)`. When nothing was judged, the DID\_NOT\_RUN result's `detail` says the same. So a raw-to-gold difference is accounted for in the digest:
+
+| Disposition (review document) | How the engine reports it |
+| --- | --- |
+| Delivered | CURRENT key; file with all its rows |
+| Legitimately excluded | Counted as excluded by `hop_exclusions` |
+| Transformed / aggregated | Not supported yet (see "Joins and aggregations" above) |
+| Delayed / pending | Counted as pending; judged once its deadline passes |
+| Unexplained | MISSING or STALE, with a cause line that is not confirmed |
+| Insufficient evidence | UNASSESSABLE keys; cause lines marked "insufficient evidence" |
+
+These stay counts and key states, not new result states: every check still writes exactly one of PASSED, FAILED or DID\_NOT\_RUN (CLAUDE.md, hard constraint 4).
+
+## Acceptance criteria (architecture principles document, October 2026)
+
+| # | Criterion | Status | Evidence |
+| --- | --- | --- | --- |
+| 1 | Onboard a pipeline without editing or restarting its jobs | Met | Onboarding is YAML only; guard tests forbid writes outside `dq` |
+| 2 | Missing data at the earliest observable layer, across three or more stages | Met | `tests/replay/test_acceptance_three_layers.py` (raw -> curated -> gold, `dre trace`) |
+| 3 | Two upstreams feeding one gold target | Met | `test_open_keys_are_kept_per_hop` and `test_a_synthetic_pipeline_with_two_upstreams_exclusions_late_data_and_a_missing_key` in `tests/checks/test_hop.py` |
+| 4 | Legitimate exclusions without false data-loss alerts | Met | The same scenario test, and `test_file_completeness_reports_what_it_excluded_and_what_is_pending` |
+| 5 | Silent success, skipped processing and delayed loads, independent of job status | Met | T1\_ON\_TIME, T1\_ZERO\_ROWS, T1\_FILES\_NOT\_LOADED (replays R01 to R03); no check reads job status |
+| 6 | Recovery from partial DRE writes without duplicate active findings | Met, within Hive's limits | `tests/test_recovery.py`; no atomic commit across tables |
+| 7 | DRE outage and heavy load do not affect source processing | By design; not yet demonstrated | Needs a run in a representative cluster |
+| 8 | Uncertainty reported clearly | Met | Evidence levels on cause lines, UNASSESSABLE, NOT\_READY |
 
 ## Multi-source lineage
 

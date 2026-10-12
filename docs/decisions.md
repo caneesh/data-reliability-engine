@@ -243,6 +243,31 @@ Architecture concerns:
 - **Replay semantics.** RERUN and REPLAY are best-effort re-evaluations against today's data, not snapshots; the run prints this.
 - **The rest** is answered in `docs/architecture.md`: zero-touch isolation, multi-source lineage and operational safeguards. That page also lists what is still open: join and aggregate contracts, snapshot reads, and benchmarking the unbounded store reads.
 
+## Architecture principles document (October 2026)
+
+The user asked for a critical review of an uploaded principles document ("don't blindly follow them"). The review checked each point against the code. Taken up, then built after the user said yes:
+
+1. **Counts of what a hop result left out.** HOP_KEY_CURRENCY and HOP_FILE_COMPLETENESS report in `observed` the keys or rows excluded by `hop_exclusions` and the keys or files pending (within `sla_hours`), so a raw-to-gold difference is accounted for. A DID_NOT_RUN with nothing judged says the same in `detail`. The count CTEs are added only to the queries that use them: Spark analyses even unused CTEs, and with a missing upstream table their error (`column_missing`) masked the real one (`table_missing`).
+2. **A three-layer acceptance pipeline** (`tests/replay/test_acceptance_three_layers.py`, through `dre run` and `dre trace`): loss between raw and curated, loss between curated and gold, an excluded test member and a late key. Each loss is flagged at its earliest hop only.
+
+Already met, no change: zero pipeline changes and read-only access (CLAUDE.md hard constraints 1 to 3, guard tests); verification independent of job status; allowed lateness (`sla_hours`, `check_delay_minutes`, `settle_minutes`); evidence levels; check status separate from investigation status; recoverable persistence; replay limits; bounded scans and retention.
+
+Not taken, with reasons:
+
+- **Six dispositions as result states.** They map onto what exists (CURRENT, excluded, pending, MISSING or STALE with an unconfirmed cause, UNASSESSABLE), now with counts in `observed`. New result states would break hard constraint 4 (exactly PASSED, FAILED or DID_NOT_RUN). The mapping is in `docs/architecture.md`.
+- **An adapter framework for DB2, Kafka and cloud stores.** Kafka is out of release 1, and every read goes through Spark SQL or the Hadoop FileSystem API, which already is the abstraction. Building adapters before a source needs one is building ahead.
+- **Approval history, effective dates and validation status inside contracts.** Each run records the config's git commit, rules carry proposed, approved or retired, and git review is the approval history. Duplicating it in YAML adds fields nothing reads.
+- **Sampling.** Sampling would break the guarantee that every missing record is tied to a hop. Scans are bounded by windows and compute budgets instead.
+- **"Evidence confidence requirements" per contract.** The evidence level is reported; nothing would consume a required level.
+- **Table snapshots by the observers.** The store keeps judgements and key hashes, not copies of production data; the replay limit is documented instead.
+- **A control plane with access controls.** There is no service or UI; access is the `dq` database's grants, owned by the platform team.
+
+Deferred:
+
+- **Join and aggregate hops** ("transformed/aggregated"): a new contract kind (group-by and expected measure), designed before it is built; release 2.
+- **Scheduler history as cause evidence:** waits on the platform team saying where it can be read.
+- **Criterion 7** (an outage and heavy load don't affect sources): by design, but it can only be demonstrated in a representative cluster.
+
 ## Notes for later steps
 
 - **Step 4:** done: `dre dry-run` parses SQL fragments (`config/fragments.py`).

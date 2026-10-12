@@ -416,10 +416,28 @@ def test_a_synthetic_pipeline_with_two_upstreams_exclusions_late_data_and_a_miss
     results = run_hops(spark, KeyCurrency(), excluded, [a, b], secret=SECRET)
     assert (results["curated_a"].state, results["curated_a"].population, results["curated_a"].violations) == (
         "FAILED", 2, 1)  # keys 1 and 3 judged; key 2 excluded; key 4 not yet due
-    assert results["curated_a"].observed == "1 missing and 0 stale of 2 keys"
+    assert results["curated_a"].observed == (
+        "1 missing and 0 stale of 2 keys; 1 key excluded by hop_exclusions, 1 key pending (within sla_hours)")
     assert events_of(results["curated_a"]) == [(key_hash(SECRET, "3|01|2026-01-01|AGR-A"), "FLAGGED", "MISSING",
                                                 "3|01|2026-01-01|AGR-A")]
     assert (results["curated_b"].state, results["curated_b"].population) == ("PASSED", 1)
     # Without the exclusion, the test member would be reported as lost.
     plain = run_hops(spark, KeyCurrency(), dn, [a, b])
     assert (plain["curated_a"].population, plain["curated_a"].violations) == (3, 2)
+
+
+def test_file_completeness_reports_what_it_excluded_and_what_is_pending(spark) -> None:
+    """Exclusions are counted, not hidden: a file whose only missing row is a test record passes,
+    and the result says one row was excluded and one file is not due yet."""
+    late = datetime(2026, 1, 16, 9, 0)  # first loaded after the deadline range: pending
+    up, dn = file_tables(spark, "fc_excl",
+                         [("a", IN_WINDOW, "rt_0001.seq"), ("b", IN_WINDOW, "rt_0001.seq"),
+                          ("x1", IN_WINDOW, "rt_0001.seq"), ("c", late, "rt_0002.seq")],
+                         [("a", IN_WINDOW, "rt_0001.seq"), ("b", IN_WINDOW, "rt_0001.seq")])
+    with_exclusion = Dataset(**{**dn.model_dump(), "hop_exclusions": {"file_up": "id LIKE 'x%'"}})
+    [r] = run(spark, FileCompleteness(), with_exclusion, up)
+    assert (r.state, r.population, r.violations) == ("PASSED", 1, 0)
+    assert r.observed == ("0 of 1 upstream files have fewer rows here; "
+                          "1 row excluded by hop_exclusions, 1 file pending (within sla_hours)")
+    [plain] = run(spark, FileCompleteness(), dn, up)
+    assert (plain.state, plain.violations) == ("FAILED", 1)  # without the contract, the test row looks lost

@@ -1,15 +1,26 @@
 {# HOP_FILE_COMPLETENESS: per upstream file (base name of file_name_column) whose first upstream
    load + sla_hours falls in the window (every file past its deadline on the full sweep day),
-   rows here against rows upstream, each after its feed_filter. A file is a violation when it
-   has fewer rows here than upstream (none included). One row: population, violations and the
-   first {{ limit }} short files by name (one pass). #}
-WITH up_files AS (
-  SELECT regexp_extract({{ p.up_file }}, '([^/]+)$', 1) AS f, COUNT(*) AS up_rows, MIN({{ p.up_load }}) AS first_load
-  FROM {{ p.up_table }}
-{% if p.up_filter %}
-  WHERE {{ p.up_filter }}
+   rows here against rows upstream, each after its feed_filter; upstream rows that hop_exclusions
+   keep out are not expected here. A file is a violation when it has fewer rows here than
+   expected (none included). One row: population, violations, the first {{ limit }} short files
+   by name (one pass), the rows excluded from the files judged, and the files not judged yet
+   (pending: first loaded within sla_hours). #}
+WITH up_rows AS (
+  SELECT regexp_extract({{ p.up_file }}, '([^/]+)$', 1) AS f, {{ p.up_load }} AS load_ts,
+{% if p.up_exclusion %}
+         CASE WHEN coalesce(({{ p.up_exclusion }}), FALSE) THEN 1 ELSE 0 END AS excluded
+{% else %}
+         0 AS excluded
 {% endif %}
-  GROUP BY regexp_extract({{ p.up_file }}, '([^/]+)$', 1)
+  FROM {{ p.up_table }}
+{% if p.up_base_filter %}
+  WHERE {{ p.up_base_filter }}
+{% endif %}
+),
+up_files AS (
+  SELECT f, SUM(1 - excluded) AS up_rows, SUM(excluded) AS excluded_rows, MIN(load_ts) AS first_load
+  FROM up_rows
+  GROUP BY f
 ),
 dn_files AS (
   SELECT regexp_extract({{ p.dn_file }}, '([^/]+)$', 1) AS f, COUNT(*) AS dn_rows
@@ -19,8 +30,8 @@ dn_files AS (
 {% endif %}
   GROUP BY regexp_extract({{ p.dn_file }}, '([^/]+)$', 1)
 ),
-judged AS (
-  SELECT u.f, u.up_rows, COALESCE(d.dn_rows, 0) AS dn_rows
+in_range AS (
+  SELECT u.f, u.up_rows, u.excluded_rows, COALESCE(d.dn_rows, 0) AS dn_rows
   FROM up_files u
   LEFT JOIN dn_files d ON d.f = u.f
 {% if p.full_sweep %}
@@ -29,9 +40,11 @@ judged AS (
   WHERE u.first_load >= {{ p.deadline_start }} AND u.first_load < {{ p.deadline_end }}
 {% endif %}
 )
-SELECT COUNT(*) AS population,
-       SUM(CASE WHEN dn_rows < up_rows THEN 1 ELSE 0 END) AS violations,
-       slice(array_sort(collect_list(CASE WHEN dn_rows < up_rows
+SELECT SUM(CASE WHEN up_rows > 0 THEN 1 ELSE 0 END) AS population,
+       SUM(CASE WHEN up_rows > 0 AND dn_rows < up_rows THEN 1 ELSE 0 END) AS violations,
+       slice(array_sort(collect_list(CASE WHEN up_rows > 0 AND dn_rows < up_rows
                                           THEN named_struct('f', f, 'up_rows', up_rows, 'dn_rows', dn_rows) END)),
-             1, {{ limit }}) AS short
-FROM judged
+             1, {{ limit }}) AS short,
+       SUM(excluded_rows) AS excluded,
+       (SELECT COUNT(*) FROM up_files WHERE first_load >= {{ p.deadline_end }}) AS pending
+FROM in_range

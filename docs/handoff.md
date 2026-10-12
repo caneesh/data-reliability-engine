@@ -31,6 +31,8 @@ Read this first when resuming. Then `CLAUDE.md` (working rules), `docs/spec.md` 
 
 5. A code-review document (October 2026), uploaded as a .docx. Done: findings 1 to 4 (value-agreement ties, UNASSESSABLE keys, evidence_incomplete and windows held after an incomplete run, investigation tracking and retry), evidence levels on cause lines, `hop_exclusions`, and `docs/architecture.md`. See `docs/decisions.md`, "Code review comments (October 2026 document)". Still open (P2): benchmarking the store reads that are not bounded, and full runs in a representative cluster.
 
+6. A review of an uploaded architecture-principles document (October 2026), checked against the code. Built after the user said yes: counts of excluded and pending items on hop results, and a three-layer acceptance test. What was not taken, and why, is in `docs/decisions.md`, "Architecture principles document (October 2026)"; the acceptance-criteria table is in `docs/architecture.md`.
+
 **Next action:** wait for the user's answers. Then turn each answer into configuration or a small change, with tests, CI green, and a summary that starts with the CI result. The release-1 milestone after that is the spec's two-week unattended run in a test environment, outside this repository.
 
 ## Waiting on answers

@@ -5,8 +5,10 @@
    judged: the keys judged in this window, with MISSING (no row here), UNASSESSABLE (a side has no
    usable record time: currency cannot be judged, never passed), STALE, CURRENT, and whether the key was
    open at this hop: upstream keys at their deadline, keys reloaded here in the window once their
-   upstream deadline has passed, open keys. #}
-{% macro ctes(p) %}
+   upstream deadline has passed, open keys;
+   pending_keys / excluded_keys (with counts=True): what was not judged and why, for the counts in
+   the result; left out elsewhere, since Spark analyses even unused CTEs. #}
+{% macro ctes(p, counts=False) %}
 up AS (
   SELECT {{ p.up_key }} AS k, {{ p.up_record }} AS record_ts, {{ p.up_load }} AS load_ts
 {% for c in p.owned %}
@@ -73,7 +75,35 @@ judged AS (
      OR (d.dn_loaded = 1 AND u.up_load_ts < {{ p.deadline_end }})
      OR o.key_hash IS NOT NULL
 {% endif %}
+){% if counts %},
+pending_keys AS (
+  -- upstream keys not judged because their deadline has not passed yet (loaded within sla_hours)
+  SELECT u.k FROM up_keys u LEFT ANTI JOIN judged j ON j.k = u.k
+  WHERE u.up_load_ts >= {{ p.deadline_end }}
+),
+excluded_keys AS (
+  -- upstream keys whose every row a hop exclusion keeps out, in the range judged
+{% if p.up_exclusion %}
+  SELECT k FROM (
+    SELECT {{ p.up_key }} AS k, {{ p.up_load }} AS load_ts,
+           CASE WHEN coalesce(({{ p.up_exclusion }}), FALSE) THEN 1 ELSE 0 END AS excluded
+    FROM {{ p.up_table }}
+{% if p.up_base_filter %}
+    WHERE {{ p.up_base_filter }}
+{% endif %}
+  ) e
+  GROUP BY k
+  HAVING MIN(excluded) = 1
+{% if p.full_sweep %}
+     AND MAX(load_ts) < {{ p.deadline_end }}
+{% else %}
+     AND MAX(load_ts) >= {{ p.deadline_start }} AND MAX(load_ts) < {{ p.deadline_end }}
+{% endif %}
+{% else %}
+  SELECT CAST(NULL AS STRING) AS k WHERE 1 = 0
+{% endif %}
 )
+{% endif %}
 {% endmacro %}
 
 {# Keys judged CURRENT whose owned columns disagree, compared at the grain of the key's latest
