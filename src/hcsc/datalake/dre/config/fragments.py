@@ -76,6 +76,21 @@ def check_fragments(spark: SparkSession, config: Config, feed_id: str | None = N
                 resolves(ds.table, open_when)
             except Exception as exc:
                 report("rule", rule_id, ("params", "open_when"), "open_when", exc)
+    from hcsc.datalake.dre.checks.rules.template import TEMPLATES
+
+    for rule_id, rule in config.rules.items():  # rules on conf templates: the whole rendered query is analysed
+        ds = config.datasets.get(rule.dataset)
+        if rule.template not in config.templates or ds is None or not table_ok(ds.table) \
+                or (feed_id is not None and ds.dataset not in dataset_ids):
+            continue
+        spec = TEMPLATES[rule.template]
+        try:
+            params = spec.params.model_validate(rule.params)
+            sql = spec.sql(table=ds.table, feed_filter=ds.feed_filter, group_by=rule.group_by,
+                           **spec.arguments(ds, params, {}))
+            spark.sql(f"SELECT * FROM ({sql}) q LIMIT 0")
+        except Exception as exc:
+            report("rule", rule_id, ("template",), f"template {rule.template}", exc)
     for feed in feeds:
         for key, raw in feed.probes.items():
             many = isinstance(raw, list)

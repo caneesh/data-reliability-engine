@@ -63,6 +63,7 @@ class Config:
     feeds: dict[str, Feed] = field(default_factory=dict)
     datasets: dict[str, Dataset] = field(default_factory=dict)
     rules: dict[str, Rule] = field(default_factory=dict)
+    templates: dict[str, Any] = field(default_factory=dict)  # conf/templates: TemplateFile by name (release 3)
     sources: dict[tuple[str, str], Source] = field(default_factory=dict)  # (kind, id) -> Source
 
     def feed_of(self, dataset_id: str) -> Feed | None:
@@ -225,6 +226,45 @@ def read_yaml(path: Path, display: str) -> tuple[Any, yaml.Node | None, list[Con
     return (None if dupes else data), node, dupes
 
 
+def _load_templates(config: Config) -> list[ConfigError]:
+    """conf/templates/*.yaml: each file a rule template (spec section 3), registered for the rules
+    that follow. A packaged template's name is refused; a forbidden statement or a Jinja syntax
+    error is reported with the file and line."""
+    from hcsc.datalake.dre.checks.rules.conf_template import TemplateFile, check_template_file, use_conf_templates
+
+    errors: list[ConfigError] = []
+    files: list[Any] = []
+    folder = config.conf_dir / "templates"
+    for path in sorted([*folder.glob("*.yaml"), *folder.glob("*.yml")]):
+        display = str(path)
+        data, node, errs = read_yaml(path, display)
+        errors.extend(errs)
+        if data is None:
+            continue
+        try:
+            file = TemplateFile.model_validate(data)
+            problem = check_template_file(file)
+        except ValidationError as exc:
+            errors.extend(errors_from_validation(exc, display, node))
+            continue
+        if problem is not None:
+            errors.append(ConfigError(display, line_of(node, ("sql",)) + problem.line, "sql", problem.problem, problem.fix))
+            continue
+        if file.template in config.templates:
+            errors.append(ConfigError(display, line_of(node, ("template",)), "template",
+                                      f"duplicate template {file.template!r}", "give each template a unique name"))
+            continue
+        config.templates[file.template] = file
+        config.sources[("template", file.template)] = Source(display, node)
+        files.append(file)
+    for refused in use_conf_templates(files):
+        source = config.sources[("template", refused)]
+        errors.append(ConfigError(source.file, line_of(source.node, ("template",)), "template",
+                                  f"{refused!r} is a packaged template", "pick another name; packaged templates stay as they are"))
+        del config.templates[refused]
+    return errors
+
+
 def load(conf_dir: Path | str) -> tuple[Config, list[ConfigError]]:
     """Load and validate each file on its own. Cross-file checks are in validate.py."""
     from hcsc.datalake.dre.checks.registry import use_conf_patterns
@@ -233,6 +273,7 @@ def load(conf_dir: Path | str) -> tuple[Config, list[ConfigError]]:
     config = Config(conf_dir=conf_dir)
     errors: list[ConfigError] = []
     use_conf_patterns(conf_dir)  # patterns/*.yaml in the conf directory add to or replace the packaged ones
+    errors.extend(_load_templates(config))  # before the rules, which name them
 
     defaults_path = conf_dir / "defaults.yaml"
     display = str(defaults_path)

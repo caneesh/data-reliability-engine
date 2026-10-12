@@ -24,6 +24,8 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
 | Merge to `main` (PR #1) | `96503b9` | #29 |
 | Handoff for compaction | `525e23c` | #31 |
 | Extensibility step 1: self-registering capabilities (`docs/design/extensibility.md`) | `23d1a8a` | #32 |
+| Extensibility step 2: check parameters, T1_FRESHNESS, T1_COLUMN_RANGE | `d4f452d` (#33 red: four result counts) and `30fffda` | #34 |
+| Extensibility step 3: patterns from configuration, `kind` | `c1f2811` | #35 |
 
 Each row has a section in `docs/decisions.md` saying what was decided and why.
 

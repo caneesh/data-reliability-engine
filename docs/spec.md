@@ -68,6 +68,7 @@ data-reliability-engine/
           checks/
             rules/schedule.py  # when a gold rule is due (frequency)
             rules/template.py  # TemplateSpec and the template registry; rules/templates/: one module per template
+            rules/conf_template.py  # templates from conf/templates: typed params, sandboxed SQL, the query-only guard
             base.py          # Check interface, result building, denominator rule, preconditions, run_check
             budget.py        # compute budget: a check in its own Spark job group, cancelled when over
             keys.py          # key expressions with key_normalise applied; the normaliser registry
@@ -114,6 +115,7 @@ data-reliability-engine/
     defaults.yaml
     feeds/  datasets/  rules/
     patterns/                # optional: patterns of this instance; a packaged name replaces that pattern (section 3)
+    templates/               # optional: gold rule templates of this instance, SQL in YAML (section 3)
   tests/
     fixtures/                # synthetic data builders
     replay/                  # one test per replay scenario (section 9)
@@ -209,6 +211,29 @@ causes:                           # as in section 7; each failure type needs one
 ```
 
 Every check, probe type and builtin cause code a pattern names must be registered (section 2, "Extension points"); `dre validate` reports a malformed pattern file by name, and says which patterns are packaged and which come from `conf/patterns`. A feed's `pattern` must be one of them; its `probes:` keys must be ones the pattern's causes use. Whether a feed lands files is the pattern's `kind`, never its name.
+
+**Rule templates from configuration** (release 3). A gold rule template may be defined in `conf/templates/<name>.yaml` instead of code. It declares typed params, the text of its result and a Jinja SQL template:
+
+```yaml
+template: not_after               # the name rules use; a packaged template's name is refused
+params:
+  column: column                  # types: string, int, float, bool, column, columns, sql, format
+  limit: { type: string }         # required unless `required: false` or a `default` is given
+  format: { type: format, required: false }
+population: rows with a value     # what the population counts
+violation: rows have a value after the limit   # the observed text: "<n> of <population> rows have ..."
+unit: rows                        # the expected text: "0 rows breaking rule <rule>"
+sql: |                            # returns population and violations, and g_1.. for the rule's group_by
+  SELECT {% for g in group_by %}{{ g }} AS g_{{ loop.index }}, {% endfor %}
+         COUNT({{ params.column }}) AS population,
+         SUM(CASE WHEN {{ time(params.column, params.format) }} > {{ time(literal(params.limit), params.format) }}
+                  THEN 1 ELSE 0 END) AS violations
+  FROM {{ table }}
+  {% if feed_filter %}WHERE {{ feed_filter }}{% endif %}
+  {% if group_by %}GROUP BY {{ group_by | join(', ') }}{% endif %}
+```
+
+The template sees `table`, `feed_filter`, `group_by`, `params` and four helpers: `column(name)` (with `key_normalise`), `time(name, format)` (parsed, never compared as a string), `key_expr` and `literal(text)`. Params of type `column` and `columns` are the columns the rule reads (preconditions). The SQL renders in a sandboxed Jinja environment and always runs wrapped as `SELECT * FROM (...) dre_rule`, so a statement that is not a query is a parse error (section 9, rule 10); `dre validate` also rejects write and DDL keywords in the text, naming the file and line, and `dre dry-run` renders each such rule against its table. Rules on these templates follow the denominator rule like any other: an empty population is DID\_NOT\_RUN.
 
 **Table-wide datasets.** A dataset that no feed lists covers a whole table, for example to run gold rules across every source system. It must set `owner` (whose recipients get its results) and `expectation_version` (it has no feed to take one from), has no `feed_filter`, and takes its settings from `defaults.yaml`. It gets the checks in `patterns/table_wide.yaml`: T1\_SCHEMA\_DRIFT, T1\_KEY\_NULLS and T1\_KEY\_DUPLICATES only, plus gold rules. A dataset that a feed lists takes its owner and expectation version from the feed and must set neither. Each dataset is listed by at most one feed.
 
@@ -606,6 +631,7 @@ All tests run on local-mode Spark against synthetic tables built by fixtures in 
 7. **Email.** Email text contains no `key_value`. Statically, nothing in `notify/` references `key_value`; and a test renders a digest from a store whose key events carry a synthetic `key_value`, with `email_sample_keys: true`, and checks that no part of it appears in the text (`tests/notify/test_digest.py`).
 8. **Store DDL only through `dre install`.** CREATE TABLE and CREATE [OR REPLACE] VIEW are allowed only on the dq store and only in `store/ddl.sql`. Only `store/install.py` (behind `dre install --apply`) and `store/local_setup.py` may reference `apply_ddl`, so `dre run` never creates the store.
 9. **Generic engine.** Engine code, the config schema, pattern YAML and SQL templates (everything under `src/`) must not contain source-specific words. The denylist lives in `tests/guard/test_generic_engine.py` (stopper, handoff, file\_date, sub\_id, rms) and grows whenever a source-specific name is found; such words may appear only in `conf/` and `tests/`.
+10. **Configuration SQL is a query.** SQL that comes from configuration (rule templates under `conf/templates/`) runs only wrapped as a subquery, `SELECT * FROM (...) dre_rule`, so a command is a parse error, and `dre validate` rejects write and DDL keywords in the template text. Tests prove both: a template carrying DROP is a config error naming the file and line, and one registered by other means leaves the table untouched (`tests/checks/test_conf_templates.py`).
 
 ## 10. Build order
 

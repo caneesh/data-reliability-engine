@@ -312,6 +312,15 @@ Deferred to step 2: `causes/failures.py` still lists the failing things of a FAI
 4. **One new pattern rule:** a failure type needs at least one cause check before its fallback. A fallback-only list would write no cause rows, and the investigation retry would then treat every such FAILED result as unfinished, every run.
 5. **`dre validate` prints** which patterns are packaged and which come from `conf/patterns`.
 
+## Extensibility, step 4: rule templates from configuration (2026-10-12)
+
+1. **`conf/templates/*.yaml`** becomes a `TemplateSpec` (`checks/rules/conf_template.py`) and is registered before the rules load, so `rule.template` validates against it. The params model is built from the declared types (`pydantic.create_model`); `column` and `columns` params are the rule's required columns.
+2. **Sandbox and helpers.** The SQL renders in Jinja's `SandboxedEnvironment` with `StrictUndefined` and sees only `table`, `feed_filter`, `group_by`, `params`, `column`, `time`, `key_expr`, `literal` and `number`. Nothing from the engine's Python is reachable from a template.
+3. **Guard rule 10** (spec section 9): the rendered statement always runs as `SELECT * FROM (...) dre_rule`, so a command cannot parse; `dre validate` additionally rejects INSERT, UPDATE, DELETE, MERGE, DROP, ALTER, TRUNCATE, CREATE, LOAD, GRANT, REVOKE, MSCK, REFRESH, CACHE, UNCACHE, ANALYZE and ADD JAR/FILE as whole words in the text. `replace(...)` and column names such as `delete_flag` are fine.
+4. **No overriding packaged templates.** A conf template with a packaged name is a config error. Unlike patterns, a packaged template is Python logic that existing rules depend on; replacing it from YAML could change their meaning silently.
+5. **`dre dry-run`** renders each rule on a conf template against its table (`LIMIT 0`), so a column or expression error shows before a run.
+6. **No sample template.** A template without a rule shows nothing, and a sample rule would change the result counts again; the spec example and the tests carry it.
+
 ## Notes for later steps
 
 - **Step 4:** done: `dre dry-run` parses SQL fragments (`config/fragments.py`).

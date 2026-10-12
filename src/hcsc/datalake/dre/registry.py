@@ -50,6 +50,10 @@ class Registry(Generic[T]):
         except KeyError:
             raise KeyError(f"unknown {self.kind} {item_id!r}; known: {self.ids()}") from None
 
+    def unregister(self, item_id: str) -> None:
+        """Remove a registration (configuration-defined capabilities are replaced on each load)."""
+        self._items.pop(item_id, None)
+
     def get(self, item_id: str) -> T | None:
         self._load()
         return self._items.get(item_id)
