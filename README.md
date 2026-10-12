@@ -17,7 +17,7 @@ pytest                 # all tests, local-mode Spark
 pytest tests/guard     # guard tests only
 ```
 
-Release 1 is built (spec section 10, steps 1 to 11). Commands: `dre validate`, `dre install --print|--apply|--check`, `dre run [--feed F]`, `dre dry-run --feed F`, `dre trace --dataset D --key "k1,k2,..."`, `dre watchdog` and `dre retention [--apply]`, each with `--conf DIR`.
+Release 1 is built (spec section 10, steps 1 to 11). Commands: `dre validate`, `dre install --print|--apply|--check`, `dre run [--feed F]` (plus `--execution-type RERUN --window-start T --window-end T` or `REPLAY --from T --to T` for historical windows), `dre dry-run --feed F`, `dre trace --dataset D --key "k1,k2,..."`, `dre watchdog` and `dre retention [--apply]`, each with `--conf DIR`.
 
 ## Deploying with spark-submit
 
@@ -62,6 +62,13 @@ Schedule retention weekly (without `--apply` it only lists what it would drop):
 
 ```bash
 $SUBMIT retention --conf /path/to/conf --apply   # drops dq partitions older than retention_months
+```
+
+Re-evaluate history on demand (UTC times; idempotent; no key events, no email):
+
+```bash
+$SUBMIT run --conf /path/to/conf --execution-type RERUN --window-start 2026-01-15T06:00 --window-end 2026-01-15T07:00
+$SUBMIT run --conf /path/to/conf --execution-type REPLAY --from 2026-01-14T00:00 --to 2026-01-16T00:00
 ```
 
 Trace one key on demand: `$SUBMIT trace --conf /path/to/conf --dataset gold_member_coverage --key "k1,k2,k3,k4"`.

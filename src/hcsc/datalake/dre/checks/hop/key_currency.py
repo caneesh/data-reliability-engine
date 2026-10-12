@@ -4,7 +4,9 @@ For each upstream key judged in the window, the latest upstream record time (row
 it kept) against this dataset's latest record time for the mapped key: MISSING (no row
 here), STALE (older here) or CURRENT. Population: keys judged; violations: MISSING or
 STALE. One result per upstream (group `upstream`). Key events (FLAGGED, STILL_FLAGGED,
-CLEARED) go to dq_key_event, per hop, when an HMAC secret is configured.
+CLEARED) go to dq_key_event, per hop, when an HMAC secret is configured, in NORMAL runs only:
+a RERUN or REPLAY of a historical window judges the keys that window owns (at their deadline,
+or reloaded in it) without reading or changing the open-key state.
 
 With a secret, the judged keys are computed once and materialised (a local checkpoint) inside
 the check, so the summary, the key events and the cause engine's failing keys all read the same
@@ -61,6 +63,8 @@ class KeyCurrency(Check):
             expected="every upstream key present at its latest version",
             group_values={"upstream": up_id},
         )
+        if view is not None and not ctx.record_key_events:  # RERUN, REPLAY: the judgement serves causes only
+            return replace(result, judged_view=view)
         if view is not None:
             events = ctx.spark.sql(render_sql("hop_key_currency.sql.j2", p=params, mode="events", source=view))
             return replace(result, key_events=events.localCheckpoint(), judged_view=view)

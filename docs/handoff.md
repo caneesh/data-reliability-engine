@@ -27,6 +27,8 @@ Read this first when resuming. Then `CLAUDE.md` (working rules), `docs/spec.md` 
 
 3. "Do a thorough code review", then "Fix all those can be fixed, document the rest" (2026-10-11). Done: 27 of 29 findings fixed with tests; items 6 (NO_UPSTREAM_DATA window) and 7 (what a RERUN evaluates) wait on answers. All in `docs/decisions.md`, "Code review (2026-10-11)". The store changed: `dq_key_event` has a `hop` column.
 
+4. Answers to review items 6 and 7 (2026-10-12). Done: NO_UPSTREAM_DATA over the load's business window, after WRONG_PARTITION; NORMAL, RERUN (`--window-start/--window-end`) and REPLAY (`--from/--to`), idempotent, with no key events from RERUN or REPLAY. `dq_run` has an `execution_type` column. See `docs/decisions.md`, "Review items 6 and 7, answered".
+
 **Next action:** wait for the user's answers. Then turn each answer into configuration or a small change, with tests, CI green, and a summary that starts with the CI result. The release-1 milestone after that is the spec's two-week unattended run in a test environment, outside this repository.
 
 ## Waiting on answers
@@ -53,7 +55,6 @@ Read this first when resuming. Then `CLAUDE.md` (working rules), `docs/spec.md` 
   - Client deploy mode on an edge node, with Python 3.10.
   - A cluster throughput figure, if checks should be refused before running (`scan_mb_per_minute`).
   - The `dq` database and service account.
-- **From the code review:** review item 6 (NO_UPSTREAM_DATA counts upstream rows in the event window, which spec section 7 says but which rarely fits hourly runs) and item 7 (how `--execution-type RERUN|REPLAY` picks its window and what it may write).
 - **User decisions:**
   - WRONG_PARTITION: probe `confirm_when` `later` (the default) or `different`.
   - All-clear digest volume: `email.all_clear_digest`.

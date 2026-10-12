@@ -99,3 +99,13 @@ def test_watchdog_owner_gets_the_alerts(spark, tmp_path, capsys) -> None:
         "watchdog_owner: provider-data", "watchdog_owner: nobody"), encoding="utf-8")
     _, errors, _ = validate_conf(replay.conf)
     assert [e.field for e in errors] == ["watchdog_owner"]
+
+
+def test_a_manual_rerun_is_not_the_scheduled_run(spark, tmp_path, capsys) -> None:
+    """Item 7: dq_run records the execution type; a RERUN in the expected hour does not stand in
+    for the missing NORMAL run."""
+    replay = replay_conf(spark, tmp_path, "r12_rerun")
+    rerun = runs.start_run(spark, replay.dq, now=hour_now() + timedelta(minutes=2), execution_type="RERUN")
+    runs.finish_run(spark, replay.dq, rerun, 5, 5, now=rerun.started_at + timedelta(minutes=4))
+    code, out = watchdog(replay, capsys)
+    assert code == 1 and "no dre run started in" in out

@@ -6,7 +6,8 @@
 CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_run (
   run_id STRING, started_at TIMESTAMP, ended_at TIMESTAMP,
   engine_version STRING, config_commit STRING, status STRING,  -- STARTED | COMPLETED | PARTIAL | FAILED
-  checks_expected INT, checks_written INT
+  checks_expected INT, checks_written INT,
+  execution_type STRING                 -- NORMAL | RERUN | REPLAY
 ) PARTITIONED BY (run_date DATE) STORED AS ORC;
 
 CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_check_result (
@@ -45,7 +46,7 @@ CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_file (
 -- FAILED) once written, otherwise STARTED.
 CREATE VIEW IF NOT EXISTS {{ dq_database }}.v_latest_run AS
 SELECT run_id, started_at, ended_at, engine_version, config_commit, status,
-       checks_expected, checks_written, run_date
+       checks_expected, checks_written, execution_type, run_date
 FROM (
   SELECT r.*,
          ROW_NUMBER() OVER (
@@ -57,7 +58,9 @@ FROM (
 WHERE latest_rank = 1;
 
 -- Every row of the latest evaluation per (dataset, check_id): one row for an
--- ungrouped check, one row per group for a grouped one.
+-- ungrouped check, one row per group for a grouped one. Latest = the latest window, then
+-- the latest evaluation of it, so a RERUN or REPLAY of an older window never becomes the
+-- current state, while a RERUN of the current window replaces it.
 CREATE VIEW IF NOT EXISTS {{ dq_database }}.v_latest_result AS
 SELECT evaluation_id, run_id, event_id, window_start, window_end, execution_type, feed, dataset, check_id,
        expectation_version, state, reason_category, reason_code, population,
@@ -67,7 +70,7 @@ FROM (
   SELECT r.*,
          DENSE_RANK() OVER (
            PARTITION BY dataset, check_id
-           ORDER BY evaluated_at DESC, run_id DESC
+           ORDER BY window_end DESC, evaluated_at DESC, run_id DESC
          ) AS latest_rank
   FROM {{ dq_database }}.dq_check_result r
 ) ranked

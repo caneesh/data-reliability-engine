@@ -13,6 +13,9 @@ its end.
   event. Then the held span is given up: one WINDOW_GAP result (DID_NOT_RUN /
   window_gap) records it, and the window starts where the last held event ended.
 - Both bounds are truncated to load_time.granularity in the load time's zone.
+
+RERUN and REPLAY name historical windows instead (fixed_window, replay_windows); their results
+never move or hold a window.
 """
 
 from __future__ import annotations
@@ -145,3 +148,57 @@ def release_hold(history: WindowHistory, dataset: str, window_end: datetime,
         return history.previous_end, None
     start = history.previous_end or history.held_start
     return history.last_held_end, Event(dataset, start, history.last_held_end)
+
+
+def fixed_window(dataset: Dataset, start: datetime, end: datetime, default_tz: str) -> Event:
+    """A given (historical) window for the dataset, bounds truncated as window_for truncates them,
+    so naming a NORMAL event's bounds gives that event (and its event_id) again."""
+    start, end = as_utc(start), as_utc(end)
+    if dataset.load_time is not None:
+        tz = column_timezone(dataset.load_time, default_tz)
+        start = truncate(start, dataset.load_time.granularity, tz)
+        end = truncate(end, dataset.load_time.granularity, tz)
+    return Event(dataset.dataset, min(start, end), end)
+
+
+def recorded_windows(spark: SparkSession, dq_database: str, datasets: list[str], start: datetime,
+                     end: datetime) -> dict[str, list[tuple[datetime, datetime]]]:
+    """Each dataset's NORMAL event windows (not rule results, not WINDOW_GAP records) lying inside
+    [start, end), oldest first."""
+    validate_dq_database(dq_database)
+    found: dict[str, list[tuple[datetime, datetime]]] = {d: [] for d in datasets}
+    if not datasets or not spark.catalog.tableExists(f"{dq_database}.dq_check_result"):
+        return found
+    names = ", ".join(f"'{validate_identifier(d, 'dataset id')}'" for d in sorted(set(datasets)))
+    lo = as_utc(start).strftime("%Y-%m-%d %H:%M:%S.%f")
+    hi = as_utc(end).strftime("%Y-%m-%d %H:%M:%S.%f")
+    rows = spark.sql(
+        f"SELECT DISTINCT dataset, window_start, window_end FROM {dq_database}.dq_check_result "
+        f"WHERE dataset IN ({names}) AND execution_type = 'NORMAL' AND severity IS NULL "
+        f"AND check_id <> '{GAP_CHECK_ID}' "
+        f"AND window_start >= TIMESTAMP '{lo}' AND window_end <= TIMESTAMP '{hi}' "
+        f"ORDER BY dataset, window_start, window_end"
+    ).collect()
+    for r in rows:
+        found[r.dataset].append((as_utc(r.window_start), as_utc(r.window_end)))
+    return found
+
+
+def replay_windows(dataset: Dataset, start: datetime, end: datetime, recorded: list[tuple[datetime, datetime]],
+                   default_tz: str) -> list[Event]:
+    """The windows a REPLAY of [start, end) evaluates for the dataset, oldest first: its recorded
+    NORMAL windows in the range, exactly (so each keeps its event_id), and every span no recorded
+    window covers as one window of its own. A window held and evaluated again is replayed once, as
+    its longest evaluation (the windows starting where an earlier one did are skipped)."""
+    events: list[Event] = []
+    cursor = as_utc(start)
+    for w_start, w_end in sorted(recorded, key=lambda w: (w[0], -w[1].timestamp())):
+        if w_start < cursor:
+            continue
+        if w_start > cursor:
+            events.append(fixed_window(dataset, cursor, w_start, default_tz))
+        events.append(Event(dataset.dataset, w_start, w_end))
+        cursor = w_end
+    if cursor < as_utc(end):
+        events.append(fixed_window(dataset, cursor, end, default_tz))
+    return [e for e in events if e.window_start < e.window_end]

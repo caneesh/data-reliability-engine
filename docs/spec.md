@@ -218,6 +218,23 @@ Rule `params` shapes, where section 6 does not spell them out: `superseded_still
 
 **Evaluation identity.** `evaluation_id = sha256(event_id + check_id + expectation_version + engine_version + group_values)`, with `group_values` written as `key=value` pairs sorted by key (empty for an ungrouped check), so each group row of a grouped check has its own id. A rerun of the same evaluation writes a new row with the same `evaluation_id` and `execution_type = RERUN`; it never overwrites. Values: NORMAL, RERUN, REPLAY.
 
+**Execution types.**
+
+- **NORMAL** (the hourly schedule) evaluates each dataset's next eligible window, as above.
+- **RERUN** evaluates one historical window that the caller names (`--window-start`, `--window-end`, UTC), for every dataset planned. The bounds are truncated as a NORMAL window's are, so naming a NORMAL event's bounds gives the same `event_id` and `evaluation_id`s.
+- **REPLAY** evaluates a historical range (`--from`, `--to`). Each dataset's recorded NORMAL windows inside the range are replayed exactly, keeping their ids; a window held and evaluated again is replayed once, as its longest evaluation. Each span no recorded window covers is evaluated as one window.
+
+RERUN and REPLAY:
+
+- **Historical only.** They must end by the run's start.
+- **Windowed checks only.** They run only the checks that read a window: not gold rules or T1\_SCHEMA\_DRIFT, which read the table as it is now.
+- **Idempotent.** A result whose outcome (state, reason, counts, observed, expected, detail, severity) equals the latest stored result of the same `evaluation_id` is not written again, and still counts as written.
+- **No change to current state.** They neither read nor write the open-key state: HOP\_KEY\_CURRENCY judges the keys the window owns (at their deadline, or reloaded in it), writes no key events, and keeps the judged keys for the cause engine. They register no files in `dq_file`.
+- **No effect on windows.** They never move or hold a NORMAL window.
+- **No email.** They send no digest, because digests report scheduled runs.
+
+`dq_run.execution_type` records the type.
+
 **Result states.** Exactly one per check per event:
 
 | State | Meaning |
@@ -253,7 +270,8 @@ All tables in the `dq` database, ORC, partitioned by `run_date`. Append-only: th
 CREATE TABLE dq.dq_run (
   run_id STRING, started_at TIMESTAMP, ended_at TIMESTAMP,
   engine_version STRING, config_commit STRING, status STRING,  -- STARTED | COMPLETED | PARTIAL | FAILED
-  checks_expected INT, checks_written INT
+  checks_expected INT, checks_written INT,
+  execution_type STRING                 -- NORMAL | RERUN | REPLAY; the watchdog counts NORMAL runs only
 ) PARTITIONED BY (run_date DATE) STORED AS ORC;
 
 CREATE TABLE dq.dq_check_result (
@@ -292,7 +310,7 @@ CREATE TABLE dq.dq_file (
 Views derive current state:
 
 - `dq.v_latest_run`: each run's latest `dq_run` row (its final row once written, otherwise STARTED)
-- `dq.v_latest_result`: the latest evaluation per (dataset, check\_id) by `evaluated_at`: one row for an ungrouped check, one row per group for a grouped one
+- `dq.v_latest_result`: the latest evaluation per (dataset, check\_id), by `window_end` and then `evaluated_at` (so a RERUN or REPLAY of an older window never becomes the current state): one row for an ungrouped check, one row per group for a grouped one
 - `dq.v_open_keys`: keys whose latest `dq_key_event` at a hop is FLAGGED or STILL\_FLAGGED, with first flagged date (per dataset, check, hop and key)
 - `dq.v_file_status`: one row per file path with first-seen time and latest size
 
@@ -435,13 +453,13 @@ probes:
 
 | Order | Cause code | Confirmed when | Probe (`params` key) |
 | --- | --- | --- | --- |
-| 1 | NO\_UPSTREAM\_DATA | The upstream dataset also had zero rows in the window | `builtin` (needs `upstream`) |
-| 2 | WRONG\_PARTITION | Rows were written to a partition other than the one named in the cursor file | `file_value_compare`, `compare_to: partition` (`partition_cursor`) |
+| 1 | WRONG\_PARTITION | Rows were written to a partition other than the one named in the cursor file | `file_value_compare`, `compare_to: partition` (`partition_cursor`) |
+| 2 | NO\_UPSTREAM\_DATA | The upstream data is genuinely absent: every upstream dataset loaded zero rows in the failing load's business window | `builtin` (needs `upstream`; NOT\_READY without an upstream `load_time` or an earlier slot) |
 | fallback | EMPTY\_LOAD | No cause confirmed |  |
 
 A filter rule is one `table_contains` parameter set under `filter_rules`: `table` and `condition` (SQL), with optional `id` and `code_ref` (file and line, or commit). The table is matched on the hop's upstream columns: the base name of its `file_name_column` for a file, its mapped key columns (with its `key_normalise`) for a key.
 
-**What a cause explains.** Each failing thing of a FAILED check is explained on its own, and its rows share a `failure_ref`: a not-loaded file's path (T1\_FILES\_NOT\_LOADED), a missed or short slot in UTC (T1\_ON\_TIME, T1\_ZERO\_ROWS, which list their failing slots in `detail`), a short upstream file's base name (HOP\_FILE\_COMPLETENESS), or a failing key's `key_hash` (HOP\_KEY\_CURRENCY: MISSING or STALE keys; HOP\_VALUE\_AGREEMENT: CURRENT keys that disagree). At most 100 per evaluation. Without `hmac_secret_file` keys cannot be referenced: one set of rows with no `failure_ref`, all NOT\_READY. For a missed slot on a file pattern, the file probes look at the files first seen since the slot that have no raw rows. PIPELINE\_STALLED counts the files first seen with or after the failing one (or since the slot), not the file itself; with no such file it is RULED\_OUT. NO\_UPSTREAM\_DATA counts upstream rows loaded in the event window.
+**What a cause explains.** Each failing thing of a FAILED check is explained on its own, and its rows share a `failure_ref`: a not-loaded file's path (T1\_FILES\_NOT\_LOADED), a missed or short slot in UTC (T1\_ON\_TIME, T1\_ZERO\_ROWS, which list their failing slots in `detail`), a short upstream file's base name (HOP\_FILE\_COMPLETENESS), or a failing key's `key_hash` (HOP\_KEY\_CURRENCY: MISSING or STALE keys; HOP\_VALUE\_AGREEMENT: CURRENT keys that disagree). At most 100 per evaluation. Without `hmac_secret_file` keys cannot be referenced: one set of rows with no `failure_ref`, all NOT\_READY. For a missed slot on a file pattern, the file probes look at the files first seen since the slot that have no raw rows. PIPELINE\_STALLED counts the files first seen with or after the failing one (or since the slot), not the file itself; with no such file it is RULED\_OUT. NO\_UPSTREAM\_DATA counts upstream rows loaded in the failing load's business window: from the previous cadence slot (the load before it) to this slot's deadline (slot + `sla_hours`), the span in which the load could have taken upstream data. It does not use the run's execution window, which with hourly runs falls hours after the load. It comes after WRONG\_PARTITION, so direct evidence of a downstream failure is the cause when both are confirmed; both rows are kept.
 
 **Rows.** One `dq_cause_result` row per cause check per failure, the fallback excluded: `cause_check_id` is the probe and its params key (`file_exists:load_hold_marker`) or `builtin`; `order_no` its place in the pattern's order; `hop` the hop explained (`<upstream>-><dataset>`, `landing-><raw dataset>`); `evidence` JSON with times, counts, paths and table names only, never key values, log lines or file contents. The cause of a failure is read from its rows: the first CONFIRMED by `order_no`, otherwise the pattern's fallback, not proven. A probe that raises is ERROR (its evidence is the exception type); if the failing things cannot be listed, every cause check is written as ERROR.
 
@@ -452,7 +470,7 @@ A filter rule is one `table_contains` parameter set under `filter_rules`: `table
 | `dre validate [--conf DIR]` | Static validation of all config | 0 valid, 1 errors |
 | `dre dry-run --feed F` | Runs preconditions and checks for one feed, prints results, writes nothing | 0 always, unless the command itself fails |
 | `dre install --print\|--apply\|--check [--conf DIR]` | `--print` renders the store DDL for the configured dq database; `--apply` creates missing tables and views (all IF NOT EXISTS, safe to rerun); `--check` compares the existing tables and views with the DDL | 0 done or matching, 1 differences found or apply failed, 3 the database does not exist |
-| `dre run [--feed F] [--execution-type NORMAL\|RERUN\|REPLAY]` | Scheduled every hour. Evaluates only feeds with something due: a cadence slot's deadline (slot + `sla_hours`) passed since the feed's last evaluated window, or new or changed landed files. `--feed F` evaluates F even when nothing is due. Then preconditions, checks, causes, append results, send email | 0 run completed (even with FAILED checks), 2 partial, 3 could not start (including: the store is not installed; the message names `dre install`) |
+| `dre run [--feed F] [--execution-type NORMAL\|RERUN\|REPLAY] [--window-start T --window-end T] [--from T --to T]` | NORMAL (the default) is scheduled every hour; RERUN takes `--window-start` and `--window-end`, REPLAY takes `--from` and `--to` (ISO 8601, UTC; section 4). A NORMAL run evaluates only feeds with something due: a cadence slot's deadline (slot + `sla_hours`) passed since the feed's last evaluated window, or new or changed landed files. `--feed F` evaluates F even when nothing is due. Then preconditions, checks, causes, append results, send email | 0 run completed (even with FAILED checks), 2 partial, 3 could not start (including: the store is not installed; the message names `dre install`) |
 | `dre trace --dataset D --key "k1,k2,..."` | Prints one line per layer along the `upstream` chain: present or not, record time, load time, file; ends with the first layer where the key is absent or older, then that hop's cause line | 0, or 3 for an unknown dataset or a key with the wrong number of parts |
 | `dre watchdog` | Checks the last expected run exists and wrote every expected check; emails if not | 0 healthy, 1 alert sent |
 | `dre retention [--apply] [--conf DIR]` | Scheduled weekly. Lists each dq table's `run_date` partitions older than its `retention_months`; `--apply` drops them through `store/retention.py` | 0 done, 1 a table could not be read or dropped, 3 no `defaults.yaml` |

@@ -67,7 +67,9 @@ def test_run_writes_results_and_windows_follow_on(spark, tmp_path, capsys) -> No
 def test_replay_runs_do_not_move_the_window(spark, tmp_path) -> None:
     replay = replay_conf(spark, tmp_path, "runner_f")
     create_table(spark, replay.gold, GOLD_COLUMNS, [gold_row()])
-    assert main(["run", "--conf", str(replay.conf), "--execution-type", "REPLAY"]) == 0
+    # REPLAY now names its historical range (review item 7).
+    assert main(["run", "--conf", str(replay.conf), "--execution-type", "REPLAY",
+                 "--from", "2026-01-14T00:00", "--to", "2026-01-15T00:00"]) == 0
     rows = spark.table(f"{replay.dq}.dq_check_result").collect()
     assert {r.execution_type for r in rows} == {"REPLAY"}
     assert previous_window_end(spark, replay.dq, "gold_member_coverage") is None

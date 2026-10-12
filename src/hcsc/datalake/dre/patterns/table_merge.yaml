@@ -35,6 +35,7 @@ causes:
   load_wrote_nothing:
     checks: [T1_ZERO_ROWS]
     order:
-      - {code: NO_UPSTREAM_DATA, probe: builtin}
+      # downstream evidence first: NO_UPSTREAM_DATA must not hide a confirmed WRONG_PARTITION
       - {code: WRONG_PARTITION, probe: file_value_compare, params: partition_cursor}
+      - {code: NO_UPSTREAM_DATA, probe: builtin}
       - {code: EMPTY_LOAD, fallback: true}

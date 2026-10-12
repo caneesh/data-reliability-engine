@@ -108,6 +108,9 @@ class CheckContext:
     full_sweep: bool = False  # today is full_sweep_day: hop checks read every key, not only changed ones
     budget_minutes: float | None = None  # this check's budget; None: settings.compute_budget_minutes
     scan_mb_per_minute: float | None = None  # throughput to refuse a check up front; None: never
+    # NORMAL runs keep the open-key state (read v_open_keys, write key events); a RERUN or REPLAY
+    # of a historical window neither reads nor changes it, so repeating one changes nothing.
+    record_key_events: bool = True
 
 
 class Check(ABC):

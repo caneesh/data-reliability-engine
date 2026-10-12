@@ -1,4 +1,5 @@
-{# NO_UPSTREAM_DATA: rows an upstream dataset loaded in the event window, after its feed_filter. #}
+{# NO_UPSTREAM_DATA: rows an upstream dataset loaded in the failing load's business window
+   [window_start, window_end), after its feed_filter. #}
 SELECT COUNT(*) AS loaded
 FROM {{ table }}
 WHERE {{ load_expr }} >= {{ window_start }} AND {{ load_expr }} < {{ window_end }}

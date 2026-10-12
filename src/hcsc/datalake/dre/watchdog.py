@@ -6,7 +6,7 @@ configuration (for the store's name, the recipients and the mail relay) and send
 writes nothing.
 
 The expected run is the hour H = (now - watchdog_grace_minutes) floored to the hour. Alerts:
-- no dq_run row started in [H, H + 1 hour);
+- no NORMAL dq_run row started in [H, H + 1 hour) (a manual RERUN or REPLAY is not the scheduled run);
 - a run started then whose latest row is still STARTED more than the grace after it started;
 - a run started then that ended FAILED, or wrote fewer checks than it expected.
 Alerts go to watchdog_owner's recipients, or every address in recipients when it is not set.
@@ -82,7 +82,8 @@ def read_runs(spark: SparkSession, dq_database: str, since: datetime) -> list[Ru
                    _utc(r.ended_at) if r.ended_at else None)
             for r in spark.sql(
                 f"SELECT run_id, started_at, ended_at, status, checks_expected, checks_written "
-                f"FROM {dq_database}.dq_run WHERE started_at >= TIMESTAMP '{stamp}'").collect()]
+                f"FROM {dq_database}.dq_run WHERE started_at >= TIMESTAMP '{stamp}' "
+                f"AND coalesce(execution_type, 'NORMAL') = 'NORMAL'").collect()]
 
 
 def watch(spark: SparkSession, conf: str, now: datetime | None = None) -> int:

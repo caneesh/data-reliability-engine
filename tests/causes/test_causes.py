@@ -323,17 +323,56 @@ def test_the_winner_rule_orders_time_columns_as_times(spark) -> None:
     assert first.enddate == "02/01/2026"
 
 
-def test_no_upstream_data(spark) -> None:
-    up, dn = _hop(spark, "nu", [curated_row(updated=datetime(2026, 1, 10))], [])
+SLOT = datetime(2026, 1, 15, 0, 30, tzinfo=UTC)  # feed() loads daily at 00:30 UTC; sla_hours 8
+# The load due at SLOT could take upstream rows from the previous load (01-14 00:30) to its
+# deadline (01-15 08:30): its business window. EVENT, the run's window, is 01-15 12:00 to 01-16 12:00.
+
+
+def test_no_upstream_data_is_judged_over_the_load_s_business_window(spark) -> None:
+    """Item 6: upstream rows in the business window rule it out; upstream rows only in the run's
+    execution window do not count, so their absence from the business window confirms it."""
+    up, dn = _hop(spark, "nu", [curated_row(updated=datetime(2026, 1, 15, 13))], [])  # after the deadline
     up = curated(up.table)
     with_load = gold(dn.table, dataset=dn.dataset, load_time=GOLD_LOAD)
-    cx = context(spark, with_load, "T1_ZERO_ROWS", datasets={up.dataset: up})
-    assert merge.no_upstream_data(cx, Failure("s", slot=EVENT.window_start)).state == "CONFIRMED"  # nothing in window
-    create_table(spark, up.table, CURATED_COLUMNS, [curated_row(updated=datetime(2026, 1, 15, 13))])
-    cx = context(spark, with_load, "T1_ZERO_ROWS", datasets={up.dataset: up})
-    assert merge.no_upstream_data(cx, Failure("s", slot=EVENT.window_start)).state == "RULED_OUT"
+    cx = context(spark, with_load, "T1_ZERO_ROWS", feed(), datasets={up.dataset: up})
+    outcome = merge.no_upstream_data(cx, Failure("s", slot=SLOT))
+    assert (outcome.state, outcome.evidence) == ("CONFIRMED", {
+        "upstream_rows": {up.dataset: 0}, "business_window_start": "2026-01-14T00:30:00+00:00",
+        "business_window_end": "2026-01-15T08:30:00+00:00"})
+    create_table(spark, up.table, CURATED_COLUMNS, [curated_row(updated=datetime(2026, 1, 15, 6))])  # before EVENT
+    cx = context(spark, with_load, "T1_ZERO_ROWS", feed(), datasets={up.dataset: up})
+    assert merge.no_upstream_data(cx, Failure("s", slot=SLOT)).state == "RULED_OUT"  # the data was there
+
+
+def test_no_upstream_data_is_not_ready_without_what_it_needs(spark) -> None:
+    up, dn = _hop(spark, "nu_ready", [], [])
+    up = curated(up.table)
+    with_load = gold(dn.table, dataset=dn.dataset, load_time=GOLD_LOAD)
+    no_feed = context(spark, with_load, "T1_ZERO_ROWS", datasets={up.dataset: up})
+    assert merge.no_upstream_data(no_feed, Failure("s", slot=SLOT)).evidence == {
+        "reason": "the feed has no earlier slot to bound the load's business window"}
+    with_feed = context(spark, with_load, "T1_ZERO_ROWS", feed(), datasets={up.dataset: up})
+    assert merge.no_upstream_data(with_feed, Failure("s")).state == "NOT_READY"  # no slot
     alone = gold(dn.table, dataset=dn.dataset, upstream=[], key_map={}, owned_columns={})
     assert merge.no_upstream_data(context(spark, alone, "T1_ZERO_ROWS"), Failure("s")).state == "NOT_READY"
+
+
+def test_wrong_partition_outranks_no_upstream_data(spark, tmp_path) -> None:
+    """Item 6: when both are confirmed, the downstream evidence is the cause; both rows are kept."""
+    from hcsc.datalake.dre.causes.engine import failure_type, summarise
+
+    up, dn = _hop(spark, "nu_both", [], [])
+    up = curated(up.table)
+    with_load = gold(dn.table, dataset=dn.dataset, load_time=GOLD_LOAD)
+    cursor = {"path": _cursor(tmp_path, "20260116"), "extract_regex": r"(\d{8})", "format": "yyyyMMdd",
+              "compare_to": "partition"}
+    cx = context(spark, with_load, "T1_ZERO_ROWS", feed(partition_cursor=cursor), datasets={up.dataset: up})
+    result = CheckResult("FAILED", population=1, violations=1, detail=json.dumps({"slots": [SLOT.isoformat()]}))
+    rows = explain(cx, result, "eval-nu", "run-nu", SLOT.date(), SLOT)
+    assert [(r["order_no"], r["cause_code"], r["state"]) for r in rows] == [
+        (1, "WRONG_PARTITION", "CONFIRMED"), (2, "NO_UPSTREAM_DATA", "CONFIRMED")]
+    [line] = summarise(rows, failure_type("FILE_CYCLIC", "T1_ZERO_ROWS")).values()
+    assert (line.code, line.proven) == ("WRONG_PARTITION", True)
 
 
 # --- the engine ---

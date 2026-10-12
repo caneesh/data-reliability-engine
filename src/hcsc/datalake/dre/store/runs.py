@@ -26,7 +26,8 @@ STARTED, COMPLETED, PARTIAL, FAILED = "STARTED", "COMPLETED", "PARTIAL", "FAILED
 
 _SCHEMA = (
     "run_id STRING, started_at TIMESTAMP, ended_at TIMESTAMP, engine_version STRING, "
-    "config_commit STRING, status STRING, checks_expected INT, checks_written INT, run_date DATE"
+    "config_commit STRING, status STRING, checks_expected INT, checks_written INT, execution_type STRING, "
+    "run_date DATE"
 )
 
 
@@ -36,19 +37,21 @@ class Run:
     started_at: datetime
     engine_version: str
     config_commit: str | None
+    execution_type: str = "NORMAL"  # NORMAL | RERUN | REPLAY
 
     @property
     def run_date(self) -> date:
         return self.started_at.astimezone(timezone.utc).date()
 
 
-def new_run(conf_dir: Path | str | None = None, now: datetime | None = None) -> Run:
-    """A new run: UUID, UTC start time, engine version and the config's git commit."""
+def new_run(conf_dir: Path | str | None = None, now: datetime | None = None, execution_type: str = "NORMAL") -> Run:
+    """A new run: UUID, UTC start time, engine version, the config's git commit and execution type."""
     return Run(
         run_id=str(uuid.uuid4()),
         started_at=now or datetime.now(timezone.utc),
         engine_version=__version__,
         config_commit=config_commit(conf_dir) if conf_dir is not None else None,
+        execution_type=execution_type,
     )
 
 
@@ -71,10 +74,11 @@ def run_status(checks_expected: int, checks_written: int, failed: bool = False) 
 
 
 def start_run(
-    spark: SparkSession, dq_database: str, conf_dir: Path | str | None = None, now: datetime | None = None
+    spark: SparkSession, dq_database: str, conf_dir: Path | str | None = None, now: datetime | None = None,
+    execution_type: str = "NORMAL",
 ) -> Run:
     """Create a run and append its STARTED row."""
-    run = new_run(conf_dir, now)
+    run = new_run(conf_dir, now, execution_type)
     _append(spark, dq_database, run, None, STARTED, None, None)
     return run
 
@@ -100,5 +104,5 @@ def _append(
 ) -> None:
     validate_dq_database(dq_database)
     row = (run.run_id, run.started_at, ended_at, run.engine_version, run.config_commit, status,
-           checks_expected, checks_written, run.run_date)
+           checks_expected, checks_written, run.execution_type, run.run_date)
     writer.append(spark.createDataFrame([row], _SCHEMA), dq_database, "dq_run")

@@ -28,7 +28,7 @@ def hop(cx: CauseContext) -> dict[str, Any]:
         if not isinstance(params, dict):
             raise ValueError("the hop cannot be evaluated")
         params = {**params, "hashed": cx.ctx.key_secret is not None,
-                  "use_open": cx.ctx.key_secret is not None and cx.check_id == "HOP_KEY_CURRENCY"}
+                  "use_open": params["use_open"] and cx.check_id == "HOP_KEY_CURRENCY"}
         if cx.ctx.key_secret is not None:
             register_key_hash(cx.spark, cx.ctx.key_secret)
         return params
@@ -192,8 +192,28 @@ def older_version_written_later(cx: CauseContext, failure: Failure) -> Outcome:
     return confirmed(**evidence) if here > upstream else ruled_out(**evidence)
 
 
+def business_window(cx: CauseContext, slot: datetime) -> tuple[datetime, datetime] | None:
+    """The span in which the load due at `slot` could have taken upstream data: from the previous
+    cadence slot (the load before it) to this slot's deadline (slot + sla_hours). None when the
+    feed has no slot before this one."""
+    from datetime import timedelta
+
+    from hcsc.datalake.dre.checks.cadence import previous_slot
+
+    if cx.feed is None:
+        return None
+    start = previous_slot(cx.feed.cadence, slot)
+    if start is None:
+        return None
+    return start, as_utc(slot) + timedelta(hours=cx.ctx.settings.sla_hours)
+
+
 def no_upstream_data(cx: CauseContext, failure: Failure) -> Outcome:
-    """CONFIRMED when every upstream dataset also loaded no rows in the event window."""
+    """CONFIRMED only when the upstream data is genuinely absent: every upstream dataset loaded
+    no rows in the failing load's business window (business_window), not the run's execution
+    window, which is hours after the load. Any upstream rows there rule it out; an upstream that
+    cannot be read with a load time makes it NOT_READY. It is ordered after the downstream causes,
+    so direct evidence of a downstream failure (WRONG_PARTITION) wins when both are confirmed."""
     ds = cx.dataset
     if not ds.upstream:
         return not_ready("the dataset has no upstream")
@@ -201,6 +221,12 @@ def no_upstream_data(cx: CauseContext, failure: Failure) -> Outcome:
         up = cx.config.datasets.get(up_id)
         if up is None or up.load_time is None:
             return not_ready(f"upstream {up_id} is not configured with a load_time")
+    if failure.slot is None:
+        return not_ready("the failure names no load slot")
+    window = business_window(cx, failure.slot)
+    if window is None:
+        return not_ready("the feed has no earlier slot to bound the load's business window")
+    start, end = window
 
     def query() -> dict[str, int]:
         counts = {}
@@ -208,9 +234,10 @@ def no_upstream_data(cx: CauseContext, failure: Failure) -> Outcome:
             up = cx.config.datasets[up_id]
             sql = render_sql("cause_upstream_rows.sql.j2", table=up.table, feed_filter=up.feed_filter,
                              load_expr=utc_expr(up.load_time, cx.ctx.default_timezone),
-                             window_start=utc_literal(cx.event.window_start),
-                             window_end=utc_literal(cx.event.window_end))
+                             window_start=utc_literal(start), window_end=utc_literal(end))
             counts[up_id] = cx.spark.sql(sql).collect()[0].loaded
         return counts
-    counts = cx.cached("upstream_rows", query)
-    return confirmed(upstream_rows=counts) if not any(counts.values()) else ruled_out(upstream_rows=counts)
+    counts = cx.cached(f"upstream_rows:{start.isoformat()}:{end.isoformat()}", query)
+    evidence = {"upstream_rows": counts, "business_window_start": start.isoformat(),
+                "business_window_end": end.isoformat()}
+    return confirmed(**evidence) if not any(counts.values()) else ruled_out(**evidence)

@@ -3,12 +3,24 @@
 It runs the checks, appends their results, explains failures (causes) and
 emails one digest per owner. A check never stops the run: run_check
 turns any failure into DID_NOT_RUN, and a failed write leaves the run PARTIAL.
+
+Execution types (spec section 4):
+- NORMAL (scheduled): each dataset's next eligible window; due feeds only; gold rules by their
+  frequency; registers landed files and keeps the open-key state.
+- RERUN: one named historical window [start, end) for every dataset planned.
+- REPLAY: every window of a historical range [start, end): the recorded NORMAL windows in it,
+  exactly, and each span none of them covers.
+RERUN and REPLAY are idempotent: a result identical to the stored result of the same evaluation
+is not written again, and they neither read nor change the open-key state (no key events) or
+the dq_file registry. They evaluate the windowed checks only (gold rules and T1_SCHEMA_DRIFT
+read the table as it is now, not a window), never move or hold a NORMAL window, and send no email.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -18,7 +30,8 @@ from hcsc.datalake.dre.checks.base import (
     Check, CheckContext, CheckResult, did_not_run, error_detail, from_exception, run_check,
 )
 from hcsc.datalake.dre.checks.events import (
-    GAP_CHECK_ID, Event, WindowHistory, evaluation_id, release_hold, window_for, window_histories,
+    GAP_CHECK_ID, Event, WindowHistory, evaluation_id, fixed_window, recorded_windows, release_hold,
+    replay_windows, window_for, window_histories,
 )
 from hcsc.datalake.dre.checks.registry import checks_for
 from hcsc.datalake.dre.config.loader import Config, ConfigError
@@ -34,8 +47,41 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 SCHEMA_DRIFT = "T1_SCHEMA_DRIFT"  # runs once per physical table (spec section 6)
+EXECUTION_TYPES = ("NORMAL", "RERUN", "REPLAY")
+_HEX = re.compile(r"^[0-9a-f]{64}$")
+# The columns that make two results of one evaluation the same outcome (idempotent reruns).
+OUTCOME = ("state", "reason_category", "reason_code", "population", "violations", "observed", "expected",
+           "detail", "severity")
 
 EXIT_COMPLETED, EXIT_PARTIAL, EXIT_CANNOT_START = 0, 2, 3
+
+
+@dataclass(frozen=True)
+class Selection:
+    """What a run evaluates: NORMAL, the next eligible windows; RERUN, the historical window
+    [start, end); REPLAY, every window of the historical range [start, end)."""
+
+    execution_type: str = "NORMAL"
+    start: datetime | None = None
+    end: datetime | None = None
+
+    def problem(self, now: datetime) -> str | None:
+        """Why this selection cannot run, or None."""
+        kind = self.execution_type
+        if kind not in EXECUTION_TYPES:
+            return f"unknown execution type {kind!r}"
+        if kind == "NORMAL":
+            if self.start is not None or self.end is not None:
+                return "a NORMAL run takes no window: it evaluates each dataset's next eligible window"
+            return None
+        flags = "--window-start and --window-end" if kind == "RERUN" else "--from and --to"
+        if self.start is None or self.end is None:
+            return f"a {kind} run needs {flags} (UTC)"
+        if self.start >= self.end:
+            return f"{flags}: the start must be before the end"
+        if self.end > now:
+            return f"{flags}: a {kind} names a historical span; it must end by now"
+        return None
 
 
 @dataclass(frozen=True)
@@ -247,7 +293,8 @@ def only_due(work: list[Planned], due: set[str]) -> list[Planned]:
 
 
 def refresh_landing(spark: SparkSession, config: Config, work: list[Planned], run: runs.Run | None,
-                    now: datetime, changed: dict[str, int] | None = None) -> dict[str, CheckResult]:
+                    now: datetime, changed: dict[str, int] | None = None,
+                    why_not: str = "dry-run") -> dict[str, CheckResult]:
     """List the landing roots of every file-pattern feed in the plan and, on a real run (run given),
     register new and changed files in dq_file, counting them per feed in `changed`. Returns feed
     id -> DID_NOT_RUN result for feeds whose landing could not be listed or registered."""
@@ -263,7 +310,7 @@ def refresh_landing(spark: SparkSession, config: Config, work: list[Planned], ru
             problems[feed_id] = did_not_run(exc.code, detail=exc.detail)
             continue
         if run is None:
-            print(f"{feed_id}: {len(files)} landed files listed (dry-run: not registered)")
+            print(f"{feed_id}: {len(files)} landed files listed ({why_not}: not registered)")
             continue
         try:
             added = register_files(spark, config.defaults.dq_database, feed_id, files, run, now)
@@ -278,7 +325,7 @@ def refresh_landing(spark: SparkSession, config: Config, work: list[Planned], ru
 
 def evaluate(spark: SparkSession, config: Config, planned: Planned, event: Event,
              landing_problems: dict[str, CheckResult] | None = None, key_secret: bytes | None = None,
-             budget_minutes: float | None = None) -> Evaluation:
+             budget_minutes: float | None = None, record_key_events: bool = True) -> Evaluation:
     ds = planned.dataset
     settings = config.dataset_settings(ds.dataset)
     landing_problem = (landing_problems or {}).get(planned.feed.feed) if planned.feed else None
@@ -288,6 +335,7 @@ def evaluate(spark: SparkSession, config: Config, planned: Planned, event: Event
         key_secret=key_secret,
         full_sweep=is_full_sweep(config, ds.dataset, event),
         budget_minutes=budget_minutes, scan_mb_per_minute=config.defaults.scan_mb_per_minute,
+        record_key_events=record_key_events,
     )
     results, duration_ms = run_check(planned.check, ctx, event)
     return Evaluation(planned, event, results, datetime.now(timezone.utc), duration_ms, ctx)
@@ -406,15 +454,93 @@ def _load(conf: str, command: str) -> Config | None:
     return config
 
 
-def run(spark: SparkSession, conf: str, feed_id: str | None = None, execution_type: str = "NORMAL") -> int:
-    """One scheduled (hourly) run: only feeds with something due are evaluated; --feed forces one."""
+Job = tuple[Planned, Event]
+GapRow = tuple[Planned, Event, tuple[str, ...]]
+
+
+def normal_jobs(spark: SparkSession, config: Config, planned_all: list[Planned], run_record: runs.Run,
+                feed_id: str | None) -> tuple[list[Job], dict[str, CheckResult], list[GapRow]]:
+    """NORMAL: each dataset's next eligible window, due feeds only, rules by frequency, and the
+    WINDOW_GAP rows of holds given up."""
+    gaps: dict[str, tuple[Event, tuple[str, ...]]] = {}
+    events = events_for(spark, config, planned_all, run_record.started_at, gaps=gaps)
+    changed: dict[str, int] = {}
+    landing = refresh_landing(spark, config, planned_all, run_record, run_record.started_at, changed)
+    checks = [p for p in planned_all if not is_rule(p)]
+    due = due_feeds(config, checks, events, changed, forced={feed_id} if feed_id else set())
+    work = once_per_table(only_due(checks, due), SCHEMA_DRIFT)  # a due dataset checks each table
+    for skipped in sorted({p.feed.feed for p in checks if p.feed is not None} - due):
+        print(f"{skipped}: nothing due (no slot deadline passed, no new files); not evaluated")
+    gap_for = {p.dataset.dataset: p for p in work if p.dataset.dataset in gaps}
+    gap_rows = [(p, *gaps[ds_id]) for ds_id, p in gap_for.items()]
+    work += rules_due(spark, config, planned_all, run_record.started_at)
+    return [(p, events[p.dataset.dataset]) for p in work], landing, gap_rows
+
+
+def historical_jobs(spark: SparkSession, config: Config, planned_all: list[Planned], selection: Selection,
+                    feed_id: str | None, now: datetime) -> tuple[list[Job], dict[str, CheckResult]]:
+    """RERUN and REPLAY: the windowed checks over the named window, or every window of the range,
+    per dataset; a feed is evaluated in a window only if something was due in it (or --feed)."""
+    # Gold rules and T1_SCHEMA_DRIFT read the table as it is now, not a window: nothing to re-evaluate.
+    checks = [p for p in planned_all if not is_rule(p) and p.check.check_id != SCHEMA_DRIFT]
+    landing = refresh_landing(spark, config, checks, None, now, why_not=selection.execution_type)
+    tz = config.defaults.timezone
+    datasets = {p.dataset.dataset: p.dataset for p in checks}
+    if selection.execution_type == "RERUN":
+        windows = {d: [fixed_window(ds, selection.start, selection.end, tz)] for d, ds in datasets.items()}
+    else:
+        recorded = recorded_windows(spark, config.defaults.dq_database, list(datasets), selection.start, selection.end)
+        windows = {d: replay_windows(ds, selection.start, selection.end, recorded[d], tz) for d, ds in datasets.items()}
+    forced = {feed_id} if feed_id else set()
+    jobs: list[Job] = []
+    for ds_id, ds_windows in windows.items():
+        mine = [p for p in checks if p.dataset.dataset == ds_id]
+        for event in ds_windows:
+            due = due_feeds(config, mine, {ds_id: event}, {}, forced)
+            kept = [p for p in mine if p.feed is None or p.feed.feed in due]
+            if not kept:
+                print(f"{ds_id} [{event.window_start:%Y-%m-%d %H:%M}, {event.window_end:%Y-%m-%d %H:%M}): "
+                      "nothing was due; not evaluated")
+            jobs += [(p, event) for p in kept]
+    return jobs, landing
+
+
+def stored_outcomes(spark: SparkSession, db: str, event_ids: list[str]) -> dict[str, tuple[Any, ...]]:
+    """evaluation_id -> the OUTCOME of its latest stored result row, for the given events."""
+    ids = sorted(set(event_ids))
+    if not ids:
+        return {}
+    if not all(_HEX.match(e) for e in ids):
+        raise ValueError("unexpected event id")
+    columns = ", ".join(OUTCOME)
+    in_list = ", ".join(f"'{e}'" for e in ids)
+    rows = spark.sql(
+        f"SELECT evaluation_id, {columns} FROM (SELECT r.*, ROW_NUMBER() OVER (PARTITION BY evaluation_id "
+        f"ORDER BY evaluated_at DESC, run_id DESC) AS rn FROM {db}.dq_check_result r "
+        f"WHERE event_id IN ({in_list})) latest WHERE rn = 1").collect()
+    return {r.evaluation_id: tuple(r[c] for c in OUTCOME) for r in rows}
+
+
+def unchanged(rows: list[dict[str, Any]], stored: dict[str, tuple[Any, ...]]) -> bool:
+    """Every row of the evaluation is already stored with the same outcome."""
+    return bool(rows) and all(stored.get(r["evaluation_id"]) == tuple(r[c] for c in OUTCOME) for r in rows)
+
+
+def run(spark: SparkSession, conf: str, feed_id: str | None = None, selection: Selection | None = None) -> int:
+    """One run. NORMAL (scheduled hourly): only feeds with something due are evaluated; --feed
+    forces one. RERUN and REPLAY: historical windows (module docstring)."""
     from hcsc.datalake.dre.store.install import missing_objects
 
+    selection = selection or Selection()
     config = _load(conf, "run")
     if config is None:
         return EXIT_CANNOT_START
     if feed_id is not None and feed_id not in config.feeds:
         print(f"dre run: unknown feed {feed_id!r}")
+        return EXIT_CANNOT_START
+    problem = selection.problem(datetime.now(timezone.utc))
+    if problem is not None:
+        print(f"dre run: {problem}")
         return EXIT_CANNOT_START
     db = config.defaults.dq_database
     missing = missing_objects(spark, db)
@@ -428,40 +554,42 @@ def run(spark: SparkSession, conf: str, feed_id: str | None = None, execution_ty
     except OSError as exc:
         print(f"dre run: cannot read hmac_secret_file ({type(exc).__name__}); key events need it")
         return EXIT_CANNOT_START
-    run_record = runs.start_run(spark, db, conf_dir=conf)
-    work: list[Planned] = []
+    kind = selection.execution_type
+    normal = kind == "NORMAL"
+    run_record = runs.start_run(spark, db, conf_dir=conf, execution_type=kind)
     written = expected = 0
     try:
         planned_all = plan(config, feed_id, per_table=False)
-        gaps: dict[str, tuple[Event, tuple[str, ...]]] = {}
-        events = events_for(spark, config, planned_all, run_record.started_at, gaps=gaps)
-        changed: dict[str, int] = {}
-        landing = refresh_landing(spark, config, planned_all, run_record, run_record.started_at, changed)
-        checks = [p for p in planned_all if not is_rule(p)]
-        due = due_feeds(config, checks, events, changed, forced={feed_id} if feed_id else set())
-        work = once_per_table(only_due(checks, due), SCHEMA_DRIFT)  # a due dataset checks each table
-        for skipped in sorted({p.feed.feed for p in checks if p.feed is not None} - due):
-            print(f"{skipped}: nothing due (no slot deadline passed, no new files); not evaluated")
-        gap_for = {p.dataset.dataset: p for p in work if p.dataset.dataset in gaps}
-        work += rules_due(spark, config, planned_all, run_record.started_at)
-        expected = len(work) + len(gap_for)
-        for ds_id, planned in gap_for.items():
-            gap, held_by = gaps[ds_id]
-            append_check_results(spark, db, [gap_row(planned, gap, held_by, run_record, execution_type,
+        gap_rows: list[GapRow] = []
+        if normal:
+            jobs, landing, gap_rows = normal_jobs(spark, config, planned_all, run_record, feed_id)
+            stored: dict[str, tuple[Any, ...]] = {}
+        else:
+            jobs, landing = historical_jobs(spark, config, planned_all, selection, feed_id, run_record.started_at)
+            stored = stored_outcomes(spark, db, [event.event_id for _, event in jobs])
+        expected = len(jobs) + len(gap_rows)
+        for planned, gap, held_by in gap_rows:
+            append_check_results(spark, db, [gap_row(planned, gap, held_by, run_record, kind,
                                                      datetime.now(timezone.utc))])
             written += 1
-            print(f"{ds_id} {GAP_CHECK_ID}: DID_NOT_RUN (DATA_UNAVAILABLE/window_gap)")
-        spent: dict[str, float] = {}  # compute_budget_scope dataset: minutes used per dataset this run
-        for planned in work:
+            print(f"{planned.dataset.dataset} {GAP_CHECK_ID}: DID_NOT_RUN (DATA_UNAVAILABLE/window_gap)")
+        spent: dict[tuple[str, str], float] = {}  # compute_budget_scope dataset: minutes per dataset window
+        for planned, event in jobs:
             ds_id = planned.dataset.dataset
             budget = None
             if config.defaults.compute_budget_scope == "dataset":
-                budget = config.dataset_settings(ds_id).compute_budget_minutes - spent.get(ds_id, 0.0)
-            evaluation = evaluate(spark, config, planned, events[ds_id], landing, key_secret, budget)
-            spent[ds_id] = spent.get(ds_id, 0.0) + evaluation.duration_ms / 60000
+                budget = config.dataset_settings(ds_id).compute_budget_minutes - spent.get((ds_id, event.event_id), 0.0)
+            evaluation = evaluate(spark, config, planned, event, landing, key_secret, budget,
+                                  record_key_events=normal)
+            spent[(ds_id, event.event_id)] = spent.get((ds_id, event.event_id), 0.0) + evaluation.duration_ms / 60000
+            rows = result_rows(evaluation, run_record, kind)
+            if unchanged(rows, stored):  # RERUN, REPLAY: the same outcome is stored already
+                written += 1
+                print(f"{ds_id} {planned.check.check_id}: unchanged since its stored result; not written again")
+                drop_judged_views(spark, evaluation)
+                continue
             # A check counts as written only once its result and its key events are both stored;
             # a missing write makes the run PARTIAL. A stored result is explained either way.
-            rows = result_rows(evaluation, run_record, execution_type)
             try:
                 append_check_results(spark, db, rows)
             except Exception as exc:
@@ -481,10 +609,13 @@ def run(spark: SparkSession, conf: str, feed_id: str | None = None, execution_ty
         log.error("run %s failed: %s", run_record.run_id, error_detail(exc))
         runs.finish_run(spark, db, run_record, expected, written, failed=True)
         return EXIT_PARTIAL
-    for line in email_digests(spark, config, run_record):
-        print(line)
+    if normal:
+        for line in email_digests(spark, config, run_record):
+            print(line)
+    else:
+        print(f"email: not sent for a {kind} run (digests report scheduled runs)")
     status = runs.finish_run(spark, db, run_record, expected, written)
-    print(f"dre run: {status}, {written} of {expected} checks written (run {run_record.run_id})")
+    print(f"dre run: {status}, {written} of {expected} checks written ({kind} run {run_record.run_id})")
     return EXIT_COMPLETED if status == runs.COMPLETED else EXIT_PARTIAL
 
 

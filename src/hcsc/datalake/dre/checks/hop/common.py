@@ -79,7 +79,8 @@ def hop_params(ctx: CheckContext, event: Event, up_id: str, up: Dataset | None) 
         "deadline_start": utc_literal(event.window_start - sla), "deadline_end": utc_literal(event.window_end - sla),
         "full_sweep": ctx.full_sweep, "hash_fn": HASH_FUNCTION,
         # hashed: compute key_hash with the secret; use_open: also judge keys open in v_open_keys
-        "hashed": ctx.key_secret is not None, "use_open": ctx.key_secret is not None,
+        # (NORMAL runs only: the open-key state is today's, not a historical window's)
+        "hashed": ctx.key_secret is not None, "use_open": ctx.key_secret is not None and ctx.record_key_events,
         "dq_database": ctx.dq_database, "dataset": ds.dataset, "hop": hop_label(up_id, ds.dataset),
     }
 

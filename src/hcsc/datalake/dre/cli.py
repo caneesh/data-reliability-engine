@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from hcsc.datalake.dre import __version__
@@ -24,6 +25,15 @@ COMMANDS: dict[str, str] = {
 CONF_HELP = "configuration directory (default: conf)"
 
 
+def utc_time(text: str) -> datetime:
+    """An ISO 8601 time; without an offset it is UTC."""
+    try:
+        value = datetime.fromisoformat(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not an ISO 8601 time, e.g. 2026-01-15T06:00") from None
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="dre", description="Data Reliability Engine")
     parser.add_argument("--version", action="version", version=f"dre {__version__}")
@@ -38,7 +48,13 @@ def build_parser() -> argparse.ArgumentParser:
             cmd.add_argument("--key", required=True, help='the key values in the dataset\'s key order, "k1,k2,..."')
         if name == "run":
             cmd.add_argument("--feed", help="run one feed only (default: all feeds)")
-            cmd.add_argument("--execution-type", default="NORMAL", choices=("NORMAL", "RERUN", "REPLAY"))
+            cmd.add_argument("--execution-type", default="NORMAL", choices=("NORMAL", "RERUN", "REPLAY"),
+                             help="NORMAL: the next eligible windows (scheduled); RERUN: one historical window; "
+                                  "REPLAY: every window of a historical range")
+            cmd.add_argument("--window-start", type=utc_time, help="RERUN: the window's start (ISO 8601, UTC)")
+            cmd.add_argument("--window-end", type=utc_time, help="RERUN: the window's end, excluded")
+            cmd.add_argument("--from", dest="range_from", type=utc_time, help="REPLAY: the range's start")
+            cmd.add_argument("--to", dest="range_to", type=utc_time, help="REPLAY: the range's end, excluded")
         if name == "retention":
             cmd.add_argument("--apply", action="store_true", help="drop the expired partitions (default: list them)")
         if name == "install":
@@ -119,7 +135,16 @@ def main(argv: list[str] | None = None) -> int:
         from hcsc.datalake.dre.session import get_spark
 
         if args.command == "run":
-            return runner.run(get_spark(), args.conf, args.feed, args.execution_type)
+            start, end = (args.range_from, args.range_to) if args.execution_type == "REPLAY" else (
+                args.window_start, args.window_end)
+            if args.execution_type != "REPLAY" and (args.range_from or args.range_to):
+                print("dre run: --from and --to are for REPLAY; RERUN takes --window-start and --window-end")
+                return runner.EXIT_CANNOT_START
+            if args.execution_type == "REPLAY" and (args.window_start or args.window_end):
+                print("dre run: REPLAY takes --from and --to; --window-start and --window-end are for RERUN")
+                return runner.EXIT_CANNOT_START
+            selection = runner.Selection(args.execution_type, start, end)
+            return runner.run(get_spark(), args.conf, args.feed, selection)
         return runner.dry_run(get_spark(), args.conf, args.feed)
     if args.command == "trace":
         from hcsc.datalake.dre.session import get_spark

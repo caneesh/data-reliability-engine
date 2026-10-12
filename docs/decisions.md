@@ -48,7 +48,7 @@ The engine field names chosen in step 2 are in spec section 3. The other assumpt
 3. **`evaluate` returns a list,** one result per group, rather than the single `CheckResult` in the spec's interface. A query that returns no rows (an empty table with `group_by`) is one DID\_NOT\_RUN / `empty_population` result.
 4. **Error mapping.** Spark error classes map to reason codes: `UNRESOLVED_COLUMN*` to `column_missing`, `TABLE_OR_VIEW_NOT_FOUND` to `table_missing`, `DATATYPE_MISMATCH*` and `CAST_INVALID_INPUT` to `incompatible_type`, and everything else (including Python errors) to PLATFORM / `query_failed`. A failing catalogue call in the preconditions is `metastore_unavailable`.
 5. **Run accounting and exit codes.** `checks_expected` is the number of (dataset, check) evaluations planned; `checks_written` the number whose rows were appended. A failed write is logged (check id and table only) and leaves the run PARTIAL (exit 2). An error outside a check ends the run FAILED, also exit 2, since spec section 8 has no separate code for it.
-6. **Execution type.** `--execution-type` is recorded on each result row. Only NORMAL events move the window forward. Reusing the earlier window for a RERUN, so that it gets the same `evaluation_id`, is left to step 8, where the full run comes together.
+6. **Execution type.** `--execution-type` is recorded on each result row. Only NORMAL events move the window forward. Reusing the earlier window for a RERUN, so that it gets the same `evaluation_id`, is left to step 8, where the full run comes together. (Built after the code review, 2026-10-12: see "Review items 6 and 7, answered".)
 8. **Time zones** (step 4 review). Time columns carry a `timezone` (IANA; default `timezone` in `defaults.yaml`). Checks convert with `to_utc_timestamp` after parsing, in a UTC Spark session; a column without `format` is read as a TIMESTAMP in its zone.
 9. **Table-wide datasets** (step 4 review) get T1\_SCHEMA\_DRIFT, T1\_KEY\_NULLS and T1\_KEY\_DUPLICATES (`patterns/table_wide.yaml`), carry their own `expectation_version`, and run only in a full `dre run` (not with `--feed`). T1\_SCHEMA\_DRIFT runs once per physical table (step 5).
 7. **dry-run** exits 0 even when SQL fragments do not resolve (spec section 8: "0 always, unless the command itself fails"); it exits 3 only when the config is invalid or the feed unknown. It reads the window from the store when there is one and writes nothing.
@@ -146,7 +146,7 @@ Asked to make the engine work on its assumptions and make them configurable, unt
 
 ## Code review (2026-10-11)
 
-A full review of `src/` found 29 issues. The fixes below change behaviour; each has a test that fails without it. Items 6 and 7 are not fixed: they wait on answers (end of this section).
+A full review of `src/` found 29 issues. The fixes below change behaviour; each has a test that fails without it. Items 6 and 7 waited on answers (end of this section); both were answered and built on 2026-10-12.
 
 **Changes to the spec or the store** (spec sections 4 to 8 updated):
 
@@ -184,10 +184,32 @@ A full review of `src/` found 29 issues. The fixes below change behaviour; each 
   - Dead code is removed from `cli.py`: the "not built" path and the unused `EXECUTION_TYPES`.
   - Missing type hints are added.
 
-**Not fixed: waiting on an answer.**
+**Not fixed in the review: they waited on an answer** (both answered and built on 2026-10-12; next section).
 
-- **Review item 6: NO_UPSTREAM_DATA and the event window.** Spec section 7 says the cause is CONFIRMED when every upstream "loaded no rows in the event window". With hourly runs, T1_ZERO_ROWS judges a slot in the window around its deadline (slot + `sla_hours`), long after the upstream load. So in steady state the upstream count in that window is usually 0: NO_UPSTREAM_DATA is CONFIRMED and hides the later causes (R03's WRONG_PARTITION would rarely win). Proposed change: count upstream rows loaded in the failing slot's load period, `[slot, next slot)`, or from the previous slot up to this slot's deadline. That needs a spec change, so it is left as the spec says.
-- **Review item 7: what `--execution-type RERUN|REPLAY` evaluates.** Today it only labels the rows. The window is still the next new span after the last NORMAL event, so a RERUN cannot reproduce an earlier `evaluation_id` (spec section 4). It also appends `dq_file` rows and key events that the next NORMAL run then repeats. A rerun needs a way to name the window it re-evaluates, for example `--event-id`, or `--window-start` and `--window-end`. It also needs a rule for what it may write: probably results and causes but no key events or `dq_file` rows. Step 4 decision 6 deferred this to step 8, and it was not done. Until it is answered, use RERUN and REPLAY only on a test store.
+- **Review item 6: NO_UPSTREAM_DATA and the event window** (answered 2026-10-12, below). Spec section 7 says the cause is CONFIRMED when every upstream "loaded no rows in the event window". With hourly runs, T1_ZERO_ROWS judges a slot in the window around its deadline (slot + `sla_hours`), long after the upstream load. So in steady state the upstream count in that window is usually 0: NO_UPSTREAM_DATA is CONFIRMED and hides the later causes (R03's WRONG_PARTITION would rarely win). Proposed change: count upstream rows loaded in the failing slot's load period, `[slot, next slot)`, or from the previous slot up to this slot's deadline. That needed a spec change, so it was left as the spec said.
+- **Review item 7: what `--execution-type RERUN|REPLAY` evaluates** (answered 2026-10-12, below). Today it only labels the rows. The window is still the next new span after the last NORMAL event, so a RERUN cannot reproduce an earlier `evaluation_id` (spec section 4). It also appends `dq_file` rows and key events that the next NORMAL run then repeats. A rerun needs a way to name the window it re-evaluates, for example `--event-id`, or `--window-start` and `--window-end`. It also needs a rule for what it may write: probably results and causes but no key events or `dq_file` rows. Step 4 decision 6 deferred this to step 8, and it was not done.
+
+## Review items 6 and 7, answered (2026-10-12)
+
+The user's answers:
+
+- **Item 6:** "use the expected business event window rather than the current execution window. NO_UPSTREAM_DATA should only be confirmed when the upstream data is genuinely absent. Preserve stronger evidence of downstream failures."
+- **Item 7:** "NORMAL should process the next eligible window, RERUN should explicitly select a historical window, and REPLAY should support a historical range. Ensure idempotent results and key-event handling."
+
+**Item 6, as built:**
+
+1. **Business window.** The failing load (a T1_ZERO_ROWS slot) is judged over its business window: from the previous cadence slot, the load before it, to this slot's deadline (slot + `sla_hours`). That is the span in which the load could have taken upstream data. The previous slot is found however far back it is (monthly cadences).
+2. **When it confirms.** CONFIRMED only when every upstream loaded zero rows in that window. Any upstream rows rule it out, and the business window goes in the evidence. It is NOT_READY when an upstream has no `load_time`, when the failure names no slot, or when the feed has no earlier slot: absence that cannot be measured is never confirmed.
+3. **Order.** WRONG_PARTITION now comes before NO_UPSTREAM_DATA in all three patterns. When both are confirmed, the direct downstream evidence is the cause. Both rows stay in `dq_cause_result`.
+
+**Item 7, as built** (spec section 4, "Execution types"):
+
+1. **CLI.** `dre run --execution-type RERUN --window-start T --window-end T` and `--execution-type REPLAY --from T --to T`, in ISO 8601 (UTC without an offset). NORMAL takes neither. The window or range must be historical (ending by now) and start before it ends; otherwise exit 3.
+2. **Which windows.** RERUN truncates the bounds the way NORMAL does, so naming a NORMAL window reproduces its `event_id` and `evaluation_id`s. REPLAY replays the recorded NORMAL windows in the range exactly, a held-then-extended window once, and evaluates the spans between them as windows of their own. A feed is evaluated in a window only if something was due in it, unless `--feed` names it.
+3. **Idempotent results.** Before writing, a RERUN or REPLAY reads the latest stored result of each evaluation. An identical outcome is not written again, but still counts as written. A changed outcome is appended under the same `evaluation_id`. `v_latest_result` now orders by `window_end` before `evaluated_at`, so a rerun of the current window replaces it but a rerun of an older window never becomes the current state.
+4. **Key events.** A RERUN or REPLAY neither reads `v_open_keys` nor writes `dq_key_event`. The open-key state is today's, not the historical window's, so a rerun judges the keys its window owns (at their deadline, or reloaded in it). Repeating a rerun therefore cannot flag, clear or re-flag a key. The judged keys are still kept for the cause engine, so failing keys are explained.
+5. **What else they leave alone.** No `dq_file` registration, no WINDOW_GAP rows, no window moved or held. No gold rules or T1_SCHEMA_DRIFT, which read the table as it is now. No email: the digest reports scheduled runs, and RERUN and REPLAY print their results.
+6. **The watchdog.** `dq_run` gains `execution_type`, and the watchdog counts only NORMAL runs (or rows without the column), so a manual rerun never stands in for a missed scheduled run.
 
 ## Notes for later steps
 
