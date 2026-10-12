@@ -115,7 +115,7 @@ def plan(config: Config, feed_id: str | None = None, per_table: bool = True) -> 
         Planned(feed, config.datasets[ds_id], check)
         for feed in feeds
         for ds_id in feed.datasets
-        for check in checks_for(config.datasets[ds_id], feed.pattern)
+        for check in checks_for(config.datasets[ds_id], feed.pattern, feed)
     ]
     if feed_id is None:
         listed = {ds for feed in config.feeds.values() for ds in feed.datasets}

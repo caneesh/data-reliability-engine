@@ -5,3 +5,5 @@ checks:
   - T1_SCHEMA_DRIFT
   - T1_KEY_NULLS
   - T1_KEY_DUPLICATES
+  - T1_FRESHNESS      # parametrised: runs where check_params configures it (spec section 3)
+  - T1_COLUMN_RANGE   # parametrised, as above; a pattern may give defaults: {check: T1_FRESHNESS, params: {...}}

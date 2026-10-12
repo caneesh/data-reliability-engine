@@ -18,8 +18,10 @@ from pydantic import ValidationError
 from hcsc.datalake.dre.config.loader import (
     Config,
     ConfigError,
+    describe,
     errors_from_validation,
     format_loc,
+    line_of,
     load,
 )
 from hcsc.datalake.dre.config.models import DERIVED_LOAD, DERIVED_RECORD
@@ -89,6 +91,7 @@ def cross_check(config: Config, feeds_complete: bool = True) -> list[ConfigError
                 member_of[ds] = feed_id
         check_owner("feed", feed_id, feed.owner)
         errors.extend(_check_probes(config, feed_id))
+        errors.extend(_check_check_params(config, "feed", feed_id, feed.pattern, feed, None))
         if feed.pattern in ("FILE_CYCLIC", "FILE_PERIODIC") and not any(
             datasets[d].layer == "RAW" and datasets[d].file_name_column for d in feed.datasets if d in datasets
         ):
@@ -210,6 +213,10 @@ def cross_check(config: Config, feeds_complete: bool = True) -> list[ConfigError
                 "add load_time: {column, format, granularity} once the column is confirmed",
                 level="warning")
 
+        feed_of_ds = config.feed_of(ds_id)
+        errors.extend(_check_check_params(config, "dataset", ds_id, feed_of_ds.pattern if feed_of_ds else None,
+                                          feed_of_ds, ds))
+
         for col in ds.key_normalise:
             if col not in key:
                 err("dataset", ds_id, ("key_normalise", col), f"{col!r} is not a key column",
@@ -267,6 +274,70 @@ def cross_check(config: Config, feeds_complete: bool = True) -> list[ConfigError
                     f"add datasets/{related}.yaml or fix {field_name}")
 
     return errors
+
+
+def _check_check_params(config: Config, kind: str, obj_id: str, pattern: str | None, feed: Any,
+                        ds: Any) -> list[ConfigError]:
+    """`check_params` on a feed or a dataset: each key a parametrised check its pattern lists, and the
+    values valid once the pattern's defaults, the feed's and the dataset's are merged. A missing
+    field is reported on the dataset, where the merge is complete; a wrong value where it is written."""
+    from pydantic import ValidationError
+
+    from hcsc.datalake.dre.checks.base import configured_params
+    from hcsc.datalake.dre.checks.registry import CHECKS, TABLE_WIDE, pattern_check_ids
+
+    obj = ds if kind == "dataset" else feed
+    source = config.sources[(kind, obj_id)]
+    found: list[ConfigError] = []
+    listed = pattern_check_ids(pattern or TABLE_WIDE)
+    for check_id, raw in obj.check_params.items():
+        loc = ("check_params", check_id)
+        check = CHECKS.get(check_id)
+        if check is None:
+            file, line = config.locate(kind, obj_id, loc)
+            found.append(ConfigError(file, line, format_loc(loc), f"unknown check {check_id!r}",
+                                     f"use one of {[c for c in CHECKS.ids() if CHECKS[c].params_model is not None]}"))
+            continue
+        if check.params_model is None:
+            file, line = config.locate(kind, obj_id, loc)
+            found.append(ConfigError(file, line, format_loc(loc), f"{check_id} takes no parameters", "remove it"))
+            continue
+        if check_id not in listed:
+            file, line = config.locate(kind, obj_id, loc)
+            found.append(ConfigError(file, line, format_loc(loc), f"pattern {pattern or TABLE_WIDE} does not list "
+                                     f"{check_id}, so it will not run", "remove it, or use a pattern that lists it",
+                                     level="warning"))
+            continue
+        if kind == "feed":
+            # the feed's own values, with the pattern's defaults under them; missing fields may come from a dataset
+            merged = configured_params(check, ds_placeholder(), feed, pattern) or {}
+        else:
+            merged = configured_params(check, ds, feed, pattern) or {}
+        try:
+            check.params_model.model_validate(merged)
+        except ValidationError as exc:
+            for err in exc.errors():
+                field_name = str(err["loc"][0]) if err["loc"] else ""
+                if kind == "feed" and (err["type"] == "missing" or field_name not in raw):
+                    continue  # reported on the dataset, or written elsewhere
+                if kind == "dataset" and err["type"] == "missing":
+                    file, line = config.locate(kind, obj_id, loc)
+                    found.append(ConfigError(file, line, format_loc(loc + (field_name,)),
+                                             f"`{field_name}` is not set at any level",
+                                             f"set it under check_params.{check_id} in the feed or this dataset"))
+                    continue
+                problem, fix = describe(err)
+                where = loc + tuple(err["loc"])
+                file = source.file
+                found.append(ConfigError(file, line_of(source.node, where), format_loc(where), problem, fix))
+    return found
+
+
+def ds_placeholder() -> Any:
+    """A dataset with no check_params, for validating a feed's values on their own."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(check_params={})
 
 
 def _check_probes(config: Config, feed_id: str) -> list[ConfigError]:

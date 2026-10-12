@@ -8,6 +8,7 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
 - **Branch.** The working branch, `claude/claude-md-documentation-a2lxt0` (repo `caneesh/data-reliability-engine`), was restarted from `main` after the merge. New work goes there. Open a pull request only when the user asks; then merge with a merge commit, because the docs cite commit SHAs.
 - **Release 1** (spec section 10, steps 1 to 11) is done. It was then extended by two code reviews and an architecture review.
 - **Release 2** has started. Derived datasets (join and aggregate hops) are built.
+- **Release 3** (extensibility) is in progress: the eight-step plan in `docs/design/extensibility.md`, agreed by the user, built in order. Each step amends the spec and `docs/decisions.md`.
 - **Tests:** 515, all passing. A full local run takes about 18 minutes; CI takes about 15. Replay scenarios R01 to R13 all pass, plus a three-layer acceptance test.
 
 ## History, in order (each step green in CI)
@@ -21,6 +22,8 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
 | Architecture-principles review: excluded and pending counts, three-layer acceptance test | `15ccb3f` | #26 |
 | Release 2: derived datasets | `4afcfc7` | #27 |
 | Merge to `main` (PR #1) | `96503b9` | #29 |
+| Handoff for compaction | `525e23c` | #31 |
+| Extensibility step 1: self-registering capabilities (`docs/design/extensibility.md`) | `23d1a8a` | #32 |
 
 Each row has a section in `docs/decisions.md` saying what was decided and why.
 
@@ -150,6 +153,6 @@ Production table, column and path names stay null: CLAUDE.md forbids inventing t
 - **End-to-end check by hand:**
   1. In an empty directory, run `python <repo>/tests/e2e/build_synthetic.py`.
   2. Run `dre install --conf conf --apply`, then `dre run --conf conf`.
-  3. Run `python <repo>/tests/e2e/verify.py`. Expect `41 results {'DID_NOT_RUN': 19, 'PASSED': 22}`, run COMPLETED.
+  3. Run `python <repo>/tests/e2e/verify.py`. Expect `42 results {'DID_NOT_RUN': 19, 'PASSED': 23}`, run COMPLETED. Set `PYSPARK_PYTHON` to the venv's interpreter if the workers pick up another Python.
 - **CI.** Check it with the GitHub MCP `actions_list` tool. After a push, schedule a `send_later` check-in about 15 minutes out instead of polling.
 - **Uploaded review documents.** Check each point against the code before acting; don't follow them blindly. Reproduce a reported defect with a failing test before fixing it.

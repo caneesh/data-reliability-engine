@@ -296,6 +296,9 @@ class Feed(SettingsOverride):
     check_delay_minutes: int = Field(default=0, ge=0)  # evaluate a slot this long after its deadline
     # Cause probe parameters by config key (spec section 7; checked against the pattern by validate).
     probes: dict[Identifier, dict[str, Any] | list[dict[str, Any]] | None] = {}
+    # Parameters of parametrised checks, by check id, for every dataset of the feed (a dataset's
+    # own check_params override these field by field). Validated against each check's params model.
+    check_params: dict[Identifier, dict[str, Any]] = {}
 
     @model_validator(mode="after")
     def _check(self) -> Feed:
@@ -393,6 +396,9 @@ class Dataset(SettingsOverride):
     # leave those rows out of what they expect.
     hop_exclusions: dict[Identifier, SqlFragment] = {}
     winner_rule: WinnerRule | None = None
+    # Parameters of parametrised checks (T1_FRESHNESS, T1_COLUMN_RANGE, ...), by check id. A
+    # parametrised check runs only where its pattern, feed or dataset configures it.
+    check_params: dict[Identifier, dict[str, Any]] = {}
 
     @model_validator(mode="before")
     @classmethod

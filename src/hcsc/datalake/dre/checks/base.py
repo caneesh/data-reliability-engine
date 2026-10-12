@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -19,8 +19,9 @@ from jinja2 import Environment, PackageLoader, StrictUndefined
 if TYPE_CHECKING:
     from pyspark.sql import SparkSession
 
+    from hcsc.datalake.dre.causes.base import CauseContext, Failure
     from hcsc.datalake.dre.checks.events import Event
-    from hcsc.datalake.dre.config.models import Dataset, Feed, Settings
+    from hcsc.datalake.dre.config.models import Dataset, Feed, Model, Settings
 
 PASSED, FAILED, DID_NOT_RUN = "PASSED", "FAILED", "DID_NOT_RUN"
 
@@ -112,6 +113,9 @@ class CheckContext:
     # NORMAL runs keep the open-key state (read v_open_keys, write key events); a RERUN or REPLAY
     # of a historical window neither reads nor changes it, so repeating one changes nothing.
     record_key_events: bool = True
+    # The check's parameters (an instance of Check.params_model), resolved by run_check from the pattern's
+    # defaults, the feed's and the dataset's `check_params`; None for a check without parameters.
+    params: Any = None
 
 
 class Check(ABC):
@@ -119,17 +123,50 @@ class Check(ABC):
 
     check_id: str
     severity: str | None = None  # set for gold rules
+    # A parametrised check names its params model; it runs only where `check_params` configures it
+    # (spec section 3), and gets the validated instance in ctx.params.
+    params_model: type[Model] | None = None
 
     def applies_to(self, dataset: Dataset, pattern: str | None) -> bool:
         return True
 
     @abstractmethod
-    def required_columns(self, dataset: Dataset) -> list[str]:
-        """Configured columns the check reads; a missing one makes it DID_NOT_RUN."""
+    def required_columns(self, dataset: Dataset, params: Any = None) -> list[str]:
+        """Configured columns the check reads; a missing one makes it DID_NOT_RUN. A parametrised
+        check gets its params too."""
 
     @abstractmethod
     def evaluate(self, ctx: CheckContext, event: Event) -> list[CheckResult]:
         """One result per group (one in total for an ungrouped check)."""
+
+    def failures(self, cx: CauseContext, result: CheckResult) -> list[Failure] | None:
+        """The failing things of a FAILED result, for the cause engine (spec section 7); None
+        leaves it to causes/failures.py. A check with no cause checks needs neither."""
+        return None
+
+
+def configured_params(check: Check, dataset: Dataset, feed: Feed | None, pattern: str | None) -> dict[str, Any] | None:
+    """The check's raw parameters: the pattern's defaults, then the feed's, then the dataset's
+    `check_params`, each overriding the one before; None when nothing configures the check."""
+    from hcsc.datalake.dre.checks.registry import TABLE_WIDE, pattern_check_params
+
+    levels = [pattern_check_params(pattern or TABLE_WIDE).get(check.check_id),
+              feed.check_params.get(check.check_id) if feed else None, dataset.check_params.get(check.check_id)]
+    if all(level is None for level in levels):
+        return None
+    merged: dict[str, Any] = {}
+    for level in levels:
+        merged.update(level or {})
+    return merged
+
+
+def resolve_params(check: Check, ctx: CheckContext) -> Any:
+    """The check's validated params instance (None for a check without a params model). Raises
+    pydantic.ValidationError on bad values (dre validate reports them with file and line)."""
+    if check.params_model is None:
+        return None
+    pattern = ctx.feed.pattern if ctx.feed else None
+    return check.params_model.model_validate(configured_params(check, ctx.dataset, ctx.feed, pattern) or {})
 
 
 def needs_load_time(ctx: CheckContext) -> CheckResult | None:
@@ -216,7 +253,20 @@ def run_check(check: Check, ctx: CheckContext, event: Event) -> tuple[list[Check
                 f"{minutes:.1f} minutes, over the budget of {budget:g}; not run"))], 0
 
     def work() -> list[CheckResult]:
-        failed = preconditions(ctx.spark, ctx.dataset, check.required_columns(ctx.dataset))
+        from pydantic import ValidationError
+
+        nonlocal ctx
+        if check.params_model is not None:
+            try:
+                ctx = replace(ctx, params=resolve_params(check, ctx))
+            except ValidationError as exc:
+                fields = sorted({str(e["loc"][0]) for e in exc.errors() if e["loc"]})
+                return [did_not_run("invalid_config", detail=f"check_params.{check.check_id} is not valid "
+                                                            f"(fields {fields}); dre validate names the fix")]
+            columns = check.required_columns(ctx.dataset, ctx.params)
+        else:
+            columns = check.required_columns(ctx.dataset)
+        failed = preconditions(ctx.spark, ctx.dataset, columns)
         if failed is not None:
             return [failed]
         return check.evaluate(ctx, event) or [did_not_run("empty_population")]

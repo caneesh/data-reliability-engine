@@ -1,0 +1,24 @@
+{# T1_COLUMN_RANGE: values of a column loaded in the window within bounds or an allowed set.
+   population = rows with a non-null value (every row when nulls_fail); violations = out of range
+   (and null, when nulls_fail). #}
+SELECT {% for g in group_by %}{{ g }} AS g_{{ loop.index }}, {% endfor %}
+       COUNT(*) AS population,
+       SUM(CASE WHEN {{ column }} IS NULL THEN {% if nulls_fail %}1{% else %}0{% endif %}
+                WHEN {% if min is not none %}{{ column }} < {{ min }}{% endif %}
+                     {% if min is not none and max is not none %} OR {% endif %}
+                     {% if max is not none %}{{ column }} > {{ max }}{% endif %}
+                     {% if (min is not none or max is not none) and allowed is not none %} OR {% endif %}
+                     {% if allowed is not none %}CAST({{ column }} AS STRING) NOT IN ({{ allowed | join(', ') }}){% endif %}
+                THEN 1 ELSE 0 END) AS violations
+FROM {{ table }}
+WHERE {{ load_expr }} >= {{ window_start }}
+  AND {{ load_expr }} < {{ window_end }}
+{% if not nulls_fail %}
+  AND {{ column }} IS NOT NULL
+{% endif %}
+{% if feed_filter %}
+  AND ({{ feed_filter }})
+{% endif %}
+{% if group_by %}
+GROUP BY {% for g in group_by %}{{ g }}{% if not loop.last %}, {% endif %}{% endfor %}
+{% endif %}

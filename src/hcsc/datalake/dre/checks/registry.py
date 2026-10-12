@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import cache
 from importlib.resources import files
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
@@ -18,7 +18,7 @@ from hcsc.datalake.dre.registry import Registry
 
 if TYPE_CHECKING:
     from hcsc.datalake.dre.checks.base import Check
-    from hcsc.datalake.dre.config.models import Dataset
+    from hcsc.datalake.dre.config.models import Dataset, Feed
 
 CHECKS: Registry[Check] = Registry("check", ("hcsc.datalake.dre.checks.tier1", "hcsc.datalake.dre.checks.hop"))
 TABLE_WIDE = "TABLE_WIDE"  # pseudo-pattern for datasets that no feed lists
@@ -39,19 +39,54 @@ PATTERNS: tuple[str, ...] = _pattern_files()  # the feed patterns (a feed's `pat
 
 
 @cache
+def _pattern_checks(pattern: str) -> tuple[tuple[str, dict[str, Any] | None], ...]:
+    """(check id, the pattern's default params or None) per entry of the pattern's `checks:` list.
+    An entry is a check id, or {check: id, params: {...}} for a parametrised check."""
+    where = f"patterns/{pattern.lower()}.yaml"
+    found = []
+    for raw in _load_pattern(pattern).get("checks") or ():
+        check_id, params = (raw, None) if isinstance(raw, str) else (raw.get("check"), raw.get("params"))
+        if check_id not in CHECKS:
+            raise ValueError(f"{where} lists unknown checks [{check_id!r}]")
+        if params is not None:
+            model = CHECKS[check_id].params_model
+            if model is None:
+                raise ValueError(f"{where}: {check_id} takes no parameters")
+            try:
+                model.model_validate(params)
+            except ValueError as exc:
+                raise ValueError(f"{where}: {check_id} params are not valid: {exc}") from None
+        found.append((check_id, params))
+    if len({c for c, _ in found}) != len(found):
+        raise ValueError(f"{where} lists a check twice")
+    return tuple(found)
+
+
 def pattern_check_ids(pattern: str) -> tuple[str, ...]:
-    ids = tuple(_load_pattern(pattern).get("checks") or ())
-    unknown = [i for i in ids if i not in CHECKS]
-    if unknown:
-        raise ValueError(f"patterns/{pattern.lower()}.yaml lists unknown checks {unknown}")
-    return ids
+    return tuple(c for c, _ in _pattern_checks(pattern))
 
 
-def checks_for(dataset: Dataset, pattern: str | None) -> list[Check]:
+def pattern_check_params(pattern: str) -> dict[str, dict[str, Any]]:
+    """check id -> the pattern's default params, for the parametrised checks it gives defaults."""
+    return {c: p for c, p in _pattern_checks(pattern) if p is not None}
+
+
+def checks_for(dataset: Dataset, pattern: str | None, feed: Feed | None = None) -> list[Check]:
     """The pattern's checks that apply to this dataset. Table-wide datasets (pattern None)
-    get the patterns/table_wide.yaml list."""
+    get the patterns/table_wide.yaml list. A parametrised check applies only where the pattern,
+    the feed or the dataset configures it."""
+    from hcsc.datalake.dre.checks.base import configured_params
+
     pattern = pattern or TABLE_WIDE
-    return [CHECKS[i] for i in pattern_check_ids(pattern) if CHECKS[i].applies_to(dataset, pattern)]
+    found = []
+    for check_id in pattern_check_ids(pattern):
+        check = CHECKS[check_id]
+        if not check.applies_to(dataset, pattern):
+            continue
+        if check.params_model is not None and configured_params(check, dataset, feed, pattern) is None:
+            continue
+        found.append(check)
+    return found
 
 
 @dataclass(frozen=True)

@@ -24,3 +24,5 @@ owned_columns: { enddate: mbr_mbrshp_covrg_end_dt }
 winner_rule:
   order_by: ["sourcelastupdatets DESC", "enddate DESC"]
 compute_budget_minutes: 8
+check_params:                     # parametrised checks run only where configured (spec section 3)
+  T1_FRESHNESS: { max_age_hours: 72, time: load }   # gold was written within 3 days of each window end

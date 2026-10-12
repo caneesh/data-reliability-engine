@@ -50,9 +50,9 @@ def gold(table: str, **extra: Any) -> Dataset:
 # --- the registries themselves ---
 
 def test_the_built_ins_are_discovered_without_a_central_list() -> None:
-    assert CHECKS.ids() == ("HOP_FILE_COMPLETENESS", "HOP_KEY_CURRENCY", "HOP_VALUE_AGREEMENT", "T1_FILES_NOT_LOADED",
-                            "T1_KEY_DUPLICATES", "T1_KEY_NULLS", "T1_ON_TIME", "T1_SCHEMA_DRIFT", "T1_VOLUME",
-                            "T1_ZERO_ROWS")
+    assert CHECKS.ids() == ("HOP_FILE_COMPLETENESS", "HOP_KEY_CURRENCY", "HOP_VALUE_AGREEMENT", "T1_COLUMN_RANGE",
+                            "T1_FILES_NOT_LOADED", "T1_FRESHNESS", "T1_KEY_DUPLICATES", "T1_KEY_NULLS", "T1_ON_TIME",
+                            "T1_SCHEMA_DRIFT", "T1_VOLUME", "T1_ZERO_ROWS")
     assert PATTERNS == ("FILE_CYCLIC", "FILE_PERIODIC", "TABLE_MERGE")
     assert PROBES.ids() == ("file_exists", "file_value_compare", "log_contains", "size_changed", "table_contains")
     assert BUILTINS.ids() == ("FILE_SKIPPED", "INVALID_KEY", "JOIN_UNMATCHED", "KEY_MISMATCH", "NOT_RUN",
@@ -99,11 +99,11 @@ def test_a_check_registers_from_its_own_module_and_a_pattern_lists_it(spark, mon
     with CHECKS.temporary("X_ROWS_AT_MOST", RowsAtMost()):
         monkeypatch.setattr(registry, "_load_pattern", lambda pattern: yaml.safe_load(
             "pattern: FILE_CYCLIC\nchecks: [T1_ON_TIME, X_ROWS_AT_MOST]\n"))
-        pattern_check_ids.cache_clear()
+        registry._pattern_checks.cache_clear()
         try:
             assert [c.check_id for c in checks_for(gold("x.y"), "FILE_CYCLIC")] == ["T1_ON_TIME", "X_ROWS_AT_MOST"]
         finally:
-            pattern_check_ids.cache_clear()
+            registry._pattern_checks.cache_clear()
         check = CHECKS["X_ROWS_AT_MOST"]
         create_table(spark, "ext.three", GOLD_COLUMNS, [gold_row(sub_id=s) for s in ("1", "2", "3")])
         create_table(spark, "ext.one", GOLD_COLUMNS, [gold_row(sub_id="1")])
@@ -112,10 +112,10 @@ def test_a_check_registers_from_its_own_module_and_a_pattern_lists_it(spark, mon
         assert (run("ext.three").state, run("ext.three").violations) == ("FAILED", 1)
         assert run("ext.one").state == "PASSED"
         assert (run("ext.none").state, run("ext.none").reason_code) == ("DID_NOT_RUN", "empty_population")
-    pattern_check_ids.cache_clear()
+    registry._pattern_checks.cache_clear()
     with pytest.raises(ValueError, match="unknown checks"):
         pattern_check_ids("FILE_CYCLIC")  # the pattern still names the check, which is gone again
-    pattern_check_ids.cache_clear()
+    registry._pattern_checks.cache_clear()
     with pytest.raises(ValueError, match="registered twice"):
         register_check(CHECKS["T1_ON_TIME"])
 
@@ -225,6 +225,7 @@ def test_a_rule_template_registers_from_its_own_module(spark) -> None:
     with TEMPLATES.temporary("x_at_most_rows", X_TEMPLATE):
         check = RuleCheck(rule(1))
         results, _ = run_check(check, CheckContext(spark, gold("ext.rows"), None, SETTINGS, "UTC"), EVENT)
+        assert all(r.group_values for r in results), results
         by_group = {r.group_values["src_sys_nm"]: (r.state, r.population, r.violations, r.observed) for r in results}
         assert by_group == {"SRC_A": ("FAILED", 2, 1, "1 of 2 rows over the 1 allowed"),
                             "SRC_B": ("PASSED", 1, 0, "0 of 1 rows over the 1 allowed")}

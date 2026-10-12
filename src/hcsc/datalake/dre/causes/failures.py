@@ -29,6 +29,12 @@ KEY_CHECKS = ("HOP_KEY_CURRENCY", "HOP_VALUE_AGREEMENT")
 
 
 def failures_for(cx: CauseContext, result: CheckResult) -> list[Failure]:
+    from hcsc.datalake.dre.checks.registry import CHECKS
+
+    registered = CHECKS.get(cx.check_id)
+    own = registered.failures(cx, result) if registered is not None else None
+    if own is not None:  # the check lists its own failing things (spec section 7)
+        return own[:LISTED]
     detail = json.loads(result.detail) if result.detail and result.detail.startswith("{") else {}
     check = cx.check_id
     if check == "T1_FILES_NOT_LOADED":

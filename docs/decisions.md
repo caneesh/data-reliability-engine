@@ -293,6 +293,17 @@ Not changed: evaluation ids (check ids and cause codes are the same strings), th
 
 Deferred to step 2: `causes/failures.py` still lists the failing things of a FAILED result by `check_id`, so a new check gets causes only through that list. Step 2 (check parameters) gives a check a `failures` hook along with its params model.
 
+## Extensibility, step 2: check parameters from configuration (2026-10-12)
+
+1. **`check_params`.** A feed and a dataset may carry `check_params: {CHECK_ID: {...}}`; a pattern may give defaults (`{check: ID, params: {...}}` in its `checks:` list). Resolution: pattern, then feed, then dataset, field by field. A check with a params model (`Check.params_model`) runs only where something configures it, so listing T1_FRESHNESS and T1_COLUMN_RANGE in every pattern changes nothing for existing configurations.
+2. **Validation.** `dre validate`: unknown check id, parameters on a check that takes none, bad values (file and line of where they are written), a field missing at every level (reported on the dataset), a check the pattern does not list (a warning). At run time the merged set is validated again; a bad set is DID_NOT_RUN / invalid_config, with the field names and never the values in `detail`.
+3. **The failures hook.** `Check.failures(cx, result)` lets a check list its own failing things; `causes/failures.py` keeps the packaged lists. This closes the gap left in step 1.
+4. **Two generic checks**, both grouped by the dataset's `group_by` and filtered by `feed_filter`:
+   - **T1_FRESHNESS** (`max_age_hours`, `time: record | load`): the latest time against the event's window end, not the clock, so a RERUN answers for its window. No usable time in any row is FAILED, never PASSED (the evidence principle from the code-review document).
+   - **T1_COLUMN_RANGE** (`column`, numeric `min`/`max`, `allowed` strings, `nulls_fail`): rows loaded in the window, so it needs `load_time` like T1_KEY_NULLS. Nulls are left out unless `nulls_fail`.
+   - Neither has cause checks: like T1_VOLUME and T1_KEY_NULLS, a failure has no failing thing to probe; the retry of investigations skips checks without a failure type, so these never show as pending.
+5. **Sample config.** `gold_member_coverage` configures T1_FRESHNESS on load time (72 hours), so the e2e run has a parametrised check in it: 42 results.
+
 ## Notes for later steps
 
 - **Step 4:** done: `dre dry-run` parses SQL fragments (`config/fragments.py`).
