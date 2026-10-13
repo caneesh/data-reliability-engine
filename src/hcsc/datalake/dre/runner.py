@@ -621,11 +621,11 @@ def unchanged(rows: list[dict[str, Any]], stored: dict[str, tuple[Any, ...]]) ->
     return bool(rows) and all(stored.get(r["evaluation_id"]) == tuple(r[c] for c in OUTCOME) for r in rows)
 
 
-def run(spark: SparkSession, conf: str, feed_id: str | None = None, selection: Selection | None = None) -> int:
-    """One run. NORMAL (scheduled hourly): only feeds with something due are evaluated; --feed
-    forces one. RERUN and REPLAY: historical windows (module docstring)."""
-
-    selection = selection or Selection()
+def _preflight(spark: SparkSession, conf: str, feed_id: str | None,
+               selection: Selection) -> tuple[Config, bytes | None] | int:
+    """Everything a run needs before it starts, or the exit code that says why it cannot: valid
+    configuration, a known feed, a historical window that is historical, the store installed, the
+    HMAC secret readable."""
     config = _load(conf, "run")
     if config is None:
         return EXIT_CANNOT_START
@@ -642,12 +642,48 @@ def run(spark: SparkSession, conf: str, feed_id: str | None = None, selection: S
         print(f"dre run: the dq store is not installed in {db} (missing: {', '.join(missing)}). "
               "Run dre install --apply once the platform team has created the database.")
         return EXIT_CANNOT_START
-
     try:
         key_secret = read_key_secret(config)
     except OSError as exc:
         print(f"dre run: cannot read hmac_secret_file ({type(exc).__name__}); key events need it")
         return EXIT_CANNOT_START
+    return config, key_secret
+
+
+def write_evaluation(spark: SparkSession, db: str, evaluation: Evaluation, rows: list[dict[str, Any]],
+                     run_record: runs.Run) -> tuple[list[dict[str, Any]], int]:
+    """Store an evaluation's results, then its key events. Returns (the rows that are stored, 1 if
+    the check counts as written). A check counts as written only once both are stored; a missing
+    write makes the run PARTIAL, and a result stored without its key events gets a newer
+    evidence_incomplete row. A stored result is explained either way (the caller's job)."""
+    check_id, ds_id = evaluation.planned.check.check_id, evaluation.planned.dataset.dataset
+    try:
+        append_check_results(spark, db, rows)
+    except Exception as exc:
+        log.error("could not write %s for %s: %s", check_id, ds_id, error_detail(exc))
+        return [], 0
+    try:
+        write_key_events(db, evaluation, rows, run_record)
+    except Exception as exc:
+        log.error("could not write the key events of %s for %s: %s", check_id, ds_id, error_detail(exc))
+        try:  # say so explicitly; the run is PARTIAL either way, which also holds the window
+            append_check_results(spark, db, incomplete_rows(evaluation, rows, datetime.now(timezone.utc)))
+        except Exception as marker_exc:
+            log.error("could not mark %s incomplete: %s", check_id, error_detail(marker_exc))
+        return rows, 0
+    return rows, 1
+
+
+def run(spark: SparkSession, conf: str, feed_id: str | None = None, selection: Selection | None = None) -> int:
+    """One run. NORMAL (scheduled hourly): only feeds with something due are evaluated; --feed
+    forces one. RERUN and REPLAY: historical windows (module docstring)."""
+
+    selection = selection or Selection()
+    ready = _preflight(spark, conf, feed_id, selection)
+    if isinstance(ready, int):
+        return ready
+    config, key_secret = ready
+    db = config.defaults.dq_database
     kind = selection.execution_type
     normal = kind == "NORMAL"
     run_record = runs.start_run(spark, db, conf_dir=conf, execution_type=kind)
@@ -686,26 +722,9 @@ def run(spark: SparkSession, conf: str, feed_id: str | None = None, selection: S
                 print(f"{ds_id} {planned.check.check_id}: unchanged since its stored result; not written again")
                 drop_judged_views(spark, evaluation)
                 continue
-            # A check counts as written only once its result and its key events are both stored;
-            # a missing write makes the run PARTIAL. A stored result is explained either way.
-            try:
-                append_check_results(spark, db, rows)
-            except Exception as exc:
-                log.error("could not write %s for %s: %s", planned.check.check_id, ds_id, error_detail(exc))
-                rows = []
-            else:
-                try:
-                    write_key_events(db, evaluation, rows, run_record)
-                    written += 1
-                except Exception as exc:
-                    log.error("could not write the key events of %s for %s: %s", planned.check.check_id, ds_id,
-                              error_detail(exc))
-                    try:  # say so explicitly; the run is PARTIAL either way, which also holds the window
-                        append_check_results(spark, db, incomplete_rows(evaluation, rows,
-                                                                        datetime.now(timezone.utc)))
-                    except Exception as marker_exc:
-                        log.error("could not mark %s incomplete: %s", planned.check.check_id,
-                                  error_detail(marker_exc))
+            stored_rows, complete = write_evaluation(spark, db, evaluation, rows, run_record)
+            written += complete
+            rows = stored_rows
             explained.update(r["evaluation_id"] for r in rows)
             for line in describe(evaluation) + explain_failures(spark, config, evaluation, rows, run_record,
                                                                 investigations):

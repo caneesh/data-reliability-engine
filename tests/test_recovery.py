@@ -55,7 +55,6 @@ def test_a_result_stored_without_its_key_events_is_recovered_by_the_next_run(spa
 def test_a_cause_investigation_that_cannot_be_stored_is_tracked_and_retried(spark, tmp_path, monkeypatch,
                                                                             capsys) -> None:
     from hcsc.datalake.dre import runner
-    from hcsc.datalake.dre.store import causes
 
     replay = replay_conf(spark, tmp_path, "recover_causes", {CURATED: [CURATED_LOAD_TIME]})  # R03
     create_table(spark, replay.gold, GOLD_COLUMNS, [gold_row(loaded=gold_load_time(72))])
@@ -65,7 +64,7 @@ def test_a_cause_investigation_that_cannot_be_stored_is_tracked_and_retried(spar
     def store_down(*args, **kwargs):
         raise OSError("synthetic cause store failure")
 
-    monkeypatch.setattr(causes, "append_cause_results", store_down)
+    monkeypatch.setattr(runner, "append_cause_results", store_down)
     assert main(["run", "--conf", str(replay.conf)]) == 0  # the checks completed
     out = capsys.readouterr().out
     assert "cause investigation incomplete (OSError); the next run retries it" in out

@@ -330,29 +330,34 @@ def load(conf_dir: Path | str) -> tuple[Config, list[ConfigError]]:
     errors.extend(_load_calendars(config))  # before the feeds, whose cadences name them
 
     for directory, (id_field, model) in OBJECT_DIRS.items():
-        kind = id_field
-        target: dict[str, Any] = getattr(config, directory)
-        paths = sorted([*(conf_dir / directory).glob("*.yaml"), *(conf_dir / directory).glob("*.yml")])
-        for path in paths:
-            display = str(path)
-            data, node, errs = read_yaml(path, display)
-            errors.extend(errs)
-            if data is None:
-                continue
-            try:
-                obj = model.model_validate(data)
-            except ValidationError as exc:
-                errors.extend(errors_from_validation(exc, display, node))
-                continue
-            obj_id = getattr(obj, id_field)
-            if obj_id in target:
-                first = config.sources[(kind, obj_id)].file
-                errors.append(
-                    ConfigError(display, line_of(node, (id_field,)), id_field,
-                                f"duplicate {kind} id {obj_id!r} (first defined in {first})",
-                                f"give each {kind} a unique id")
-                )
-                continue
-            target[obj_id] = obj
-            config.sources[(kind, obj_id)] = Source(display, node)
+        errors.extend(_load_objects(config, directory, id_field, model))
     return config, errors
+
+
+def _load_objects(config: Config, directory: str, id_field: str, model: type[BaseModel]) -> list[ConfigError]:
+    """conf/<directory>/*.yaml: one object per file, validated by `model`, keyed by `id_field`,
+    recorded with its source for later error locating."""
+    errors: list[ConfigError] = []
+    target: dict[str, Any] = getattr(config, directory)
+    root = config.conf_dir / directory
+    for path in sorted([*root.glob("*.yaml"), *root.glob("*.yml")]):
+        display = str(path)
+        data, node, errs = read_yaml(path, display)
+        errors.extend(errs)
+        if data is None:
+            continue
+        try:
+            obj = model.model_validate(data)
+        except ValidationError as exc:
+            errors.extend(errors_from_validation(exc, display, node))
+            continue
+        obj_id = getattr(obj, id_field)
+        if obj_id in target:
+            first = config.sources[(id_field, obj_id)].file
+            errors.append(ConfigError(display, line_of(node, (id_field,)), id_field,
+                                      f"duplicate {id_field} id {obj_id!r} (first defined in {first})",
+                                      f"give each {id_field} a unique id"))
+            continue
+        target[obj_id] = obj
+        config.sources[(id_field, obj_id)] = Source(display, node)
+    return errors
