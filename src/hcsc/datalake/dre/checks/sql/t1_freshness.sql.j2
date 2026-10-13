@@ -1,11 +1,13 @@
-{# T1_FRESHNESS: rows and the latest (UTC) time per group, after feed_filter.
+{# T1_FRESHNESS: rows and the latest (UTC) time per group, after feed_filter, among the rows whose
+   time is before the window end, so a historical window is judged as of its end (RERUN, REPLAY).
    population = rows; latest = max of the configured time (null when no row has one). #}
 SELECT {% for g in group_by %}{{ g }} AS g_{{ loop.index }}, {% endfor %}
        COUNT(*) AS population,
        MAX({{ time_expr }}) AS latest
 FROM {{ table }}
+WHERE ({{ time_expr }} IS NULL OR {{ time_expr }} < {{ window_end }})
 {% if feed_filter %}
-WHERE {{ feed_filter }}
+  AND ({{ feed_filter }})
 {% endif %}
 {% if group_by %}
 GROUP BY {% for g in group_by %}{{ g }}{% if not loop.last %}, {% endif %}{% endfor %}

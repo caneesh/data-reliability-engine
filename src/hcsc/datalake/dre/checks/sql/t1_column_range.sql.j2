@@ -1,15 +1,23 @@
-{# T1_COLUMN_RANGE: values of a column loaded in the window within bounds or an allowed set.
-   population = rows with a non-null value (every row when nulls_fail); violations = out of range
-   (and null, when nulls_fail). #}
+{# T1_COLUMN_RANGE: values of a column loaded in the window within numeric bounds, or in an allowed
+   set of strings (one or the other). population = rows with a non-null value (every row when
+   nulls_fail); violations = out of range, not numeric when bounds are set, not allowed, or null when
+   nulls_fail. Bounds compare CAST(column AS DOUBLE), so a value that is not a number is a violation,
+   never a silent pass; `allowed` compares the value's string form. #}
 SELECT {% for g in group_by %}{{ g }} AS g_{{ loop.index }}, {% endfor %}
        COUNT(*) AS population,
        SUM(CASE WHEN {{ column }} IS NULL THEN {% if nulls_fail %}1{% else %}0{% endif %}
-                WHEN {% if min is not none %}{{ column }} < {{ min }}{% endif %}
-                     {% if min is not none and max is not none %} OR {% endif %}
-                     {% if max is not none %}{{ column }} > {{ max }}{% endif %}
-                     {% if (min is not none or max is not none) and allowed is not none %} OR {% endif %}
-                     {% if allowed is not none %}CAST({{ column }} AS STRING) NOT IN ({{ allowed | join(', ') }}){% endif %}
-                THEN 1 ELSE 0 END) AS violations
+{% if allowed is not none %}
+                WHEN CAST({{ column }} AS STRING) NOT IN ({{ allowed | join(', ') }}) THEN 1
+{% else %}
+                WHEN CAST({{ column }} AS DOUBLE) IS NULL THEN 1
+{% if min is not none %}
+                WHEN CAST({{ column }} AS DOUBLE) < {{ min }} THEN 1
+{% endif %}
+{% if max is not none %}
+                WHEN CAST({{ column }} AS DOUBLE) > {{ max }} THEN 1
+{% endif %}
+{% endif %}
+                ELSE 0 END) AS violations
 FROM {{ table }}
 WHERE {{ load_expr }} >= {{ window_start }}
   AND {{ load_expr }} < {{ window_end }}

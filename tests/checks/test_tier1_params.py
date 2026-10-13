@@ -44,6 +44,21 @@ def test_freshness_fails_when_the_latest_record_is_too_old_and_passes_within_the
     assert by["SRC_A"].state == "PASSED"
 
 
+def test_freshness_judges_a_historical_window_as_of_its_end(spark) -> None:
+    """A7: rows timed at or after the window end are not seen, so a RERUN of an old window gives the
+    answer that window had, not today's."""
+    create_table(spark, "fresh.later", GOLD_COLUMNS, [
+        gold_row(), gold_row(sub_id="2", record=datetime(2026, 1, 3, 0)),  # exactly at the window end: not seen
+        gold_row(sub_id="3", record=datetime(2026, 2, 1))])                 # after the window: not seen
+    [r] = run(spark, "T1_FRESHNESS", gold("fresh.later", {"max_age_hours": 12}, "T1_FRESHNESS")).values()
+    assert (r.state, r.population) == ("FAILED", 1)
+    assert r.observed.startswith("latest record time 2026-01-02T09:00:00+00:00, 15.0 hours")
+    old = Event("gold", datetime(2025, 12, 1, tzinfo=UTC), datetime(2025, 12, 2, tzinfo=UTC))  # before every row
+    results, _ = run_check(CHECKS["T1_FRESHNESS"], CheckContext(spark, gold("fresh.later", {"max_age_hours": 12},
+                                                                            "T1_FRESHNESS"), None, SETTINGS, "UTC"), old)
+    assert [(r.state, r.reason_code) for r in results] == [("DID_NOT_RUN", "empty_population")]
+
+
 def test_freshness_can_measure_the_load_time(spark) -> None:
     create_table(spark, "fresh.l", GOLD_COLUMNS, [gold_row()])
     [r] = run(spark, "T1_FRESHNESS", gold("fresh.l", {"max_age_hours": 13, "time": "load"}, "T1_FRESHNESS")).values()
@@ -87,6 +102,39 @@ def test_column_range_numeric_bounds(spark) -> None:
     assert (b.state, b.population, b.violations) == ("PASSED", 1, 0)
     by = run(spark, "T1_COLUMN_RANGE", gold("range.g", {"column": "mem_nbr", "max": 10}, "T1_COLUMN_RANGE"))
     assert by["SRC_A"].state == "PASSED"
+
+
+NUMERIC = [("src_sys_nm", "STRING"), ("amount", "DOUBLE"), ("code", "STRING"), ("gld_lcts", "STRING")]
+
+
+def numeric_rows(*values, column: str = "amount") -> list[dict]:
+    return [{"src_sys_nm": "SRC_A", column: v, "gld_lcts": "2026-01-02 10:15:00:000000"} for v in values]
+
+
+def numeric_ds(table: str, params: dict) -> Dataset:
+    return Dataset(dataset="gold", table=table, layer="GOLD", key=["src_sys_nm"], group_by=["src_sys_nm"],
+                   load_time=LOAD, check_params={"T1_COLUMN_RANGE": params})
+
+
+def test_column_range_a_value_that_is_not_a_number_is_a_violation(spark) -> None:
+    """A8: 'abc' against min/max was a silent pass; it is a violation now, on string and numeric columns."""
+    create_table(spark, "range.text", NUMERIC, numeric_rows("1", "abc", "", "7", column="code"))
+    [r] = run(spark, "T1_COLUMN_RANGE", numeric_ds("range.text", {"column": "code", "min": 0, "max": 5})).values()
+    assert (r.state, r.population, r.violations) == ("FAILED", 4, 3)  # abc, '' and 7
+    create_table(spark, "range.num", NUMERIC, numeric_rows(1.0, 2.5, 0.5))
+    [r] = run(spark, "T1_COLUMN_RANGE", numeric_ds("range.num", {"column": "amount", "min": 1, "max": 2})).values()
+    assert (r.state, r.population, r.violations) == ("FAILED", 3, 2)
+    [r] = run(spark, "T1_COLUMN_RANGE", numeric_ds("range.num", {"column": "amount", "min": 0, "max": 3})).values()
+    assert r.state == "PASSED"
+
+
+def test_column_range_allowed_and_bounds_are_one_or_the_other(spark) -> None:
+    create_table(spark, "range.both", NUMERIC, numeric_rows(1.0, 2.0))
+    [r] = run(spark, "T1_COLUMN_RANGE", numeric_ds("range.both", {"column": "amount", "min": 1, "allowed": ["1"]})).values()
+    assert (r.state, r.reason_code) == ("DID_NOT_RUN", "invalid_config")
+    # allowed compares the value's string form: a DOUBLE 1.0 is '1.0'
+    [r] = run(spark, "T1_COLUMN_RANGE", numeric_ds("range.both", {"column": "amount", "allowed": ["1.0", "2.0"]})).values()
+    assert r.state == "PASSED"
 
 
 def test_column_range_allowed_set_and_nulls(spark) -> None:

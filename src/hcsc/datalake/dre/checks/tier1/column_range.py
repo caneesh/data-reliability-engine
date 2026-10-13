@@ -2,8 +2,10 @@
 (spec section 6). A parametrised check: it runs where `check_params` configures it.
 
 Population: rows loaded in the window with a non-null value (every row when nulls_fail), per
-group. `min` and `max` are numbers, compared numerically; `allowed` is a set of strings. Null
-values are left out unless nulls_fail, when each is a violation.
+group. `min` and `max` are numbers, compared on CAST(column AS DOUBLE), so a value that is not a
+number is a violation, never a silent pass; `allowed` is a set of strings compared with the
+value's string form. A check takes bounds or an allowed set, not both. Null values are left out
+unless nulls_fail, when each is a violation.
 """
 
 from __future__ import annotations
@@ -35,6 +37,9 @@ class ColumnRangeParams(Model):
     def _bounded(self) -> ColumnRangeParams:
         if self.min is None and self.max is None and self.allowed is None:
             raise invalid("needs a bound", "set min, max or allowed")
+        if self.allowed is not None and (self.min is not None or self.max is not None):
+            raise invalid("allowed cannot be combined with min or max",
+                          "use min/max for a numeric column, or allowed for a categorical one")
         if self.min is not None and self.max is not None and self.min > self.max:
             raise invalid("min is above max", "swap them")
         if self.allowed is not None and not self.allowed:
