@@ -3,9 +3,9 @@
 Runs the loader's per-file checks, then checks across files: references
 exist, key_map covers the key, owners have recipients, time columns needed by
 hop checks are set, and every dataset's settings resolve. Errors fail
-validation; warnings are reported only. SQL fragments are not parsed here:
-dry-run does that against Spark (build step 4). Runtime preconditions (tables
-and columns exist) also come in step 4.
+validation; warnings are reported only. SQL fragments are only scanned here
+(config/sqlcheck.py); `dre dry-run` parses them against Spark (config/fragments.py),
+and the runtime preconditions (tables and columns exist) are in checks/base.py.
 """
 
 from __future__ import annotations

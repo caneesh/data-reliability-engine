@@ -1,1 +1,1 @@
-"""Read-only source adapters: HDFS listing and scheduler history (build step 6)."""
+"""Read-only source adapters: HDFS listing through the Hadoop FileSystem API."""

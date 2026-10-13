@@ -1,1 +1,1 @@
-"""Email digest (build step 9)."""
+"""Notifications: the digest builder, the sinks (email, stdout) and the SMTP sender."""

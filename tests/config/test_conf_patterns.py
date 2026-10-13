@@ -35,12 +35,6 @@ causes:
 """
 
 
-@pytest.fixture(autouse=True)
-def packaged_only_afterwards():
-    yield
-    use_conf_patterns(None)
-
-
 def drop_probes(conf: Path) -> None:
     """Remove the sample feed's `probes:` block: a pattern that uses none of its keys rejects them."""
     path = conf / FEED

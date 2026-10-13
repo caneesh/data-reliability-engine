@@ -22,7 +22,7 @@ from pydantic import BeforeValidator, Field, TypeAdapter, ValidationError, creat
 
 from hcsc.datalake.dre.checks.base import double
 from hcsc.datalake.dre.checks.keys import column_expr, key_exprs
-from hcsc.datalake.dre.checks.rules.template import TEMPLATES, TemplateSpec, time_expr
+from hcsc.datalake.dre.checks.rules.template import TemplateSpec, time_expr
 from hcsc.datalake.dre.checks.times import sql_string
 from hcsc.datalake.dre.config.models import Dataset, Identifier, Model, NonEmptyStr, SqlFragment
 from hcsc.datalake.dre.config.sqlcheck import SqlProblem, forbidden_sql
@@ -121,29 +121,6 @@ def spec_from(file: TemplateFile) -> TemplateSpec:
         arguments=lambda ds, p, related: {"params": p, **_helpers(ds)},
         what=lambda p: file.violation, unit=file.unit,
     )
-
-
-_CONF_IDS: set[str] = set()
-
-
-def use_conf_templates(files: list[TemplateFile]) -> list[str]:
-    """Register these conf templates (replacing the previous conf set); a name a packaged template
-    holds is refused and returned."""
-    for old in _CONF_IDS:
-        TEMPLATES.unregister(old)
-    _CONF_IDS.clear()
-    refused = []
-    for file in files:
-        if file.template in TEMPLATES:
-            refused.append(file.template)
-            continue
-        TEMPLATES.register(file.template, spec_from(file))
-        _CONF_IDS.add(file.template)
-    return refused
-
-
-def conf_template_ids() -> frozenset[str]:
-    return frozenset(_CONF_IDS)
 
 
 @dataclass(frozen=True)

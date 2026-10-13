@@ -1,1 +1,1 @@
-"""dq store: DDL, append-only writer and views (build step 3)."""
+"""The dq store: DDL, the one append-only writer, views, retention, run bookkeeping."""

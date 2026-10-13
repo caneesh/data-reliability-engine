@@ -40,10 +40,6 @@ def probe(name: str, params: type[Model]) -> Callable[[Callable[..., Outcome]], 
     return register
 
 
-def probe_types() -> tuple[str, ...]:
-    return (*PROBES.ids(), BUILTIN)
-
-
 def is_ready(params: Model | None) -> bool:
     """A probe can run only when every parameter it declares is set."""
     if params is None:

@@ -1,1 +1,2 @@
-"""Check interface, Tier 1 checks, gold rule templates and SQL (build steps 4 to 7)."""
+"""Checks: the Check interface (base.py), Tier 1 checks, hop checks, gold rule templates, cadences,
+calendars, key normalisers, derived datasets and the SQL templates they render."""

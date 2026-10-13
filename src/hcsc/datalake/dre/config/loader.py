@@ -1,15 +1,18 @@
 """Load configuration YAML, keeping line numbers, and resolve settings.
 
-Layout of a conf directory (spec section 3): `defaults.yaml`, then one object
-per file in `feeds/`, `datasets/` and `rules/`. Every problem found while
-loading becomes a ConfigError naming the file, line and field, with a fix.
+Layout of a conf directory (spec section 3): `defaults.yaml` (with `extensions:` and `notify:`),
+then one object per file in `feeds/`, `datasets/` and `rules/`, and optionally `patterns/`,
+`templates/` and `calendars/`, which the registries take in place of the packaged ones. The
+order in `load` matters: extensions first (their capabilities validate the rest), then patterns,
+templates and calendars, then feeds, datasets and rules, which name them. Every problem found
+while loading becomes a ConfigError naming the file, line and field, with a fix.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 from pydantic import BaseModel, ValidationError
@@ -243,78 +246,75 @@ def _load_extensions(data: Any, display: str, node: yaml.Node | None) -> list[Co
                         "install the extension, or remove it from the list") for problem in problems]
 
 
-def _load_templates(config: Config) -> list[ConfigError]:
-    """conf/templates/*.yaml: each file a rule template (spec section 3), registered for the rules
-    that follow. A packaged template's name is refused; a forbidden statement or a Jinja syntax
-    error is reported with the file and line."""
-    from hcsc.datalake.dre.checks.rules.conf_template import TemplateFile, check_template_file, use_conf_templates
-
+def _load_conf_registry(config: Config, folder: str, id_field: str, model: type[BaseModel], registry: Any,
+                        build: Callable[[Any], Any], check: Callable[[Any], Any] | None = None) -> list[ConfigError]:
+    """conf/<folder>/*.yaml: each file one capability (a rule template, a calendar) that the registry
+    takes in place of the previous conf set. `check` may return a located problem for a file; a name
+    code already holds (packaged, or from an extension) is refused."""
     errors: list[ConfigError] = []
-    files: list[Any] = []
-    folder = config.conf_dir / "templates"
-    for path in sorted([*folder.glob("*.yaml"), *folder.glob("*.yml")]):
+    target: dict[str, Any] = getattr(config, folder)
+    root = config.conf_dir / folder
+    for path in sorted([*root.glob("*.yaml"), *root.glob("*.yml")]):
         display = str(path)
         data, node, errs = read_yaml(path, display)
         errors.extend(errs)
         if data is None:
             continue
         try:
-            file = TemplateFile.model_validate(data)
-            problem = check_template_file(file)
+            obj = model.model_validate(data)
         except ValidationError as exc:
             errors.extend(errors_from_validation(exc, display, node))
             continue
+        problem = check(obj) if check else None
         if problem is not None:
             errors.append(ConfigError(display, line_of(node, problem.loc) + problem.line, format_loc(problem.loc),
                                       problem.problem, problem.fix))
             continue
-        if file.template in config.templates:
-            errors.append(ConfigError(display, line_of(node, ("template",)), "template",
-                                      f"duplicate template {file.template!r}", "give each template a unique name"))
+        obj_id = getattr(obj, id_field)
+        if obj_id in target:
+            errors.append(ConfigError(display, line_of(node, (id_field,)), id_field,
+                                      f"duplicate {id_field} {obj_id!r}", f"give each {id_field} a unique name"))
             continue
-        config.templates[file.template] = file
-        config.sources[("template", file.template)] = Source(display, node)
-        files.append(file)
-    for refused in use_conf_templates(files):
-        source = config.sources[("template", refused)]
-        errors.append(ConfigError(source.file, line_of(source.node, ("template",)), "template",
-                                  f"{refused!r} is already a template (packaged, or from an extension)",
-                                  "pick another name; templates from code stay as they are"))
-        del config.templates[refused]
+        target[obj_id] = obj
+        config.sources[(id_field, obj_id)] = Source(display, node)
+    for refused in registry.replace_conf({obj_id: build(obj) for obj_id, obj in target.items()}):
+        source = config.sources[(id_field, refused)]
+        errors.append(ConfigError(source.file, line_of(source.node, (id_field,)), id_field,
+                                  f"{refused!r} is already a {id_field} ({_origin(registry, refused)})",
+                                  f"pick another name; {id_field}s from code stay as they are"))
+        del target[refused]
     return errors
+
+
+def _origin(registry: Any, item_id: str) -> str:
+    return getattr(registry[item_id], "origin", "packaged, or from an extension")
+
+
+def _load_templates(config: Config) -> list[ConfigError]:
+    from hcsc.datalake.dre.checks.rules.conf_template import TemplateFile, check_template_file, spec_from
+    from hcsc.datalake.dre.checks.rules.template import TEMPLATES
+
+    return _load_conf_registry(config, "templates", "template", TemplateFile, TEMPLATES, spec_from, check_template_file)
 
 
 def _load_calendars(config: Config) -> list[ConfigError]:
-    """conf/calendars/*.yaml: each file a named calendar (spec section 3), registered for the feeds."""
-    from hcsc.datalake.dre.checks.calendars import CALENDARS, CalendarFile, use_conf_calendars
+    from hcsc.datalake.dre.checks.calendars import CALENDARS, CalendarFile, calendar_from
 
-    errors: list[ConfigError] = []
-    files: list[Any] = []
-    folder = config.conf_dir / "calendars"
-    for path in sorted([*folder.glob("*.yaml"), *folder.glob("*.yml")]):
-        display = str(path)
-        data, node, errs = read_yaml(path, display)
-        errors.extend(errs)
-        if data is None:
-            continue
-        try:
-            file = CalendarFile.model_validate(data)
-        except ValidationError as exc:
-            errors.extend(errors_from_validation(exc, display, node))
-            continue
-        if file.calendar in config.calendars:
-            errors.append(ConfigError(display, line_of(node, ("calendar",)), "calendar",
-                                      f"duplicate calendar {file.calendar!r}", "give each calendar a unique name"))
-            continue
-        config.calendars[file.calendar] = file
-        config.sources[("calendar", file.calendar)] = Source(display, node)
-        files.append(file)
-    for refused in use_conf_calendars(files):
-        source = config.sources[("calendar", refused)]
-        errors.append(ConfigError(source.file, line_of(source.node, ("calendar",)), "calendar",
-                                  f"{refused!r} is already a calendar ({CALENDARS[refused].origin})", "pick another name"))
-        del config.calendars[refused]
-    return errors
+    return _load_conf_registry(config, "calendars", "calendar", CalendarFile, CALENDARS, calendar_from)
+
+
+def reset_conf_state() -> None:
+    """Forget everything a loaded configuration put into the registries: conf patterns, templates,
+    calendars and extensions (tests, and a process that switches configuration)."""
+    from hcsc.datalake.dre.checks.calendars import CALENDARS
+    from hcsc.datalake.dre.checks.registry import use_conf_patterns
+    from hcsc.datalake.dre.checks.rules.template import TEMPLATES
+    from hcsc.datalake.dre.extensions import sync_extensions
+
+    use_conf_patterns(None)
+    TEMPLATES.replace_conf({})
+    CALENDARS.replace_conf({})
+    sync_extensions([])
 
 
 def load(conf_dir: Path | str) -> tuple[Config, list[ConfigError]]:

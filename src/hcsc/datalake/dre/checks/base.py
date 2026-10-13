@@ -113,8 +113,8 @@ class CheckContext:
     # NORMAL runs keep the open-key state (read v_open_keys, write key events); a RERUN or REPLAY
     # of a historical window neither reads nor changes it, so repeating one changes nothing.
     record_key_events: bool = True
-    # The check's parameters (an instance of Check.params_model), resolved by run_check from the pattern's
-    # defaults, the feed's and the dataset's `check_params`; None for a check without parameters.
+    # The check's parameters (an instance of Check.params_model), resolved by resolve_params (called from
+    # run_check) from the pattern's defaults, the feed's and the dataset's `check_params`; None without.
     params: Any = None
 
 

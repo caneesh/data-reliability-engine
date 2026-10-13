@@ -1,7 +1,7 @@
 """Which checks run for a dataset: the pattern's list in patterns/*.yaml (spec section 2).
 
 Checks register themselves (`register_check`) in the module that defines them; the built-in
-modules under checks/tier1 and checks/hop are imported on first use. Patterns are the
+modules under checks/tier1 and checks/hop are imported on first use (`Registry._discover`). Patterns are the
 packaged patterns/*.yaml files plus, once `use_conf_patterns` names a conf directory, its
 patterns/*.yaml: a file with a packaged name replaces that pattern, a new name adds one. Each
 pattern declares `kind: file | table` (spec section 3).

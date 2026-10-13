@@ -1,4 +1,4 @@
-"""Sending digests: not sent without a mail relay; sent through SMTP with one; a failed send is
+"""The email sink: not sent without a mail relay; sent through SMTP with one; a failed send is
 reported and never raises."""
 
 from __future__ import annotations
@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from hcsc.datalake.dre.config.models import EmailServer
 from hcsc.datalake.dre.notify import email
 from hcsc.datalake.dre.notify.digest import Digest
+from hcsc.datalake.dre.notify.sinks import EmailSink, from_digests
 
 
 def digest() -> Digest:
@@ -32,7 +33,7 @@ class FakeSMTP:
 
 
 def test_not_sent_without_a_relay() -> None:
-    assert email.send([digest()], EmailServer()) == [
+    assert EmailSink(EmailServer()).send(from_digests([digest()])) == [
         "email for membership-gold: DRE dev: all clear (not sent: email.smtp_host and email.sender are not set)"]
 
 
@@ -40,7 +41,7 @@ def test_sent_through_smtp(monkeypatch) -> None:
     monkeypatch.setattr(email.smtplib, "SMTP", FakeSMTP)
     FakeSMTP.sent = []
     server = EmailServer(smtp_host="relay.example.com", smtp_port=2525, sender="dre@example.com")
-    assert email.send([digest()], server) == ["email for membership-gold: DRE dev: all clear (sent to 1)"]
+    assert EmailSink(server).send(from_digests([digest()])) == ["email for membership-gold: DRE dev: all clear (sent to 1)"]
     [(host, port, msg)] = FakeSMTP.sent
     assert (host, port, msg["Subject"], msg["To"], msg["From"]) == (
         "relay.example.com", 2525, "DRE dev: all clear", "dre-alerts@example.com", "dre@example.com")
@@ -54,7 +55,7 @@ def test_a_failed_send_is_reported(monkeypatch) -> None:
 
     monkeypatch.setattr(email.smtplib, "SMTP", Down)
     server = EmailServer(smtp_host="relay.example.com", sender="dre@example.com")
-    assert email.send([digest()], server) == ["email for membership-gold: not sent (ConnectionRefusedError)"]
+    assert EmailSink(server).send(from_digests([digest()])) == ["email for membership-gold: not sent (ConnectionRefusedError)"]
 
 
 def test_all_clear_digests_follow_the_setting() -> None:

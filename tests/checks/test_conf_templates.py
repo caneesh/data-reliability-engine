@@ -11,7 +11,7 @@ import pytest
 
 from hcsc.datalake.dre.checks.base import CheckContext, run_check
 from hcsc.datalake.dre.checks.events import Event
-from hcsc.datalake.dre.checks.rules.conf_template import TemplateFile, forbidden_statement, use_conf_templates
+from hcsc.datalake.dre.checks.rules.conf_template import TemplateFile, forbidden_statement
 from hcsc.datalake.dre.checks.rules.rule_check import RuleCheck
 from hcsc.datalake.dre.checks.rules.template import TEMPLATES
 from hcsc.datalake.dre.cli import main
@@ -50,12 +50,6 @@ def conf(tmp_path: Path) -> Path:
     (target / "templates").mkdir()
     (target / "templates" / "not_after.yaml").write_text(NOT_AFTER, encoding="utf-8")
     return target
-
-
-@pytest.fixture(autouse=True)
-def no_conf_templates_afterwards():
-    yield
-    use_conf_templates([])
 
 
 def gold(table: str, **extra) -> Dataset:

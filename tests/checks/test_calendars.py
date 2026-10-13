@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from hcsc.datalake.dre.checks.cadence import UnsupportedCalendar, slots
-from hcsc.datalake.dre.checks.calendars import CALENDARS, CalendarFile, runs_on, use_conf_calendars
+from hcsc.datalake.dre.checks.calendars import CALENDARS, CalendarFile, calendar_from, runs_on
 from hcsc.datalake.dre.config.loader import load
 from hcsc.datalake.dre.config.models import Cadence
 from hcsc.datalake.dre.config.validate import validate_conf
@@ -33,12 +33,6 @@ def conf(tmp_path: Path) -> Path:
     return target
 
 
-@pytest.fixture(autouse=True)
-def packaged_calendars_afterwards():
-    yield
-    use_conf_calendars([])
-
-
 def cadence(calendar: str) -> Cadence:
     return Cadence(kind="times", times=["06:00"], timezone="UTC", calendar=calendar)
 
@@ -58,7 +52,8 @@ def test_a_conf_calendar_skips_its_holidays_and_weekends(conf: Path) -> None:
     found = slots(cadence("US_BUSINESS"), datetime(2026, 1, 15, tzinfo=UTC), datetime(2026, 1, 21, tzinfo=UTC))
     # 15 Thu, 16 Fri, (17, 18 weekend), (19 holiday), 20 Tue
     assert [s.date() for s in found] == [date(2026, 1, 15), date(2026, 1, 16), date(2026, 1, 20)]
-    use_conf_calendars([CalendarFile(calendar="ALL_BUT_NEW_YEAR", weekdays_only=False, holidays=[date(2026, 1, 1)])])
+    CALENDARS.replace_conf({"ALL_BUT_NEW_YEAR": calendar_from(
+        CalendarFile(calendar="ALL_BUT_NEW_YEAR", weekdays_only=False, holidays=[date(2026, 1, 1)]))})
     found = slots(cadence("ALL_BUT_NEW_YEAR"), datetime(2025, 12, 31, tzinfo=UTC), datetime(2026, 1, 4, tzinfo=UTC))
     assert [s.date() for s in found] == [date(2025, 12, 31), date(2026, 1, 2), date(2026, 1, 3)]
 

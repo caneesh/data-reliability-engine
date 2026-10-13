@@ -23,6 +23,7 @@ class Registry(Generic[T]):
         self._discover = discover  # packages (or modules) whose import registers the built-ins
         self._items: dict[str, T] = {}
         self._loaded = False
+        self._conf_ids: set[str] = set()  # ids registered from configuration, replaced on each load
 
     def register(self, item_id: str, item: T) -> T:
         if not item_id:
@@ -53,8 +54,25 @@ class Registry(Generic[T]):
             raise KeyError(f"unknown {self.kind} {item_id!r}; known: {self.ids()}") from None
 
     def unregister(self, item_id: str) -> None:
-        """Remove a registration (configuration-defined capabilities are replaced on each load)."""
+        """Remove a registration (an extension unloaded, or a test's temporary item)."""
         self._items.pop(item_id, None)
+        self._conf_ids.discard(item_id)
+
+    def replace_conf(self, items: dict[str, T]) -> list[str]:
+        """Register the capabilities a configuration defines, replacing the previous conf set. An
+        id that code already holds (packaged, or from an extension) is refused and returned."""
+        self._load()
+        for old in self._conf_ids:
+            self._items.pop(old, None)
+        self._conf_ids.clear()
+        refused = []
+        for item_id, item in items.items():
+            if item_id in self._items:
+                refused.append(item_id)
+                continue
+            self._items[item_id] = item
+            self._conf_ids.add(item_id)
+        return refused
 
     def get(self, item_id: str) -> T | None:
         self._load()

@@ -3,14 +3,14 @@
 EVERYDAY and WEEKDAYS are packaged. A deployed instance adds named calendars under
 conf/calendars/<name>.yaml: weekdays only or not, plus listed holidays, so a feed that does not
 load on holidays is not reported late on them. Calendars are a registry like the other
-capabilities; the config loader registers the conf ones before the feeds load.
+capabilities; the config loader registers the conf ones (`CALENDARS.replace_conf`) before the feeds load.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
-from typing import Callable
+from typing import Callable, Literal
 
 from hcsc.datalake.dre.config.models import Model, NonEmptyStr
 from hcsc.datalake.dre.registry import Registry
@@ -20,7 +20,7 @@ from hcsc.datalake.dre.registry import Registry
 class Calendar:
     name: str
     runs_on: Callable[[date], bool]
-    origin: str = "packaged"  # or "conf"
+    origin: Literal["packaged", "conf", "extension"] = "packaged"
 
 
 CALENDARS: Registry[Calendar] = Registry("calendar")
@@ -45,25 +45,6 @@ def calendar_from(file: CalendarFile) -> Calendar:
         return day not in holidays
 
     return Calendar(file.calendar, runs_on, "conf")
-
-
-_CONF_IDS: set[str] = set()
-
-
-def use_conf_calendars(files: list[CalendarFile]) -> list[str]:
-    """Register these conf calendars (replacing the previous conf set); a packaged name is refused
-    and returned."""
-    for old in _CONF_IDS:
-        CALENDARS.unregister(old)
-    _CONF_IDS.clear()
-    refused = []
-    for file in files:
-        if file.calendar in CALENDARS:
-            refused.append(file.calendar)
-            continue
-        CALENDARS.register(file.calendar, calendar_from(file))
-        _CONF_IDS.add(file.calendar)
-    return refused
 
 
 def runs_on(day: date, calendar: str) -> bool:
