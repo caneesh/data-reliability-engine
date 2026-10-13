@@ -174,7 +174,7 @@ def test_a_probe_decorator_registers_once(cause_context) -> None:
         with pytest.raises(ValueError, match="registered twice"):
             probe("x_once", Flag)(once)
     finally:
-        del PROBES._items["x_once"]
+        PROBES.unregister("x_once")
 
 
 def test_a_builtin_cause_registers_by_code(cause_context) -> None:
@@ -187,7 +187,7 @@ def test_a_builtin_cause_registers_by_code(cause_context) -> None:
         assert (out.state, out.evidence) == ("CONFIRMED", {"slot": failure.ref})
         assert run_entry(cause_context, CauseEntry("X_UNKNOWN", "builtin", None), failure).state == "ERROR"
     finally:
-        del BUILTINS._items["X_ALWAYS"]
+        BUILTINS.unregister("X_ALWAYS")
 
 
 def test_a_pattern_naming_an_unknown_builtin_is_rejected(monkeypatch) -> None:

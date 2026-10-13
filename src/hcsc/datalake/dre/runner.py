@@ -541,7 +541,8 @@ def describe(evaluation: Evaluation) -> list[str]:
     return lines
 
 
-def _load(conf: str, command: str) -> Config | None:
+def load_config(conf: str, command: str) -> Config | None:
+    """The configuration a command runs on, or None after telling the operator to run dre validate."""
     config, errors, _ = validate_conf(Path(conf))
     if errors or config.defaults is None:
         print(f"dre {command}: {conf} has {len(errors)} configuration error(s); run dre validate --conf {conf}")
@@ -626,7 +627,7 @@ def _preflight(spark: SparkSession, conf: str, feed_id: str | None,
     """Everything a run needs before it starts, or the exit code that says why it cannot: valid
     configuration, a known feed, a historical window that is historical, the store installed, the
     HMAC secret readable."""
-    config = _load(conf, "run")
+    config = load_config(conf, "run")
     if config is None:
         return EXIT_CANNOT_START
     if feed_id is not None and feed_id not in config.feeds:
@@ -754,7 +755,7 @@ def run(spark: SparkSession, conf: str, feed_id: str | None = None, selection: S
 def dry_run(spark: SparkSession, conf: str, feed_id: str) -> int:
     """Preconditions and checks for one feed, printed; nothing is written. Exit 0 unless it cannot start."""
 
-    config = _load(conf, "dry-run")
+    config = load_config(conf, "dry-run")
     if config is None:
         return EXIT_CANNOT_START
     if feed_id not in config.feeds:

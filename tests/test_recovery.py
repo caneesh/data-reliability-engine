@@ -75,7 +75,7 @@ def test_a_cause_investigation_that_cannot_be_stored_is_tracked_and_retried(spar
     assert zero.state == "FAILED"  # the check keeps its state
     assert spark.table(f"{replay.dq}.dq_cause_result").count() == 0
     pending = {r["check_id"] for r in runner.pending_investigations(
-        spark, runner._load(str(replay.conf), "test"), run.run_date, set())}
+        spark, runner.load_config(str(replay.conf), "test"), run.run_date, set())}
     assert "T1_ZERO_ROWS" in pending
 
     monkeypatch.undo()
@@ -85,4 +85,4 @@ def test_a_cause_investigation_that_cannot_be_stored_is_tracked_and_retried(spar
     assert retry.investigations_done == retry.investigations_expected > 0
     rows = spark.table(f"{replay.dq}.dq_cause_result").collect()
     assert {r.evaluation_id for r in rows} >= {zero.evaluation_id}
-    assert runner.pending_investigations(spark, runner._load(str(replay.conf), "test"), run.run_date, set()) == []
+    assert runner.pending_investigations(spark, runner.load_config(str(replay.conf), "test"), run.run_date, set()) == []

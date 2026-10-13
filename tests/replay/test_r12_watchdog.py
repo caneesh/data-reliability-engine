@@ -49,7 +49,9 @@ def test_watchdog_is_healthy_when_the_expected_run_completed(spark, tmp_path, ca
 
 def test_watchdog_alerts_on_a_run_left_started_or_incomplete(spark, tmp_path, capsys) -> None:
     replay = replay_conf(spark, tmp_path, "r12_bad")
-    stuck = runs.start_run(spark, replay.dq, now=hour_now() + timedelta(minutes=1))
+    # Started on the hour: the watchdog judges this hour only once the grace (30 minutes) has
+    # passed since the hour began, so the run is always past its grace, whatever the clock says.
+    stuck = runs.start_run(spark, replay.dq, now=hour_now())
     partial = runs.start_run(spark, replay.dq, now=hour_now() + timedelta(minutes=3))
     runs.finish_run(spark, replay.dq, partial, 36, 30, now=partial.started_at + timedelta(minutes=4))
     code, out = watchdog(replay, capsys)

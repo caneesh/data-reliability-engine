@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 from hcsc.datalake.dre.checks.base import render_sql
 from hcsc.datalake.dre.checks.keys import column_expr, normalised
 from hcsc.datalake.dre.checks.times import as_utc, sql_string, utc_expr
+from hcsc.datalake.dre.runner import load_config, read_key_secret
 from hcsc.datalake.dre.store.names import validate_dq_database, validate_identifier
 
 if TYPE_CHECKING:
@@ -160,9 +161,7 @@ def trace(spark: SparkSession, config: Config, dataset_id: str, raw_key: list[st
 
 
 def run_trace(spark: SparkSession, conf: str, dataset_id: str, key: str) -> int:
-    from hcsc.datalake.dre.runner import _load, read_key_secret
-
-    config = _load(conf, "trace")
+    config = load_config(conf, "trace")
     if config is None:
         return 3
     ds = config.datasets.get(dataset_id)

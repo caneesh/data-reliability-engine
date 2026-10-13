@@ -360,6 +360,14 @@ Five reviews in parallel (functional; constraints, leakage and performance; SQL 
 7. **The stdout sink prints counts.** The run's stdout is the scheduler's log; hard rule 6 reserves logs for counts, check ids and table names. `full_body: true` is the operator's explicit choice.
 8. **Not changed on purpose:** a parametrised check configured where its pattern does not list it stays a warning (the spec says so); the watchdog still runs the full `load()` (a lighter `load_defaults` is a design-pass item, B10).
 
+### Design pass (section B of the review)
+
+Done as five commits, no behaviour change, each followed by the full suite and the e2e run before the push: one conf lifecycle in `Registry.replace_conf` and one loader path for templates and calendars (B1); `checks/patterns.py` split out of the check registry, with parameter resolution beside it (B2); function-level imports hoisted except the deliberate ones in `config/models.py` and `cli.py` (B3); `cross_check`, `run()` and the loader's object loop split into named steps (B4); the `params`/`kind` renames (B5); dead code and stale docstrings removed (B6); `runner.load_config` public for `trace.py`, and tests use `Registry.unregister` instead of the item dict (B7). Decisions:
+
+1. **Hoisted imports change what tests patch.** A test that stubs a store write patches the name on the module that calls it (`runner.append_cause_results`), not on the store module; the recovery test was the one that still patched the origin.
+2. **Not done, on purpose:** B8 (replacing `Any` where the type is at hand) and B10 (a `load_defaults` for the watchdog) are left for a later pass; neither affects behaviour, and B10 changes what the watchdog imports, which the R12 dependency test pins.
+3. **The R12 watchdog test starts its stuck run on the hour.** It started it one minute in, so in the first minute after each half hour the run was inside the grace and the test failed (CI run #40). On the hour, the judged hour is always at least the grace old.
+
 A test-ordering quirk found on the way: pytest 9 matches conftest fixtures by collector object, so giving the same package directory as two separate command-line arguments with other arguments between them can lose a directory's fixtures. The full suite runs as one tree, so CI is unaffected; targeted runs are grouped by directory.
 
 ## Notes for later steps
