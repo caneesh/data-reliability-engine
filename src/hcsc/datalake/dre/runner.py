@@ -26,24 +26,40 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from hcsc.datalake.dre.causes.base import CauseContext
+from hcsc.datalake.dre.causes.engine import explain, failure_type, summarise
 from hcsc.datalake.dre.checks.base import (
     Check, CheckContext, CheckResult, did_not_run, error_detail, from_exception, run_check,
 )
+from hcsc.datalake.dre.checks.cadence import slots, UnsupportedCalendar
+from hcsc.datalake.dre.checks.derived import base_datasets
 from hcsc.datalake.dre.checks.events import (
-    GAP_CHECK_ID, Event, WindowHistory, evaluation_id, fixed_window, recorded_windows, release_hold,
-    replay_windows, window_for, window_histories,
+    evaluation_id, Event, fixed_window, GAP_CHECK_ID, recorded_windows, release_hold, replay_windows, window_for,
+    window_histories, WindowHistory,
 )
-from hcsc.datalake.dre.checks.registry import checks_for
+from hcsc.datalake.dre.checks.hop.common import hop_label
+from hcsc.datalake.dre.checks.patterns import checks_for
+from hcsc.datalake.dre.checks.rules.rule_check import RuleCheck
+from hcsc.datalake.dre.checks.rules.schedule import is_due, last_completed
+from hcsc.datalake.dre.checks.rules.template import TEMPLATES
 from hcsc.datalake.dre.checks.times import as_utc
+from hcsc.datalake.dre.config.fragments import check_fragments
 from hcsc.datalake.dre.config.loader import Config, ConfigError
+from hcsc.datalake.dre.config.models import Dataset, Feed
 from hcsc.datalake.dre.config.validate import validate_conf
+from hcsc.datalake.dre.notify.digest import digests_for_run, GROUPS_SQL, to_send
+from hcsc.datalake.dre.notify.sinks import deliver, from_digests
+from hcsc.datalake.dre.sources.hdfs import LandingError, list_landing
 from hcsc.datalake.dre.store import runs
+from hcsc.datalake.dre.store.causes import append_cause_results
+from hcsc.datalake.dre.store.files import register_files
+from hcsc.datalake.dre.store.install import missing_objects
+from hcsc.datalake.dre.store.key_events import append_key_events
 from hcsc.datalake.dre.store.results import append_check_results
 
 if TYPE_CHECKING:
     from pyspark.sql import SparkSession
 
-    from hcsc.datalake.dre.config.models import Dataset, Feed
 
 log = logging.getLogger(__name__)
 
@@ -129,14 +145,11 @@ def plan(config: Config, feed_id: str | None = None, per_table: bool = True) -> 
 
 
 def is_rule(planned: Planned) -> bool:
-    from hcsc.datalake.dre.checks.rules.rule_check import RuleCheck
-
     return isinstance(planned.check, RuleCheck)
 
 
 def rules_due(spark: SparkSession, config: Config, planned: list[Planned], run_start: datetime) -> list[Planned]:
     """Gold rules due by their frequency (checks/rules/schedule.py), whether or not their feed is due."""
-    from hcsc.datalake.dre.checks.rules.schedule import is_due, last_completed
 
     rules = [p for p in planned if is_rule(p)]
     if not rules:
@@ -151,8 +164,6 @@ def rules_due(spark: SparkSession, config: Config, planned: list[Planned], run_s
 
 def plan_rules(config: Config, feed_id: str | None = None) -> list[Planned]:
     """One check per gold rule that is not retired, on its dataset (with the dataset's feed, if any)."""
-    from hcsc.datalake.dre.checks.rules.rule_check import RuleCheck
-    from hcsc.datalake.dre.checks.rules.template import TEMPLATES
 
     planned = []
     for rule in config.rules.values():
@@ -258,7 +269,6 @@ def due_feeds(config: Config, work: list[Planned], events: dict[str, Event], cha
     """Feeds with something due (spec section 8): a cadence slot's deadline (slot + sla_hours)
     fell in one of the feed's dataset windows, i.e. passed since its last evaluation, or new or
     changed landed files were registered this run. Feeds in `forced` are always due."""
-    from hcsc.datalake.dre.checks.cadence import UnsupportedCalendar, slots
 
     due = set(forced)
     for p in work:
@@ -301,8 +311,6 @@ def refresh_landing(spark: SparkSession, config: Config, work: list[Planned], ru
     """List the landing roots of every file-pattern feed in the plan and, on a real run (run given),
     register new and changed files in dq_file, counting them per feed in `changed`. Returns feed
     id -> DID_NOT_RUN result for feeds whose landing could not be listed or registered."""
-    from hcsc.datalake.dre.sources.hdfs import LandingError, list_landing
-    from hcsc.datalake.dre.store.files import register_files
 
     feeds = {p.feed.feed: p.feed for p in work if p.feed is not None and p.feed.landing is not None}
     problems: dict[str, CheckResult] = {}
@@ -329,7 +337,6 @@ def refresh_landing(spark: SparkSession, config: Config, work: list[Planned], ru
 def upstreams_of(config: Config, ds: Dataset) -> dict[str, Dataset]:
     """The datasets a check on `ds` reads: each key_map upstream and, when one is derived, the
     datasets it is derived from."""
-    from hcsc.datalake.dre.checks.derived import base_datasets
 
     found = {u: config.datasets[u] for u in ds.key_map if u in config.datasets}
     for up in list(found.values()):
@@ -402,8 +409,6 @@ def incomplete_rows(evaluation: Evaluation, rows: list[dict[str, Any]], now: dat
 
 def write_key_events(db: str, evaluation: Evaluation, rows: list[dict[str, Any]], run: runs.Run) -> None:
     """Append each result's key events (hop checks) with the result's evaluation id."""
-    from hcsc.datalake.dre.checks.hop.common import hop_label
-    from hcsc.datalake.dre.store.key_events import append_key_events
 
     for result, row in zip(evaluation.results, rows):
         if result.key_events is not None:
@@ -429,9 +434,6 @@ def explain_failures(spark: SparkSession, config: Config, evaluation: Evaluation
     the watchdog and retried by the next NORMAL run (retry_investigations)."""
     from collections import Counter
 
-    from hcsc.datalake.dre.causes.base import CauseContext
-    from hcsc.datalake.dre.causes.engine import explain, failure_type, summarise
-    from hcsc.datalake.dre.store.causes import append_cause_results
 
     p = evaluation.planned
     ft = failure_type(p.feed.pattern if p.feed else None, p.check.check_id)
@@ -465,7 +467,6 @@ def pending_investigations(spark: SparkSession, config: Config, since: date,
     """FAILED NORMAL results since `since` that are still their check's (and group's) latest result
     and have no dq_cause_result rows: investigations a run could not finish. Both scans are bounded
     by run_date."""
-    from hcsc.datalake.dre.notify.digest import GROUPS_SQL
 
     db = config.defaults.dq_database
     day = f"DATE'{since.isoformat()}'"
@@ -483,7 +484,6 @@ def retry_investigations(spark: SparkSession, config: Config, run: runs.Run, key
                          tally: Investigations, skip: set[str]) -> list[str]:
     """Explain again, against the data as it is now, the FAILED results whose investigation a run
     could not finish (pending_investigations). Each counts in this run's tally."""
-    from hcsc.datalake.dre.causes.engine import failure_type
 
     since = run.run_date - timedelta(days=config.defaults.investigation_retry_days)
     by_check = {(p.dataset.dataset, p.check.check_id, p.feed.feed if p.feed else None): p
@@ -516,8 +516,6 @@ def drop_judged_views(spark: SparkSession, evaluation: Evaluation) -> None:
 
 def email_digests(spark: SparkSession, config: Config, run: runs.Run) -> list[str]:
     """Build this run's digests from the store and send them; never stops the run."""
-    from hcsc.datalake.dre.notify.digest import digests_for_run, to_send
-    from hcsc.datalake.dre.notify.sinks import deliver, from_digests
 
     try:
         digests = digests_for_run(spark, config, run)
@@ -626,7 +624,6 @@ def unchanged(rows: list[dict[str, Any]], stored: dict[str, tuple[Any, ...]]) ->
 def run(spark: SparkSession, conf: str, feed_id: str | None = None, selection: Selection | None = None) -> int:
     """One run. NORMAL (scheduled hourly): only feeds with something due are evaluated; --feed
     forces one. RERUN and REPLAY: historical windows (module docstring)."""
-    from hcsc.datalake.dre.store.install import missing_objects
 
     selection = selection or Selection()
     config = _load(conf, "run")
@@ -737,7 +734,6 @@ def run(spark: SparkSession, conf: str, feed_id: str | None = None, selection: S
 
 def dry_run(spark: SparkSession, conf: str, feed_id: str) -> int:
     """Preconditions and checks for one feed, printed; nothing is written. Exit 0 unless it cannot start."""
-    from hcsc.datalake.dre.config.fragments import check_fragments
 
     config = _load(conf, "dry-run")
     if config is None:

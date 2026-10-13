@@ -12,10 +12,12 @@ import yaml
 
 from hcsc.datalake.dre.causes.base import CauseContext, Failure
 from hcsc.datalake.dre.causes.failures import failures_for
-from hcsc.datalake.dre.checks import registry
-from hcsc.datalake.dre.checks.base import Check, CheckContext, CheckResult, configured_params, run_check
+from hcsc.datalake.dre.checks import patterns as pattern_files
+from hcsc.datalake.dre.checks.base import Check, CheckContext, CheckResult, run_check
+from hcsc.datalake.dre.checks.patterns import configured_params
 from hcsc.datalake.dre.checks.events import Event
-from hcsc.datalake.dre.checks.registry import CHECKS, checks_for
+from hcsc.datalake.dre.checks.registry import CHECKS
+from hcsc.datalake.dre.checks.patterns import checks_for
 from hcsc.datalake.dre.config.loader import load
 from hcsc.datalake.dre.config.models import Cadence, Dataset, Feed
 from hcsc.datalake.dre.config.validate import validate_conf
@@ -50,12 +52,12 @@ def feed(**extra) -> Feed:
 @pytest.fixture
 def pattern_defaults(monkeypatch):
     """A TABLE_MERGE pattern giving T1_FRESHNESS defaults."""
-    monkeypatch.setattr(registry, "_load_pattern", lambda pattern: yaml.safe_load(
+    monkeypatch.setattr(pattern_files, "_load_pattern", lambda pattern: yaml.safe_load(
         "pattern: TABLE_MERGE\nchecks:\n  - T1_KEY_NULLS\n  - {check: T1_FRESHNESS, params: {max_age_hours: 6}}\n"
         "  - T1_COLUMN_RANGE\n"))
-    registry._pattern_checks.cache_clear()
+    pattern_files.clear_pattern_caches()
     yield
-    registry._pattern_checks.cache_clear()
+    pattern_files.clear_pattern_caches()
 
 
 def test_params_resolve_pattern_then_feed_then_dataset(pattern_defaults) -> None:
@@ -82,14 +84,14 @@ def test_params_resolve_pattern_then_feed_then_dataset(pattern_defaults) -> None
     ("T1_KEY_NULLS", "lists a check twice"),
 ])
 def test_malformed_pattern_entries_are_rejected(monkeypatch, entry, message) -> None:
-    monkeypatch.setattr(registry, "_load_pattern", lambda pattern: yaml.safe_load(
+    monkeypatch.setattr(pattern_files, "_load_pattern", lambda pattern: yaml.safe_load(
         f"pattern: TABLE_MERGE\nchecks:\n  - T1_KEY_NULLS\n  - {entry}\n"))
-    registry._pattern_checks.cache_clear()
+    pattern_files.clear_pattern_caches()
     try:
         with pytest.raises(ValueError, match=message):
-            registry.pattern_check_ids("TABLE_MERGE")
+            pattern_files.pattern_check_ids("TABLE_MERGE")
     finally:
-        registry._pattern_checks.cache_clear()
+        pattern_files.clear_pattern_caches()
 
 
 def _errors(conf: Path) -> tuple[list, list]:
@@ -155,8 +157,8 @@ def test_a_missing_field_set_in_the_feed_is_fine(conf: Path) -> None:
 
 
 def test_a_check_the_pattern_does_not_list_is_a_warning(conf: Path, monkeypatch) -> None:
-    monkeypatch.setattr(registry, "_load_pattern", lambda pattern: yaml.safe_load("pattern: x\nchecks: [T1_KEY_NULLS]\n"))
-    registry._pattern_checks.cache_clear()
+    monkeypatch.setattr(pattern_files, "_load_pattern", lambda pattern: yaml.safe_load("pattern: x\nchecks: [T1_KEY_NULLS]\n"))
+    pattern_files.clear_pattern_caches()
     try:
         edit(conf, GOLD, SAMPLE_ENTRY, "  T1_FRESHNESS: { max_age_hours: 1 }")
         errors, warnings = _errors(conf)
@@ -164,7 +166,7 @@ def test_a_check_the_pattern_does_not_list_is_a_warning(conf: Path, monkeypatch)
         [w] = [w for w in warnings if w.field == "check_params.T1_FRESHNESS"]
         assert "does not list T1_FRESHNESS" in w.problem
     finally:
-        registry._pattern_checks.cache_clear()
+        pattern_files.clear_pattern_caches()
 
 
 def test_bad_params_at_run_time_are_did_not_run(spark) -> None:

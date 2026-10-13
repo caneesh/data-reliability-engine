@@ -13,9 +13,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import Field
 
-from hcsc.datalake.dre.checks.base import (
-    FAILED, PASSED, Check, CheckContext, CheckResult, did_not_run, group_values, render_sql, utc_literal,
-)
+from hcsc.datalake.dre.checks.base import FAILED, PASSED, Check, CheckContext, CheckResult, did_not_run, group_values, render_sql, utc_literal
 from hcsc.datalake.dre.checks.registry import register_check
 from hcsc.datalake.dre.checks.times import as_utc, utc_expr
 from hcsc.datalake.dre.config.models import Model

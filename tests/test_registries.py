@@ -14,11 +14,12 @@ import yaml
 
 from hcsc.datalake.dre.causes.base import BUILTINS, CauseContext, Failure, Outcome, builtin, confirmed, ruled_out
 from hcsc.datalake.dre.causes.engine import run_entry
-from hcsc.datalake.dre.checks import registry
+from hcsc.datalake.dre.checks import patterns as pattern_files
 from hcsc.datalake.dre.checks.base import Check, CheckContext, CheckResult, from_counts, run_check
 from hcsc.datalake.dre.checks.events import Event
 from hcsc.datalake.dre.checks.keys import NORMALISERS, Normaliser, NormaliserError, key_exprs, register_normaliser
-from hcsc.datalake.dre.checks.registry import CHECKS, CauseEntry, checks_for, pattern_check_ids, patterns, register_check
+from hcsc.datalake.dre.checks.registry import CHECKS, register_check
+from hcsc.datalake.dre.checks.patterns import CauseEntry, checks_for, pattern_check_ids, patterns
 from hcsc.datalake.dre.checks.rules.rule_check import RuleCheck
 from hcsc.datalake.dre.checks.rules.template import TEMPLATES, TemplateSpec, register_template
 from hcsc.datalake.dre.config.loader import load
@@ -106,13 +107,13 @@ class RowsAtMost(Check):
 
 def test_a_check_registers_from_its_own_module_and_a_pattern_lists_it(spark, monkeypatch) -> None:
     with CHECKS.temporary("X_ROWS_AT_MOST", RowsAtMost()):
-        monkeypatch.setattr(registry, "_load_pattern", lambda pattern: yaml.safe_load(
+        monkeypatch.setattr(pattern_files, "_load_pattern", lambda pattern: yaml.safe_load(
             "pattern: FILE_CYCLIC\nchecks: [T1_ON_TIME, X_ROWS_AT_MOST]\n"))
-        registry._pattern_checks.cache_clear()
+        pattern_files.clear_pattern_caches()
         try:
             assert [c.check_id for c in checks_for(gold("x.y"), "FILE_CYCLIC")] == ["T1_ON_TIME", "X_ROWS_AT_MOST"]
         finally:
-            registry._pattern_checks.cache_clear()
+            pattern_files.clear_pattern_caches()
         check = CHECKS["X_ROWS_AT_MOST"]
         create_table(spark, "ext.three", GOLD_COLUMNS, [gold_row(sub_id=s) for s in ("1", "2", "3")])
         create_table(spark, "ext.one", GOLD_COLUMNS, [gold_row(sub_id="1")])
@@ -121,10 +122,10 @@ def test_a_check_registers_from_its_own_module_and_a_pattern_lists_it(spark, mon
         assert (run("ext.three").state, run("ext.three").violations) == ("FAILED", 1)
         assert run("ext.one").state == "PASSED"
         assert (run("ext.none").state, run("ext.none").reason_code) == ("DID_NOT_RUN", "empty_population")
-    registry._pattern_checks.cache_clear()
+    pattern_files.clear_pattern_caches()
     with pytest.raises(ValueError, match="unknown checks"):
         pattern_check_ids("FILE_CYCLIC")  # the pattern still names the check, which is gone again
-    registry._pattern_checks.cache_clear()
+    pattern_files.clear_pattern_caches()
     with pytest.raises(ValueError, match="registered twice"):
         register_check(CHECKS["T1_ON_TIME"])
 
@@ -190,15 +191,15 @@ def test_a_builtin_cause_registers_by_code(cause_context) -> None:
 
 
 def test_a_pattern_naming_an_unknown_builtin_is_rejected(monkeypatch) -> None:
-    monkeypatch.setattr(registry, "_load_pattern", lambda pattern: yaml.safe_load(
+    monkeypatch.setattr(pattern_files, "_load_pattern", lambda pattern: yaml.safe_load(
         "causes:\n  x:\n    checks: [T1_ON_TIME]\n    order:\n      - {code: NOT_A_CAUSE, probe: builtin}\n"
         "      - {code: B, fallback: true}\n"))
-    registry.pattern_causes.cache_clear()
+    pattern_files.clear_pattern_caches()
     try:
         with pytest.raises(ValueError, match="names no builtin cause check"):
-            registry.pattern_causes("FILE_CYCLIC")
+            pattern_files.pattern_causes("FILE_CYCLIC")
     finally:
-        registry.pattern_causes.cache_clear()
+        pattern_files.clear_pattern_caches()
 
 
 # --- a rule template from its own module ---

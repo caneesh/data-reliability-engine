@@ -20,7 +20,7 @@ from hcsc.datalake.dre.causes.base import (
 )
 from hcsc.datalake.dre.causes.failures import failures_for
 from hcsc.datalake.dre.checks.hop.common import hop_label as hop_label_of
-from hcsc.datalake.dre.checks.registry import CauseEntry, FailureType, pattern_causes
+from hcsc.datalake.dre.checks.patterns import CauseEntry, FailureType, pattern_causes
 from hcsc.datalake.dre.config.probes import BUILTIN, PROBES, is_ready, parameter_sets
 
 if TYPE_CHECKING:

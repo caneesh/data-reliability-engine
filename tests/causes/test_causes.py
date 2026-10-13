@@ -24,7 +24,7 @@ from hcsc.datalake.dre.causes.probes import (
 from hcsc.datalake.dre.checks.base import CheckContext, CheckResult
 from hcsc.datalake.dre.checks.events import Event
 from hcsc.datalake.dre.checks.hop.common import key_hash
-from hcsc.datalake.dre.checks.registry import CauseEntry
+from hcsc.datalake.dre.checks.patterns import CauseEntry
 from hcsc.datalake.dre.config.models import Cadence, Dataset, Feed, Landing, TimeColumn
 from hcsc.datalake.dre.store.local_setup import create_store
 from tests.checks.test_hop import curated, gold

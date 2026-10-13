@@ -8,10 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from hcsc.datalake.dre.checks.registry import (
-    checks_for, is_file_pattern, pattern_causes, pattern_check_ids, pattern_kind, pattern_origin, patterns,
-    use_conf_patterns,
-)
+from hcsc.datalake.dre.checks.patterns import checks_for, is_file_pattern, pattern_causes, pattern_check_ids, pattern_kind, pattern_origin, patterns, use_conf_patterns
 from hcsc.datalake.dre.config.loader import load
 from hcsc.datalake.dre.config.validate import validate_conf
 from tests.config.conftest import edit

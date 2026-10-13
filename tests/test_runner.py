@@ -290,7 +290,7 @@ def test_the_full_sweep_runs_once_on_its_day_not_in_every_run() -> None:
 def test_weekly_rules_use_rule_weekly_day_when_set(monkeypatch, tmp_path) -> None:
     import shutil
 
-    from hcsc.datalake.dre.checks.rules import schedule
+    from hcsc.datalake.dre import runner
     from hcsc.datalake.dre.config.loader import load
     from hcsc.datalake.dre.runner import plan_rules, rules_due
     from tests.conftest import REPO_ROOT
@@ -302,8 +302,8 @@ def test_weekly_rules_use_rule_weekly_day_when_set(monkeypatch, tmp_path) -> Non
                         encoding="utf-8")
     config, _ = load(conf)
     days = []
-    monkeypatch.setattr(schedule, "last_completed", lambda spark, db: {})
-    monkeypatch.setattr(schedule, "is_due", lambda freq, start, at, tz, day, done: days.append(day) or True)
+    monkeypatch.setattr(runner, "last_completed", lambda spark, db: {})
+    monkeypatch.setattr(runner, "is_due", lambda freq, start, at, tz, day, done: days.append(day) or True)
     rules_due(None, config, plan_rules(config), datetime(2026, 1, 16, tzinfo=timezone.utc))
     assert set(days) == {"MONDAY"}
 

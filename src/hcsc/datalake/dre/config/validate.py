@@ -15,17 +15,17 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from hcsc.datalake.dre.checks.patterns import (
+    conf_pattern_names, configured_params, is_file_pattern, pattern_causes, pattern_check_ids, pattern_check_params,
+    pattern_checks, pattern_file, pattern_kind, probe_keys, TABLE_WIDE,
+)
+from hcsc.datalake.dre.checks.registry import CHECKS
+from hcsc.datalake.dre.checks.rules.template import TEMPLATES
 from hcsc.datalake.dre.config.loader import (
-    Config,
-    ConfigError,
-    describe,
-    errors_from_validation,
-    format_loc,
-    line_of,
-    load,
+    Config, ConfigError, describe, errors_from_validation, format_loc, line_of, load,
 )
 from hcsc.datalake.dre.config.models import DERIVED_LOAD, DERIVED_RECORD
-from hcsc.datalake.dre.config.probes import PROBES, parameter_sets
+from hcsc.datalake.dre.config.probes import parameter_sets, PROBES
 
 # Checks whose evaluation window is defined by load time (spec section 6).
 LOAD_TIME_CHECKS = ("T1_ON_TIME", "T1_ZERO_ROWS", "T1_VOLUME", "T1_KEY_NULLS")
@@ -260,7 +260,6 @@ def cross_check(config: Config, feeds_complete: bool = True) -> list[ConfigError
     errors.extend(_upstream_cycles(config))
 
     # Rules: dataset, owner, template params, the datasets the template names.
-    from hcsc.datalake.dre.checks.rules.template import TEMPLATES
 
     for rule_id, rule in config.rules.items():
         if rule.dataset not in datasets:
@@ -283,8 +282,6 @@ def cross_check(config: Config, feeds_complete: bool = True) -> list[ConfigError
 
 
 def _is_file_pattern(pattern: str) -> bool:
-    from hcsc.datalake.dre.checks.registry import is_file_pattern
-
     try:
         return is_file_pattern(pattern)
     except ValueError:
@@ -295,14 +292,11 @@ def _check_patterns(config: Config) -> tuple[list[ConfigError], set[str]]:
     """Each conf/patterns file loads: `pattern` matches its name, `kind` is set, every check, probe
     type and builtin cause it names is registered, cause lists are well formed. Returns the errors
     and the names of the patterns that failed, so nothing else is checked against those."""
-    from hcsc.datalake.dre.checks.registry import (
-        _conf_names, _pattern_checks, pattern_causes, pattern_file, pattern_kind,
-    )
 
     found = []
     broken: set[str] = set()
-    for pattern in sorted(_conf_names()):
-        for read in (pattern_kind, _pattern_checks, pattern_causes):
+    for pattern in sorted(conf_pattern_names()):
+        for read in (pattern_kind, pattern_checks, pattern_causes):
             try:
                 read(pattern)
             except ValueError as exc:
@@ -319,10 +313,7 @@ def _check_check_params(config: Config, kind: str, obj_id: str, pattern: str | N
     its pattern lists. Then every check that will be planned for a dataset (configured at any level:
     pattern defaults, feed, dataset) must validate once merged: a wrong value is reported where it
     is written, a field missing at every level on the dataset."""
-    from pydantic import ValidationError
 
-    from hcsc.datalake.dre.checks.base import configured_params
-    from hcsc.datalake.dre.checks.registry import CHECKS, TABLE_WIDE, pattern_check_ids, pattern_check_params
 
     obj = ds if kind == "dataset" else feed
     source = config.sources[(kind, obj_id)]
@@ -382,8 +373,6 @@ def _check_check_params(config: Config, kind: str, obj_id: str, pattern: str | N
 
 
 def _value_errors(check: Any, merged: dict[str, Any]) -> list[dict[str, Any]]:
-    from pydantic import ValidationError
-
     try:
         check.params_model.model_validate(merged)
     except ValidationError as exc:
@@ -400,7 +389,6 @@ def ds_placeholder() -> Any:
 
 def _check_probes(config: Config, feed_id: str) -> list[ConfigError]:
     """Each `probes:` key must be one the feed's pattern uses, with parameters for its probe type."""
-    from hcsc.datalake.dre.checks.registry import probe_keys
 
     feed = config.feeds[feed_id]
     source = config.sources[("feed", feed_id)]

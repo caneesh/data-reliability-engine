@@ -7,9 +7,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from hcsc.datalake.dre.checks.base import (
-    Check, CheckContext, CheckResult, from_counts, group_values, needs_load_time, render_sql, utc_literal,
-)
+from hcsc.datalake.dre.checks.base import Check, CheckContext, CheckResult, from_counts, group_values, needs_load_time, render_sql, utc_literal
 from hcsc.datalake.dre.checks.registry import register_check
 from hcsc.datalake.dre.checks.times import utc_expr
 

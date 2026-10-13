@@ -17,15 +17,12 @@ from typing import Any, Callable
 import yaml
 from pydantic import BaseModel, ValidationError
 
-from hcsc.datalake.dre.config.models import (
-    SETTING_FIELDS,
-    Dataset,
-    Defaults,
-    Feed,
-    Rule,
-    Settings,
-    SettingsOverride,
-)
+from hcsc.datalake.dre.checks.calendars import calendar_from, CalendarFile, CALENDARS
+from hcsc.datalake.dre.checks.patterns import use_conf_patterns
+from hcsc.datalake.dre.checks.rules.conf_template import check_template_file, spec_from, TemplateFile
+from hcsc.datalake.dre.checks.rules.template import TEMPLATES
+from hcsc.datalake.dre.config.models import Dataset, Defaults, Feed, Rule, SETTING_FIELDS, Settings, SettingsOverride
+from hcsc.datalake.dre.extensions import sync_extensions
 
 KINDS: dict[str, tuple[str, type[BaseModel]]] = {
     # directory: (id field, model)
@@ -236,7 +233,6 @@ def _load_extensions(data: Any, display: str, node: yaml.Node | None) -> list[Co
     """`extensions:` in defaults.yaml, read from the raw mapping so the extensions load before the
     defaults validate (their sinks are validated against the sink registry). The list is the whole
     truth: extensions not in it are unloaded. Each problem is a config error on the `extensions` line."""
-    from hcsc.datalake.dre.extensions import sync_extensions
 
     names = data.get("extensions") if isinstance(data, dict) else None
     if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
@@ -291,25 +287,16 @@ def _origin(registry: Any, item_id: str) -> str:
 
 
 def _load_templates(config: Config) -> list[ConfigError]:
-    from hcsc.datalake.dre.checks.rules.conf_template import TemplateFile, check_template_file, spec_from
-    from hcsc.datalake.dre.checks.rules.template import TEMPLATES
-
     return _load_conf_registry(config, "templates", "template", TemplateFile, TEMPLATES, spec_from, check_template_file)
 
 
 def _load_calendars(config: Config) -> list[ConfigError]:
-    from hcsc.datalake.dre.checks.calendars import CALENDARS, CalendarFile, calendar_from
-
     return _load_conf_registry(config, "calendars", "calendar", CalendarFile, CALENDARS, calendar_from)
 
 
 def reset_conf_state() -> None:
     """Forget everything a loaded configuration put into the registries: conf patterns, templates,
     calendars and extensions (tests, and a process that switches configuration)."""
-    from hcsc.datalake.dre.checks.calendars import CALENDARS
-    from hcsc.datalake.dre.checks.registry import use_conf_patterns
-    from hcsc.datalake.dre.checks.rules.template import TEMPLATES
-    from hcsc.datalake.dre.extensions import sync_extensions
 
     use_conf_patterns(None)
     TEMPLATES.replace_conf({})
@@ -319,7 +306,6 @@ def reset_conf_state() -> None:
 
 def load(conf_dir: Path | str) -> tuple[Config, list[ConfigError]]:
     """Load and validate each file on its own. Cross-file checks are in validate.py."""
-    from hcsc.datalake.dre.checks.registry import use_conf_patterns
 
     conf_dir = Path(conf_dir)
     config = Config(conf_dir=conf_dir)

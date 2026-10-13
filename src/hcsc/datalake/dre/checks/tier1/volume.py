@@ -17,10 +17,7 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
-from hcsc.datalake.dre.checks.base import (
-    DID_NOT_RUN, FAILED, PASSED, REASONS, Check, CheckContext, CheckResult, did_not_run, double,
-    needs_load_time, render_sql, utc_literal,
-)
+from hcsc.datalake.dre.checks.base import DID_NOT_RUN, FAILED, PASSED, REASONS, Check, CheckContext, CheckResult, did_not_run, double, needs_load_time, render_sql, utc_literal
 from hcsc.datalake.dre.checks.cadence import UnsupportedCalendar, previous_slot, slot_label, slots
 from hcsc.datalake.dre.checks.registry import register_check
 from hcsc.datalake.dre.checks.times import utc_expr

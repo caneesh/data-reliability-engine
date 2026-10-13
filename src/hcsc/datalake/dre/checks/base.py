@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING, Any
 
 from jinja2 import Environment, PackageLoader, StrictUndefined
 
+from hcsc.datalake.dre.checks.patterns import resolve_params
+
 if TYPE_CHECKING:
     from pyspark.sql import SparkSession
 
@@ -143,30 +145,6 @@ class Check(ABC):
         """The failing things of a FAILED result, for the cause engine (spec section 7); None
         leaves it to causes/failures.py. A check with no cause checks needs neither."""
         return None
-
-
-def configured_params(check: Check, dataset: Dataset, feed: Feed | None, pattern: str | None) -> dict[str, Any] | None:
-    """The check's raw parameters: the pattern's defaults, then the feed's, then the dataset's
-    `check_params`, each overriding the one before; None when nothing configures the check."""
-    from hcsc.datalake.dre.checks.registry import TABLE_WIDE, pattern_check_params
-
-    levels = [pattern_check_params(pattern or TABLE_WIDE).get(check.check_id),
-              feed.check_params.get(check.check_id) if feed else None, dataset.check_params.get(check.check_id)]
-    if all(level is None for level in levels):
-        return None
-    merged: dict[str, Any] = {}
-    for level in levels:
-        merged.update(level or {})
-    return merged
-
-
-def resolve_params(check: Check, ctx: CheckContext) -> Any:
-    """The check's validated params instance (None for a check without a params model). Raises
-    pydantic.ValidationError on bad values (dre validate reports them with file and line)."""
-    if check.params_model is None:
-        return None
-    pattern = ctx.feed.pattern if ctx.feed else None
-    return check.params_model.model_validate(configured_params(check, ctx.dataset, ctx.feed, pattern) or {})
 
 
 def needs_load_time(ctx: CheckContext) -> CheckResult | None:

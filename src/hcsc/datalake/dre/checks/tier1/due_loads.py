@@ -14,9 +14,7 @@ from dataclasses import replace
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
-from hcsc.datalake.dre.checks.base import (
-    CheckContext, CheckResult, did_not_run, from_counts, needs_load_time, render_sql, utc_literal,
-)
+from hcsc.datalake.dre.checks.base import CheckContext, CheckResult, did_not_run, from_counts, needs_load_time, render_sql, utc_literal
 from hcsc.datalake.dre.checks.cadence import UnsupportedCalendar, slots
 from hcsc.datalake.dre.checks.times import as_utc, utc_expr
 

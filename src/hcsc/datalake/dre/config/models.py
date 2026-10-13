@@ -137,7 +137,7 @@ def _normaliser(value: Any) -> Any:
 
 def _pattern(value: str) -> str:
     """A feed pattern: packaged, or from the conf directory's patterns/ (checks/registry.py)."""
-    from hcsc.datalake.dre.checks.registry import patterns
+    from hcsc.datalake.dre.checks.patterns import patterns
 
     if value not in patterns():
         raise invalid(f"{value!r} is not allowed", f"use one of {list(patterns())}")
@@ -328,7 +328,7 @@ class Feed(SettingsOverride):
 
     @model_validator(mode="after")
     def _check(self) -> Feed:
-        from hcsc.datalake.dre.checks.registry import is_file_pattern
+        from hcsc.datalake.dre.checks.patterns import is_file_pattern
 
         try:
             file_kind = is_file_pattern(self.pattern)

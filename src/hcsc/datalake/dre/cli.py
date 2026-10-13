@@ -81,7 +81,7 @@ def validate(conf: str) -> int:
     if errors:
         print(f"dre validate: {len(errors)} error(s), {len(warnings)} warning(s) in {conf}")
         return 1
-    from hcsc.datalake.dre.checks.registry import pattern_origin, patterns
+    from hcsc.datalake.dre.checks.patterns import pattern_origin, patterns
 
     print(
         f"dre validate: {conf} is valid, {len(warnings)} warning(s) "

@@ -14,10 +14,9 @@ from dataclasses import replace
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
-from hcsc.datalake.dre.checks.base import (
-    Check, CheckContext, CheckResult, did_not_run, from_counts, render_sql, utc_literal,
-)
-from hcsc.datalake.dre.checks.registry import is_file_pattern, register_check
+from hcsc.datalake.dre.checks.base import Check, CheckContext, CheckResult, did_not_run, from_counts, render_sql, utc_literal
+from hcsc.datalake.dre.checks.registry import register_check
+from hcsc.datalake.dre.checks.patterns import is_file_pattern
 
 if TYPE_CHECKING:
     from hcsc.datalake.dre.checks.events import Event

@@ -83,7 +83,7 @@ def probe_contract(cx: CauseContext, kind: str, params_key: str, failure: Failur
     """A probe is NOT_READY when its parameters are not configured, never raises out of the
     engine, returns one of the four cause states, and its evidence is JSON with no key values."""
     from hcsc.datalake.dre.causes.engine import run_entry
-    from hcsc.datalake.dre.checks.registry import CauseEntry
+    from hcsc.datalake.dre.checks.patterns import CauseEntry
 
     unready = run_entry(cx, CauseEntry("X_CONTRACT", kind, "x_probe_contract_unconfigured"), failure)
     assert unready.state == "NOT_READY", f"an unconfigured probe is NOT_READY, not {unready.state} ({unready.evidence})"

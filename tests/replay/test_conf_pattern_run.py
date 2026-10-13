@@ -3,7 +3,7 @@ pattern's checks, its cause list, and nothing from the packaged pattern it repla
 
 from __future__ import annotations
 
-from hcsc.datalake.dre.checks.registry import use_conf_patterns
+from hcsc.datalake.dre.checks.patterns import use_conf_patterns
 from hcsc.datalake.dre.cli import main
 from tests.config.test_conf_patterns import RELOAD, drop_probes
 from tests.fixtures.layers import CURATED_COLUMNS, GOLD_COLUMNS, create_table

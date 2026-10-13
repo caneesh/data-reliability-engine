@@ -14,9 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import model_validator
 
-from hcsc.datalake.dre.checks.base import (
-    Check, CheckContext, CheckResult, double, from_counts, group_values, needs_load_time, render_sql, utc_literal,
-)
+from hcsc.datalake.dre.checks.base import Check, CheckContext, CheckResult, double, from_counts, group_values, needs_load_time, render_sql, utc_literal
 from hcsc.datalake.dre.checks.registry import register_check
 from hcsc.datalake.dre.checks.times import sql_string, utc_expr
 from hcsc.datalake.dre.config.models import Identifier, Model, invalid

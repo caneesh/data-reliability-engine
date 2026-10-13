@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from hcsc.datalake.dre.checks import registry
-from hcsc.datalake.dre.checks.registry import TABLE_WIDE, pattern_causes, patterns, probe_keys
+from hcsc.datalake.dre.checks import patterns as pattern_files
+from hcsc.datalake.dre.checks.patterns import TABLE_WIDE, pattern_causes, patterns, probe_keys
 from hcsc.datalake.dre.causes.probes import FileValueCompare, TableContains
 from hcsc.datalake.dre.config.probes import PROBES, is_ready
 from hcsc.datalake.dre.config.validate import validate_conf
@@ -37,7 +37,7 @@ def test_every_pattern_has_well_formed_cause_lists() -> None:
 def test_malformed_cause_lists_are_rejected(monkeypatch, yaml_text: str, message: str) -> None:
     import yaml
 
-    monkeypatch.setattr(registry, "_load_pattern", lambda pattern: yaml.safe_load(yaml_text))
+    monkeypatch.setattr(pattern_files, "_load_pattern", lambda pattern: yaml.safe_load(yaml_text))
     pattern_causes.cache_clear()
     try:
         with pytest.raises(ValueError, match=message):

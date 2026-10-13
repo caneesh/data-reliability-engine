@@ -13,9 +13,7 @@ import hashlib
 import json
 from typing import TYPE_CHECKING
 
-from hcsc.datalake.dre.checks.base import (
-    DID_NOT_RUN, FAILED, PASSED, REASONS, Check, CheckContext, CheckResult, did_not_run, render_sql,
-)
+from hcsc.datalake.dre.checks.base import DID_NOT_RUN, FAILED, PASSED, REASONS, Check, CheckContext, CheckResult, did_not_run, render_sql
 from hcsc.datalake.dre.checks.registry import register_check
 
 if TYPE_CHECKING:
