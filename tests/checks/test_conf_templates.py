@@ -144,7 +144,7 @@ def test_a_select_with_a_function_called_replace_is_fine() -> None:
 
 CASES = [
     ("write", "  SELECT {% for g in group_by %}", "  DROP TABLE {{ table }}\n  SELECT {% for g in group_by %}",
-     "sql", "DROP is not allowed", "one SELECT"),
+     "sql", "DROP is not allowed", "query over the tables"),
     ("jinja", "{{ time(params.column, params.format) }}", "{{ time(params.column ", "sql", "template syntax", "Jinja"),
     ("bad-type", "limit: { type: string }", "limit: { type: date }", "params.limit.type", "not allowed", "use one of"),
     ("packaged-name", "template: not_after", "template: max_rows_per_key", "template", "is a packaged template",

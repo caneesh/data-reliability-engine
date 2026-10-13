@@ -49,8 +49,13 @@ def _table(value: str) -> str:
 
 
 def _sql_fragment(value: str) -> str:
+    from hcsc.datalake.dre.config.sqlcheck import forbidden_sql
+
     if ";" in value:
         raise invalid("SQL fragment contains ';'", "use a single SQL expression without ';'")
+    problem = forbidden_sql(value)
+    if problem is not None:
+        raise invalid(problem.problem, problem.fix)
     return value
 
 

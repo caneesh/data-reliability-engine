@@ -119,7 +119,9 @@ def _is_dq(target: str, is_database: bool) -> bool:
     return any(t.startswith(f"{name}.") for name in names)
 
 
-def scan_text(text: str, path: str = "<text>") -> list[Violation]:
+def scan_text(text: str, path: str = "<text>", allowances: bool = True) -> list[Violation]:
+    """Violations in one file's text. `allowances` applies the engine's own path allowances (the
+    writer, the DDL file, retention, local setup); `dre guard` scans other trees without them."""
     found: list[Violation] = []
 
     def add(pos: int, label: str, target: str, reason: str) -> None:
@@ -135,9 +137,10 @@ def scan_text(text: str, path: str = "<text>") -> list[Violation]:
                 add(m.start(), label, m.group("target"), "allowed only on the dq store")
 
     norm = path.replace("\\", "/")
-    in_retention = norm.endswith(RETENTION_MODULE)
+    allowed = (lambda module: allowances and (norm == module or norm.endswith("/" + module)))  # noqa: E731
+    in_retention = allowed(RETENTION_MODULE)
 
-    if not norm.endswith(WRITER_MODULE):
+    if not allowed(WRITER_MODULE):
         for m in _WRITE_API.finditer(text):
             add(m.start(), "write API", m.group("target"), f"allowed only in {WRITER_MODULE}")
 
@@ -145,14 +148,14 @@ def scan_text(text: str, path: str = "<text>") -> list[Violation]:
         target = m.group("target")
         if not _is_dq(target, False):
             add(m.start(), "CREATE", target, "allowed only on the dq store")
-        elif not norm.endswith(DDL_FILE):
+        elif not allowed(DDL_FILE):
             add(m.start(), "CREATE", target, f"allowed only in {DDL_FILE} (applied by dre install)")
 
     for m in _CREATE_DATABASE.finditer(text):
         target = m.group("target")
         if not _is_dq(target, True):
             add(m.start(), "CREATE DATABASE", target, "allowed only for the dq database")
-        elif not norm.endswith(LOCAL_SETUP_MODULE):
+        elif not allowed(LOCAL_SETUP_MODULE):
             add(m.start(), "CREATE DATABASE", target, f"allowed only in {LOCAL_SETUP_MODULE}")
 
     for m in _ALTER_TABLE.finditer(text):
@@ -168,24 +171,28 @@ def scan_text(text: str, path: str = "<text>") -> list[Violation]:
     return sorted(found, key=lambda v: (v.path, v.line))
 
 
-def scan_tree(root: Path) -> list[Violation]:
+def scan_tree(root: Path, allowances: bool = True) -> list[Violation]:
+    """Violations under a tree. With `allowances` (the engine's own scan from src/) the engine's
+    privileged files are allowed their one operation each and the scanner module is skipped;
+    without them (`dre guard` on any other tree) every file is held to every rule."""
     found: list[Violation] = []
     for file in sorted(root.rglob("*")):
         if not file.is_file() or file.suffix not in _SCANNED_SUFFIXES or "__pycache__" in file.parts:
             continue
         rel = file.relative_to(root.parent).as_posix()
-        if rel.endswith(GUARD_MODULE):
+        if allowances and rel.endswith("/" + GUARD_MODULE):
             continue
-        found.extend(scan_text(file.read_text(encoding="utf-8"), rel))
+        found.extend(scan_text(file.read_text(encoding="utf-8", errors="replace"), rel, allowances))
     return found
 
 
 def files_mentioning(root: Path, needle: str) -> list[str]:
-    """Files under root whose text contains needle (used by the email guard)."""
+    """Scanned files under root whose text contains needle (used by the email and local-setup guards)."""
     return sorted(
         f.relative_to(root).as_posix()
         for f in root.rglob("*")
-        if f.is_file() and "__pycache__" not in f.parts and needle in f.read_text(encoding="utf-8")
+        if f.is_file() and f.suffix in _SCANNED_SUFFIXES and "__pycache__" not in f.parts
+        and needle in f.read_text(encoding="utf-8", errors="replace")
     )
 
 
@@ -195,7 +202,10 @@ def guard_command(root: Path) -> int:
     if not root.exists():
         print(f"dre guard: {root} does not exist")
         return 3
-    violations = scan_tree(root) if root.is_dir() else scan_text(root.read_text(encoding="utf-8"), root.name)
+    if root.is_dir():
+        violations = scan_tree(root, allowances=False)
+    else:
+        violations = scan_text(root.read_text(encoding="utf-8", errors="replace"), root.name, allowances=False)
     for violation in violations:
         print(violation)
     print(f"dre guard: {len(violations)} violation(s) under {root}")

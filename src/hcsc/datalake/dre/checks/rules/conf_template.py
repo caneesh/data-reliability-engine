@@ -7,14 +7,12 @@ group_by). It becomes a TemplateSpec like a packaged one, so RuleCheck runs it t
 Configuration is never code, so two guards hold (spec section 9, rule 10):
 - The SQL renders in a sandboxed Jinja environment with a fixed set of helpers, and always runs
   wrapped as `SELECT * FROM (...) dre_rule`, so anything but a query is a parse error.
-- `dre validate` rejects a template whose text carries a write or DDL keyword, naming the file
-  and line, before anything reaches Spark.
+- `dre validate` rejects a template whose text carries a write or DDL verb, TRANSFORM, or a
+  Java-method call (config/sqlcheck.py), naming the file and line, before anything reaches Spark.
 """
 
 from __future__ import annotations
 
-import re
-from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
 from jinja2 import StrictUndefined, TemplateSyntaxError
@@ -26,17 +24,13 @@ from hcsc.datalake.dre.checks.keys import column_expr, key_exprs
 from hcsc.datalake.dre.checks.rules.template import TEMPLATES, TemplateSpec, time_expr
 from hcsc.datalake.dre.checks.times import sql_string
 from hcsc.datalake.dre.config.models import Dataset, Identifier, Model, NonEmptyStr, SqlFragment, invalid
+from hcsc.datalake.dre.config.sqlcheck import SqlProblem, forbidden_sql
 
 ParamType = Literal["string", "int", "float", "bool", "column", "columns", "sql", "format"]
 _TYPES: dict[str, Any] = {
     "string": str, "int": int, "float": float, "bool": bool, "column": Identifier,
     "columns": list[Identifier], "sql": SqlFragment, "format": NonEmptyStr,
 }
-# Statements configuration SQL must never carry (defense in depth: the subquery wrapping already
-# makes them a parse error).
-_FORBIDDEN = re.compile(
-    r"\b(INSERT|UPDATE|DELETE|MERGE|DROP|ALTER|TRUNCATE|CREATE|LOAD|GRANT|REVOKE|MSCK|REFRESH|CACHE|UNCACHE|"
-    r"ANALYZE|ADD\s+(JAR|FILE))\b", re.I)
 WRAP = "dre_rule"
 
 
@@ -65,21 +59,9 @@ class TemplateFile(Model):
         return dict(self.params)
 
 
-@dataclass(frozen=True)
-class SqlProblem:
-    line: int
-    problem: str
-    fix: str
-
-
 def forbidden_statement(text: str) -> SqlProblem | None:
-    """The first write or DDL keyword in a template's text, with its line."""
-    for number, line in enumerate(text.splitlines(), 1):
-        hit = _FORBIDDEN.search(line)
-        if hit:
-            return SqlProblem(number, f"{hit.group(0).upper()} is not allowed in a rule template (hard rule 1: read-only)",
-                              "a template is one SELECT (or WITH ... SELECT) returning population and violations")
-    return None
+    """The first forbidden SQL word in a template's text, with its line (config/sqlcheck.py)."""
+    return forbidden_sql(text)
 
 
 def syntax_problem(text: str) -> SqlProblem | None:

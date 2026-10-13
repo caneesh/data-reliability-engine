@@ -142,6 +142,25 @@ def test_dre_guard_passes_the_example_and_fails_a_write(tmp_path: Path, capsys) 
     assert main(["guard", str(tmp_path / "missing")]) == 3
 
 
+def test_dre_guard_grants_an_extension_none_of_the_engine_s_allowances(tmp_path: Path, capsys) -> None:
+    """Files named like the engine's privileged ones (its writer, DDL file, local setup, the scanner
+    module) get no allowance when they sit in another tree."""
+    ext = tmp_path / "ext" / "hcsc" / "datalake" / "dre"
+    (ext / "store").mkdir(parents=True)
+    (ext / "store" / "writer.py").write_text("def f(df):\n    df.write.insertInto('dq.dq_run')\n")
+    (ext / "store" / "ddl.sql").write_text("CREATE TABLE dq.extra (x INT)\n")
+    (ext / "store" / "local_setup.py").write_text("spark.sql('CREATE DATABASE IF NOT EXISTS dq')\n")
+    (ext / "guard.py").write_text("spark.sql('DROP TABLE gold_db.member_coverage')\n")
+    assert main(["guard", str(tmp_path / "ext")]) == 1
+    out = capsys.readouterr().out
+    for expected in ("write API '.write'", "CREATE 'dq.extra'", "CREATE DATABASE 'dq'", "DROP 'gold_db.member_coverage'"):
+        assert expected in out, out
+    assert main(["guard", str(ext / "guard.py")]) == 1  # a single file is scanned the same way
+    from hcsc.datalake.dre import guard
+
+    assert guard.scan_tree(tmp_path / "ext") == []  # the engine's own scan, with allowances, still allows them
+
+
 def test_the_guard_module_is_the_one_file_the_scan_skips_and_holds_no_operations() -> None:
     from hcsc.datalake.dre import guard
 
