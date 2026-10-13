@@ -265,7 +265,8 @@ def _load_templates(config: Config) -> list[ConfigError]:
             errors.extend(errors_from_validation(exc, display, node))
             continue
         if problem is not None:
-            errors.append(ConfigError(display, line_of(node, ("sql",)) + problem.line, "sql", problem.problem, problem.fix))
+            errors.append(ConfigError(display, line_of(node, problem.loc) + problem.line, format_loc(problem.loc),
+                                      problem.problem, problem.fix))
             continue
         if file.template in config.templates:
             errors.append(ConfigError(display, line_of(node, ("template",)), "template",

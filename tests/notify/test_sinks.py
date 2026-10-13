@@ -119,5 +119,27 @@ def _minimal_defaults() -> dict:
     return yaml.safe_load((SAMPLE_CONF / "defaults.yaml").read_text(encoding="utf-8"))
 
 
-def test_stdout_sink_prints_and_reports() -> None:
-    assert StdoutSink().send([]) == []
+def test_stdout_prints_counts_unless_asked_for_the_body(capsys) -> None:
+    """A11: the run's stdout is a log; a digest prints as its subject and counts unless full_body."""
+    digest_like = Message("o", "DRE dev: 1 new failures, 0 checks did not run", "src_sys_nm=SRC_A: HOP_KEY_CURRENCY FAILED",
+                          ["a@example.org"], summary="1 new failures, 0 checks did not run, 0 still failing, 3 passing")
+    assert StdoutSink().send([digest_like]) == ["stdout for o: DRE dev: 1 new failures, 0 checks did not run (printed)"]
+    out = capsys.readouterr().out
+    assert "3 passing" in out and "src_sys_nm=SRC_A" not in out
+    StdoutSink(full_body=True).send([digest_like])
+    assert "src_sys_nm=SRC_A" in capsys.readouterr().out
+    StdoutSink().send([Message("watchdog", "DRE dev: watchdog", "run r1 is still STARTED", ["a@example.org"])])
+    assert "run r1 is still STARTED" in capsys.readouterr().out  # no summary: the body is counts and ids already
+    assert validate_sink_config({"kind": "stdout", "full_body": True}).full_body is True
+
+
+def test_digests_carry_a_counts_summary_for_log_sinks() -> None:
+    from datetime import datetime, timezone
+
+    from hcsc.datalake.dre.notify.digest import Digest, Item
+    from hcsc.datalake.dre.notify.sinks import from_digests
+
+    digest = Digest("o", ["a@example.org"], "dev", "r1", datetime(2026, 1, 1, tzinfo=timezone.utc), passing=3,
+                    did_not_run=[Item("ds", "T1_ON_TIME", "DID_NOT_RUN", "", "", "", "")])
+    [message] = from_digests([digest])
+    assert message.summary.startswith("0 new failures, 1 checks did not run, 0 still failing, 3 passing")

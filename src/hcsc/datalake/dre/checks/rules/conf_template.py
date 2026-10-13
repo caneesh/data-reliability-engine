@@ -13,17 +13,18 @@ Configuration is never code, so two guards hold (spec section 9, rule 10):
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
 from jinja2 import StrictUndefined, TemplateSyntaxError
 from jinja2.sandbox import SandboxedEnvironment
-from pydantic import BeforeValidator, Field, create_model
+from pydantic import BeforeValidator, Field, TypeAdapter, ValidationError, create_model
 
 from hcsc.datalake.dre.checks.base import double
 from hcsc.datalake.dre.checks.keys import column_expr, key_exprs
 from hcsc.datalake.dre.checks.rules.template import TEMPLATES, TemplateSpec, time_expr
 from hcsc.datalake.dre.checks.times import sql_string
-from hcsc.datalake.dre.config.models import Dataset, Identifier, Model, NonEmptyStr, SqlFragment, invalid
+from hcsc.datalake.dre.config.models import Dataset, Identifier, Model, NonEmptyStr, SqlFragment
 from hcsc.datalake.dre.config.sqlcheck import SqlProblem, forbidden_sql
 
 ParamType = Literal["string", "int", "float", "bool", "column", "columns", "sql", "format"]
@@ -83,8 +84,8 @@ def params_model(file: TemplateFile) -> type[Model]:
         kind = _TYPES[spec.type]
         if spec.required and spec.default is None:
             fields[name] = (kind, ...)
-        else:
-            fields[name] = (kind | None, Field(default=spec.default))
+        else:  # the default is validated against the declared type like any value (validate_default)
+            fields[name] = (kind | None, Field(default=spec.default, validate_default=True))
     return create_model(f"ConfTemplate_{file.template}", __base__=Model, **fields)
 
 
@@ -145,16 +146,40 @@ def conf_template_ids() -> frozenset[str]:
     return frozenset(_CONF_IDS)
 
 
-def check_template_file(file: TemplateFile) -> SqlProblem | None:
-    """Static problems: a forbidden statement, or Jinja syntax."""
-    problem = forbidden_statement(file.sql)
-    if problem is not None:
-        return problem
-    problem = syntax_problem(file.sql)
-    if problem is not None:
-        return problem
+@dataclass(frozen=True)
+class TemplateProblem:
+    """A static problem in a template file: where (a path into the YAML) and, for the SQL text,
+    which line of it."""
+
+    loc: tuple[str, ...]
+    line: int  # 1-based line within the text at `loc` (0 when the problem is the whole value)
+    problem: str
+    fix: str
+
+
+def check_template_file(file: TemplateFile) -> TemplateProblem | None:
+    """Static problems, never raised: a forbidden statement in the SQL or in a `sql` param's default,
+    Jinja syntax, a params model that cannot be built, or a default that does not fit its type."""
+    for check in (forbidden_statement, syntax_problem):
+        problem = check(file.sql)
+        if problem is not None:
+            return TemplateProblem(("sql",), problem.line, problem.problem, problem.fix)
+    for name, spec in file.param_specs().items():
+        if spec.type == "sql" and isinstance(spec.default, str):
+            problem = forbidden_sql(spec.default)
+            if problem is not None:
+                return TemplateProblem(("params", name, "default"), 0, problem.problem, problem.fix)
+    for name, spec in file.param_specs().items():
+        if spec.default is not None:
+            try:
+                TypeAdapter(_TYPES[spec.type]).validate_python(spec.default)
+            except ValidationError as exc:
+                return TemplateProblem(("params", name, "default"), 0,
+                                       f"the default does not fit type {spec.type}: {exc.errors()[0]['msg']}",
+                                       "give a default of the declared type, or drop the default")
     try:
         params_model(file)
     except (ValueError, TypeError) as exc:
-        raise invalid(f"params cannot be built: {exc}", "check each param's type and default")
+        return TemplateProblem(("params",), 0, f"params cannot be built: {type(exc).__name__}: {exc}",
+                               "check each param's name, type and default")
     return None

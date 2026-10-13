@@ -31,6 +31,9 @@ class Message:
     subject: str
     body: str
     recipients: list[str]
+    # Counts only, for sinks that land in logs (hard rule 6: logs carry counts, check ids and table
+    # names); None when the body itself is counts only (the watchdog's alert).
+    summary: str | None = None
 
 
 class Sink(Protocol):
@@ -86,21 +89,26 @@ def _email(config: EmailSinkConfig) -> Sink:
 
 class StdoutSinkConfig(Model):
     kind: Literal["stdout"]
+    # The run's stdout is the scheduler's log. By default a digest prints as its subject and counts;
+    # the body (which carries group values and, with email_sample_keys, key hashes) only on request.
+    full_body: bool = False
 
 
 @dataclass(frozen=True)
 class StdoutSink:
+    full_body: bool = False
     kind: str = "stdout"
 
     def send(self, messages: list[Message]) -> list[str]:
         for m in messages:
-            print(f"--- {m.subject} (to {len(m.recipients)} for {m.owner})\n{m.body}")
+            text = m.body if self.full_body or m.summary is None else m.summary
+            print(f"--- {m.subject} (to {len(m.recipients)} for {m.owner})\n{text}")
         return [f"stdout for {m.owner}: {m.subject} (printed)" for m in messages]
 
 
 @sink("stdout", StdoutSinkConfig)
 def _stdout(config: StdoutSinkConfig) -> Sink:
-    return StdoutSink()
+    return StdoutSink(config.full_body)
 
 
 # --- configuration and delivery ---
@@ -142,4 +150,7 @@ def deliver(messages: list[Message], defaults: Defaults) -> list[str]:
 
 
 def from_digests(digests: list[Digest]) -> list[Message]:
-    return [Message(d.owner, d.subject, d.text(), d.recipients) for d in digests]
+    return [Message(d.owner, d.subject, d.text(), d.recipients, summary=(
+        f"{d.new_failures} new failures, {len(d.did_not_run)} checks did not run, {len(d.still_failing)} still "
+        f"failing, {d.passing} passing; the digest itself goes to the email sinks (stdout prints it with full_body: true)"
+    )) for d in digests]

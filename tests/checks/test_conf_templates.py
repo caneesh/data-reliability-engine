@@ -147,7 +147,7 @@ CASES = [
      "sql", "DROP is not allowed", "query over the tables"),
     ("jinja", "{{ time(params.column, params.format) }}", "{{ time(params.column ", "sql", "template syntax", "Jinja"),
     ("bad-type", "limit: { type: string }", "limit: { type: date }", "params.limit.type", "not allowed", "use one of"),
-    ("packaged-name", "template: not_after", "template: max_rows_per_key", "template", "is a packaged template",
+    ("packaged-name", "template: not_after", "template: max_rows_per_key", "template", "is already a template",
      "pick another name"),
 ]
 
@@ -165,6 +165,26 @@ def test_template_file_errors_name_file_line_field_and_fix(conf: Path, case, old
     if case == "write":
         assert e.line == line_with(conf, "templates/not_after.yaml", "DROP TABLE")
     assert "max_rows_per_key" in TEMPLATES and TEMPLATES["max_rows_per_key"].related  # the packaged one is untouched
+
+
+DEFAULT_CASES = [
+    ("int-default", "limit: { type: string }", "limit: { type: int, default: soon }", "params.limit.default",
+     "does not fit type int"),
+    ("sql-default", "limit: { type: string }", "limit: { type: sql, default: \"SELECT TRANSFORM(1) USING 'cat'\" }",
+     "params.limit.default", "TRANSFORM is not allowed"),
+    ("unbuildable", "limit: { type: string }", "model_config: { type: int }", "params", "cannot be built"),
+]
+
+
+@pytest.mark.parametrize(("case", "old", "new", "field", "problem"), DEFAULT_CASES, ids=[c[0] for c in DEFAULT_CASES])
+def test_param_defaults_are_validated_and_scanned_and_never_a_traceback(conf: Path, case, old, new, field, problem) -> None:
+    """A9, A10: a default that does not fit its type, a sql default carrying a forbidden word, or a
+    params model that cannot be built are config errors on the template file, not run-time surprises."""
+    path = conf / "templates" / "not_after.yaml"
+    path.write_text(path.read_text(encoding="utf-8").replace(old, new), encoding="utf-8")
+    _, errors, _ = validate_conf(conf)
+    [e] = [e for e in errors if e.file == str(path)]
+    assert e.field == field and problem in e.problem and e.line >= 1
 
 
 def test_a_command_in_a_registered_template_cannot_run(spark) -> None:
