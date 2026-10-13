@@ -31,7 +31,7 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
 | Extensibility steps 6 and 7: notification sinks, extension packages, `dre guard`, testing kit | `122b76a` | #38 (one run for the push of both commits) |
 | Extensibility step 8: `docs/extending.md` | `a8a0107` | #38 |
 | Code review of release 3 (`docs/code-review-2026-10-13.md`) and its fixes A1 to A11 | `23de7a7` (#40 red: the review alone), then `9591b1e`, `1243f93`, `614a5b3`, `7eac24e`, `01fcadf` | #41 (one run for the push of all five) |
-| Design pass from that review (section B): `9b3592d`, `d74e5c8`, `7fdc435`, `85d10f8` and the B7 commit | see each commit | one run for the push of all five; the number goes here when it is in |
+| Design pass from that review (section B) | `9b3592d`, `d74e5c8`, `7fdc435`, `85d10f8`, `05c9464` | #42 (one run for the push of all five) |
 
 Each row has a section in `docs/decisions.md` saying what was decided and why.
 
