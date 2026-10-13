@@ -9,7 +9,7 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
 - **Release 1** (spec section 10, steps 1 to 11) is done. It was then extended by two code reviews and an architecture review.
 - **Release 2** has started. Derived datasets (join and aggregate hops) are built.
 - **Release 3** (extensibility) is built: the eight-step plan in `docs/design/extensibility.md`, agreed by the user, built in order; each step has a spec amendment and a `docs/decisions.md` entry, and `docs/extending.md` is the how-to.
-- **Tests:** 515, all passing. A full local run takes about 18 minutes; CI takes about 15. Replay scenarios R01 to R13 all pass, plus a three-layer acceptance test.
+- **Tests:** about 650, all passing (`pytest --collect-only -q | tail -1` gives the exact count). A full local run takes about 20 minutes; CI about 15. Replay scenarios R01 to R13 all pass, plus a three-layer acceptance test.
 
 ## History, in order (each step green in CI)
 
@@ -29,7 +29,8 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
 | Extensibility step 4: rule templates from configuration, guard rule 10 | `31fa034` | #36 |
 | Extensibility step 5: named calendars | `80317cf` | #37 |
 | Extensibility steps 6 and 7: notification sinks, extension packages, `dre guard`, testing kit | `122b76a` | #38 (one run for the push of both commits) |
-| Extensibility step 8: `docs/extending.md` | `6a35456` | #39 |
+| Extensibility step 8: `docs/extending.md` | `a8a0107` | #38 |
+| Code review of release 3 (`docs/code-review-2026-10-13.md`) and its fixes A1 to A11 | `23de7a7`, then the review-fix commits | see the review page |
 
 Each row has a section in `docs/decisions.md` saying what was decided and why.
 

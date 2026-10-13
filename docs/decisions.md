@@ -347,6 +347,21 @@ Deferred to step 2: `causes/failures.py` still lists the failing things of a FAI
 
 `docs/extending.md`: one section per extension point, by configuration first (feeds, check parameters, patterns, templates, calendars, sinks) then by code (the registries, the contracts, extension packages), and what is not extensible on purpose. The README links it. Each step's spec amendments are in sections 2, 3, 7, 8 and 9.
 
+## Code review of release 3 (2026-10-13)
+
+Five reviews in parallel (functional; constraints, leakage and performance; SQL from configuration; design; tests and docs), consolidated in `docs/code-review-2026-10-13.md`. The user asked for everything fixable to be fixed without breaking existing functionality. The eleven defects (A1 to A11) and the two lower items were fixed in four commits, each with the test the review named; the design pass (section B of the review) follows as its own commits. Decisions taken while fixing:
+
+1. **The SQL scan is defence in depth, in every fragment.** The wrap makes commands unparseable; `TRANSFORM` and `java_method`/`reflect` are refused by word because the wrap cannot stop them. `USING` is not refused (it is a join clause); the scan blanks string literals and comments first. Configuration stays a trusted, reviewed artefact; the scan catches mistakes and makes the guarantee honest, it is not a sandbox.
+2. **`dre guard` grants nothing.** The engine's own path allowances apply only to the engine's own scan from `src/`; any other tree is held to every rule, whatever its files are called.
+3. **The conf's `extensions:` list is the whole truth.** Extensions it does not list are unloaded on `load()`, so a long-lived process never validates against capabilities the current conf did not enable. Extensions load before `defaults.yaml` validates, so a sink an extension registers can be named under `notify:`.
+4. **`check_params` are validated for every check that will be planned**, whichever level configures it; a field missing at every level is reported on each dataset, naming the feed.
+5. **T1_FRESHNESS reads only rows timed before the window end.** The earlier docstring claimed a RERUN answered for its window; it did not. Now it does, and a window before every row is DID_NOT_RUN / empty_population.
+6. **T1_COLUMN_RANGE: `allowed` or bounds, never both**, and bounds compare `CAST(column AS DOUBLE)`, so a value that is not a number is a violation. The spec said "or"; the SQL did "and" when both were given; refusing the combination is clearer than defining it.
+7. **The stdout sink prints counts.** The run's stdout is the scheduler's log; hard rule 6 reserves logs for counts, check ids and table names. `full_body: true` is the operator's explicit choice.
+8. **Not changed on purpose:** a parametrised check configured where its pattern does not list it stays a warning (the spec says so); the watchdog still runs the full `load()` (a lighter `load_defaults` is a design-pass item, B10).
+
+A test-ordering quirk found on the way: pytest 9 matches conftest fixtures by collector object, so giving the same package directory as two separate command-line arguments with other arguments between them can lose a directory's fixtures. The full suite runs as one tree, so CI is unaffected; targeted runs are grouped by directory.
+
 ## Notes for later steps
 
 - **Step 4:** done: `dre dry-run` parses SQL fragments (`config/fragments.py`).

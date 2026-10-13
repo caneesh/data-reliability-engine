@@ -15,7 +15,7 @@ Two rules hold for everything here:
 
 ### Parameters for a parametrised check
 
-Some checks take parameters and run only where they are configured: `T1_FRESHNESS` (`max_age_hours`, `time: record | load`) and `T1_COLUMN_RANGE` (`column`, numeric `min`/`max`, `allowed`, `nulls_fail`). Set them on the dataset, or on the feed for all its datasets, or in a pattern as defaults:
+Some checks take parameters and run only where they are configured: `T1_FRESHNESS` (`max_age_hours`, `time: record | load`; judged as of the window end, so a RERUN answers for its window) and `T1_COLUMN_RANGE` (`column`, then numeric `min`/`max` or an `allowed` set of strings, not both; `nulls_fail`). Set them on the dataset, or on the feed for all its datasets, or in a pattern as defaults:
 
 ```yaml
 # datasets/<name>.yaml
@@ -67,7 +67,7 @@ sql: |
   {% if group_by %}GROUP BY {{ group_by | join(', ') }}{% endif %}
 ```
 
-The SQL always runs wrapped as `SELECT * FROM (...) dre_rule`, so only a query can run; `dre validate` also rejects write and DDL keywords, and `dre dry-run` renders each rule against its table. A packaged template's name cannot be reused. Test: `tests/checks/test_conf_templates.py`.
+The SQL always runs wrapped as `SELECT * FROM (...) dre_rule`, so a command cannot run; `dre validate` also refuses TRANSFORM, `java_method`/`reflect` and the write and DDL verbs (as SQL words, in templates, param defaults and every fragment such as `feed_filter`), and `dre dry-run` renders each rule against its table. A packaged template's name cannot be reused. Test: `tests/checks/test_conf_templates.py`.
 
 ### A named calendar
 
@@ -79,7 +79,7 @@ The SQL always runs wrapped as `SELECT * FROM (...) dre_rule`, so only a query c
 
 ```yaml
 notify:
-  - { kind: stdout }
+  - { kind: stdout }                  # subject and counts; full_body: true prints the digest itself
   - { kind: email, smtp_host: relay.example.org, smtp_port: 25, sender: dre@example.org }
 ```
 

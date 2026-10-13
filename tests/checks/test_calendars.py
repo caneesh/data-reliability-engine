@@ -90,7 +90,7 @@ def test_calendar_file_errors_name_file_line_and_field(conf: Path, case, old, ne
     [e] = [e for e in errors if e.file == str(path)]
     assert e.field == field and e.line >= 1
     if case == "packaged-name":
-        assert "packaged calendar" in e.problem
+        assert "already a calendar (packaged)" in e.problem
     if case == "bad-yaml-date":
         assert "month must be in 1..12" in e.problem and "quote it" in e.fix
 
