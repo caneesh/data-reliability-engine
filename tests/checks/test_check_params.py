@@ -110,7 +110,7 @@ CASES = [
     ("bad-value", GOLD, "  T1_FRESHNESS: { max_age_hours: -1 }", "check_params.T1_FRESHNESS.max_age_hours",
      "greater than 0", "0"),
     ("missing-field", GOLD, "  T1_COLUMN_RANGE: { min: 1 }", "check_params.T1_COLUMN_RANGE.column",
-     "`column` is not set at any level", "in the feed or this dataset"),
+     "`column` is not set at any level", "or in this dataset"),
     ("no-bound", GOLD, "  T1_COLUMN_RANGE: { column: mem_nbr }", "check_params.T1_COLUMN_RANGE",
      "needs a bound", "set min, max or allowed"),
     ("feed-bad-value", FEED, "check_params:\n  T1_FRESHNESS: { max_age_hours: never }",
@@ -130,6 +130,17 @@ def test_check_params_errors_name_file_line_field_and_fix(conf: Path, case, rel,
     assert matching, "\n".join(map(str, errors))
     assert fix in matching[0].fix and matching[0].file == str(path)
     assert matching[0].line >= line_with(conf, rel, "check_params")
+
+
+def test_a_required_field_missing_at_every_level_is_reported_even_when_only_the_feed_configures_the_check(conf: Path) -> None:
+    """A3: the feed configures T1_COLUMN_RANGE without `column` and no dataset adds it: the check would
+    be planned and DID_NOT_RUN on every dataset, so dre validate says so, on each dataset."""
+    (conf / FEED).write_text((conf / FEED).read_text(encoding="utf-8") + "check_params:\n  T1_COLUMN_RANGE: { min: 1 }\n")
+    errors, _ = _errors(conf)
+    missing = [e for e in errors if "`column` is not set at any level" in e.problem]
+    assert {e.file for e in missing} == {str(conf / GOLD), str(conf / "datasets" / "example_curated_enrollment.yaml")}
+    assert all("in feed example_realtime" in e.fix and e.field.startswith("check_params") for e in missing)
+    assert not [e for e in errors if e.file == str(conf / FEED) and "check_params" in e.field]  # nothing wrong there
 
 
 def test_a_missing_field_set_in_the_feed_is_fine(conf: Path) -> None:

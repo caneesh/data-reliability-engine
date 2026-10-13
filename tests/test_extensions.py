@@ -38,12 +38,15 @@ def installed(tmp_path: Path, monkeypatch) -> Path:
     site = tmp_path / "site"
     (site / DIST).mkdir(parents=True)
     (site / DIST / "METADATA").write_text("Metadata-Version: 2.1\nName: dre-ext-example\nVersion: 0.1\n")
-    (site / DIST / "entry_points.txt").write_text("[dre.extensions]\nexample = tests.extensions.dre_ext_example\n")
+    (site / DIST / "entry_points.txt").write_text(
+        "[dre.extensions]\nexample = tests.extensions.dre_ext_example\nbroken = tests.extensions.dre_ext_broken\n")
     monkeypatch.syspath_prepend(str(site))
     importlib.invalidate_caches()
     yield site
     extensions.unload("example")
+    extensions.unload("broken")
     assert "X_ROWS_AT_MOST" not in CHECKS and "x_flag" not in PROBES and "x_at_most_rows" not in TEMPLATES
+    assert "X_HALF" not in CHECKS
 
 
 @pytest.fixture
@@ -85,6 +88,47 @@ def test_nothing_loads_unless_defaults_lists_it(installed, conf: Path) -> None:
     assert "x_reverse" in NORMALISERS
 
 
+def test_an_extension_s_sink_can_be_configured(installed, conf: Path) -> None:
+    """notify: is validated after the extensions load, so a sink an extension registers is usable (A2)."""
+    from hcsc.datalake.dre.notify.sinks import deliver, sinks_for
+
+    (conf / "defaults.yaml").write_text((conf / "defaults.yaml").read_text() +
+                                        "extensions: [example]\nnotify:\n  - { kind: x_pigeon, loft: roof }\n")
+    config, errors = load(conf)
+    assert errors == [], "\n".join(map(str, errors))
+    [only] = sinks_for(config.defaults)
+    assert only.kind == "x_pigeon"
+    from hcsc.datalake.dre.notify.sinks import Message
+
+    assert deliver([Message("o", "s", "b", ["a@example.org"])], config.defaults) == ["x_pigeon for o: s (flown to roof)"]
+
+
+def test_an_extension_that_fails_half_way_is_rolled_back(installed, conf: Path) -> None:
+    """A6: what a failing extension registered before the failure is unregistered, the failure is
+    reported once, and a later load of a good extension still works."""
+    loaded, problems = extensions.load_extensions(["broken", "example"])
+    [problem] = problems
+    assert "extension 'broken'" in problem and "ImportError" in problem and "dependency" in problem
+    assert "X_HALF" not in CHECKS and [r.name for r in loaded] == ["example"]
+    _, problems = extensions.load_extensions(["broken"])  # the same problem again, not "registered twice"
+    assert len(problems) == 1 and "ImportError" in problems[0] and "X_HALF" not in CHECKS
+    (conf / "defaults.yaml").write_text((conf / "defaults.yaml").read_text() + "extensions: [broken]\n")
+    _, errors, _ = validate_conf(conf)
+    [e] = [e for e in errors if e.field == "extensions"]
+    assert "failed to load" in e.problem and e.line == line_with(conf, "defaults.yaml", "extensions:")
+
+
+def test_a_conf_that_lists_no_extensions_unloads_the_ones_another_conf_loaded(installed, conf: Path, tmp_path) -> None:
+    """A6: the conf's list is the whole truth, also in a process that loads one conf after another."""
+    other = tmp_path / "other"
+    shutil.copytree(SAMPLE_CONF, other)
+    (other / "defaults.yaml").write_text((other / "defaults.yaml").read_text() + "extensions: [example]\n")
+    load(other)
+    assert "x_reverse" in NORMALISERS and [r.name for r in extensions.loaded()] == ["example"]
+    load(conf)  # no extensions: line
+    assert "x_reverse" not in NORMALISERS and extensions.loaded() == []
+
+
 def test_a_missing_extension_is_a_config_error_naming_the_line(conf: Path) -> None:
     (conf / "defaults.yaml").write_text((conf / "defaults.yaml").read_text() + "extensions: [absent]\n")
     _, errors, _ = validate_conf(conf)
@@ -114,8 +158,8 @@ def test_the_kit_holds_the_example_check_to_the_contract(spark, installed) -> No
 
 
 def test_the_kit_holds_the_example_probe_and_template_to_their_contracts(spark, installed, conf: Path) -> None:
-    extensions.load_extensions(["example"])
-    config, _ = load(conf)
+    (conf / "defaults.yaml").write_text((conf / "defaults.yaml").read_text() + "extensions: [example]\n")
+    config, _ = load(conf)  # loading a conf that lists the extension is what loads it
     feed = config.feeds["example_realtime"].model_copy(update={"probes": {"flag": {"value": "yes"}}})
     ds = config.datasets["gold_member_coverage"]
     cx = CauseContext(testing.context(spark, ds, feed), EVENT, config, "T1_ZERO_ROWS")

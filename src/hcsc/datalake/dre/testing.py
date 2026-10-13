@@ -86,7 +86,7 @@ def probe_contract(cx: CauseContext, kind: str, params_key: str, failure: Failur
     from hcsc.datalake.dre.checks.registry import CauseEntry
 
     unready = run_entry(cx, CauseEntry("X_CONTRACT", kind, "x_probe_contract_unconfigured"), failure)
-    assert unready.state == "NOT_READY", f"an unconfigured probe is NOT_READY, not {unready.state}"
+    assert unready.state == "NOT_READY", f"an unconfigured probe is NOT_READY, not {unready.state} ({unready.evidence})"
     outcome = run_entry(cx, CauseEntry("X_CONTRACT", kind, params_key), failure)
     assert outcome.state in CAUSE_STATES, f"state {outcome.state!r} is not one of {CAUSE_STATES}"
     text = json.dumps(outcome.evidence, default=str)

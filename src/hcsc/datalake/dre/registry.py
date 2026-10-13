@@ -33,15 +33,17 @@ class Registry(Generic[T]):
         return item
 
     def _load(self) -> None:
+        """Import the packages that register the built-ins, once. A failing import is raised to the
+        caller and tried again on the next use, never left as a silently partial registry."""
         if self._loaded:
             return
-        self._loaded = True
         for name in self._discover:
             module = importlib.import_module(name)
             path = getattr(module, "__path__", None)
             if path is not None:
                 for info in pkgutil.walk_packages(path, prefix=module.__name__ + "."):
                     importlib.import_module(info.name)
+        self._loaded = True
 
     def __getitem__(self, item_id: str) -> T:
         self._load()

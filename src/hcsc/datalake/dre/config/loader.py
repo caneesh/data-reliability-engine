@@ -229,6 +229,20 @@ def read_yaml(path: Path, display: str) -> tuple[Any, yaml.Node | None, list[Con
     return (None if dupes else data), node, dupes
 
 
+def _load_extensions(data: Any, display: str, node: yaml.Node | None) -> list[ConfigError]:
+    """`extensions:` in defaults.yaml, read from the raw mapping so the extensions load before the
+    defaults validate (their sinks are validated against the sink registry). The list is the whole
+    truth: extensions not in it are unloaded. Each problem is a config error on the `extensions` line."""
+    from hcsc.datalake.dre.extensions import sync_extensions
+
+    names = data.get("extensions") if isinstance(data, dict) else None
+    if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+        names = []  # Defaults.model_validate reports a malformed list
+    _, problems = sync_extensions(names)
+    return [ConfigError(display, line_of(node, ("extensions",)), "extensions", problem,
+                        "install the extension, or remove it from the list") for problem in problems]
+
+
 def _load_templates(config: Config) -> list[ConfigError]:
     """conf/templates/*.yaml: each file a rule template (spec section 3), registered for the rules
     that follow. A packaged template's name is refused; a forbidden statement or a Jinja syntax
@@ -263,14 +277,15 @@ def _load_templates(config: Config) -> list[ConfigError]:
     for refused in use_conf_templates(files):
         source = config.sources[("template", refused)]
         errors.append(ConfigError(source.file, line_of(source.node, ("template",)), "template",
-                                  f"{refused!r} is a packaged template", "pick another name; packaged templates stay as they are"))
+                                  f"{refused!r} is already a template (packaged, or from an extension)",
+                                  "pick another name; templates from code stay as they are"))
         del config.templates[refused]
     return errors
 
 
 def _load_calendars(config: Config) -> list[ConfigError]:
     """conf/calendars/*.yaml: each file a named calendar (spec section 3), registered for the feeds."""
-    from hcsc.datalake.dre.checks.calendars import CalendarFile, use_conf_calendars
+    from hcsc.datalake.dre.checks.calendars import CALENDARS, CalendarFile, use_conf_calendars
 
     errors: list[ConfigError] = []
     files: list[Any] = []
@@ -296,7 +311,7 @@ def _load_calendars(config: Config) -> list[ConfigError]:
     for refused in use_conf_calendars(files):
         source = config.sources[("calendar", refused)]
         errors.append(ConfigError(source.file, line_of(source.node, ("calendar",)), "calendar",
-                                  f"{refused!r} is a packaged calendar", "pick another name"))
+                                  f"{refused!r} is already a calendar ({CALENDARS[refused].origin})", "pick another name"))
         del config.calendars[refused]
     return errors
 
@@ -318,19 +333,12 @@ def load(conf_dir: Path | str) -> tuple[Config, list[ConfigError]]:
         data, node, errs = read_yaml(defaults_path, display)
         errors.extend(errs)
         if data is not None:
+            errors.extend(_load_extensions(data, display, node))  # before anything validates against the registries
             try:
                 config.defaults = Defaults.model_validate(data)
                 config.sources[("defaults", "defaults")] = Source(display, node)
             except ValidationError as exc:
                 errors.extend(errors_from_validation(exc, display, node))
-
-    if config.defaults is not None and config.defaults.extensions:
-        from hcsc.datalake.dre.extensions import load_extensions
-
-        _, problems = load_extensions(config.defaults.extensions)  # before anything that validates against the registries
-        source = config.sources[("defaults", "defaults")]
-        errors.extend(ConfigError(source.file, line_of(source.node, ("extensions",)), "extensions", problem,
-                                  "install the extension, or remove it from the list") for problem in problems)
     errors.extend(_load_templates(config))  # before the rules, which name them
     errors.extend(_load_calendars(config))  # before the feeds, whose cadences name them
 

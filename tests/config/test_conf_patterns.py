@@ -124,6 +124,23 @@ def test_malformed_conf_patterns_are_config_errors_naming_the_file(conf: Path, n
     assert problem in e.problem and "packaged patterns" in e.fix
 
 
+@pytest.mark.parametrize("text", [
+    "pattern: TABLE_MERGE\nkind: table\nchecks: [T1_NOPE]\n",
+    "pattern: TABLE_MERGE\nkind: table\nchecks: [T1_ZERO_ROWS]\ncauses:\n  x:\n    checks: [T1_ZERO_ROWS]\n"
+    "    order:\n      - {code: EMPTY_LOAD, fallback: true}\n",
+    "pattern: TABLE_MERGE\nchecks: [T1_ZERO_ROWS]\n",
+], ids=["unknown-check", "fallback-only", "no-kind"])
+def test_a_malformed_override_of_a_pattern_a_feed_uses_is_an_error_not_a_crash(conf: Path, text) -> None:
+    """A5: the second synthetic feed is on TABLE_MERGE; a broken override of it is reported on the
+    pattern file, once, and nothing else is checked against the broken pattern."""
+    (conf / "patterns").mkdir()
+    (conf / "patterns" / "table_merge.yaml").write_text(text, encoding="utf-8")
+    _, errors, _ = validate_conf(conf)
+    [e] = [e for e in errors if e.file == str(conf / "patterns" / "table_merge.yaml")]
+    assert "packaged patterns" in e.fix
+    assert not [x for x in errors if x.file.endswith("provider_directory_merge.yaml")]
+
+
 def test_an_unknown_pattern_lists_the_conf_patterns_too(conf: Path) -> None:
     _use_reload(conf, "TABLE_DAILY")
     _, errors, _ = validate_conf(conf)

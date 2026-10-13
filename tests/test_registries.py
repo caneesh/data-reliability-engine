@@ -63,6 +63,15 @@ def test_the_built_ins_are_discovered_without_a_central_list() -> None:
     assert NORMALISERS.ids() == ("lower", "parse_date", "regex_replace", "strip_leading_zeros", "trim", "upper")
 
 
+def test_a_failing_discovery_import_is_raised_and_tried_again() -> None:
+    """A registry whose built-in package fails to import raises on every use, never a partial list."""
+    reg: Registry[int] = Registry("thing", ("tests.no_such_package_for_registry",))
+    with pytest.raises(ModuleNotFoundError):
+        reg.ids()
+    with pytest.raises(ModuleNotFoundError):
+        "a" in reg
+
+
 def test_an_id_registered_twice_is_an_error() -> None:
     reg: Registry[int] = Registry("thing")
     reg.register("a", 1)

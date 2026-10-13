@@ -77,7 +77,8 @@ def cross_check(config: Config, feeds_complete: bool = True) -> list[ConfigError
         err("defaults", "defaults", ("watchdog_owner",), f"watchdog_owner {defaults.watchdog_owner!r} has no recipients",
             f"add `{defaults.watchdog_owner}: [address]` under recipients, or set watchdog_owner: null")
 
-    errors.extend(_check_patterns(config))
+    pattern_errors, broken_patterns = _check_patterns(config)
+    errors.extend(pattern_errors)
 
     # Feeds: dataset references, one feed per dataset, owner recipients.
     member_of: dict[str, str] = {}
@@ -92,6 +93,8 @@ def cross_check(config: Config, feeds_complete: bool = True) -> list[ConfigError
             else:
                 member_of[ds] = feed_id
         check_owner("feed", feed_id, feed.owner)
+        if feed.pattern in broken_patterns:
+            continue  # the pattern file's own error says what is wrong; nothing more can be checked against it
         errors.extend(_check_probes(config, feed_id))
         errors.extend(_check_check_params(config, "feed", feed_id, feed.pattern, feed, None))
         if _is_file_pattern(feed.pattern) and not any(
@@ -216,8 +219,9 @@ def cross_check(config: Config, feeds_complete: bool = True) -> list[ConfigError
                 level="warning")
 
         feed_of_ds = config.feed_of(ds_id)
-        errors.extend(_check_check_params(config, "dataset", ds_id, feed_of_ds.pattern if feed_of_ds else None,
-                                          feed_of_ds, ds))
+        if feed_of_ds is None or feed_of_ds.pattern not in broken_patterns:
+            errors.extend(_check_check_params(config, "dataset", ds_id, feed_of_ds.pattern if feed_of_ds else None,
+                                              feed_of_ds, ds))
 
         for col in ds.key_normalise:
             if col not in key:
@@ -287,14 +291,16 @@ def _is_file_pattern(pattern: str) -> bool:
         return False
 
 
-def _check_patterns(config: Config) -> list[ConfigError]:
+def _check_patterns(config: Config) -> tuple[list[ConfigError], set[str]]:
     """Each conf/patterns file loads: `pattern` matches its name, `kind` is set, every check, probe
-    type and builtin cause it names is registered, cause lists are well formed."""
+    type and builtin cause it names is registered, cause lists are well formed. Returns the errors
+    and the names of the patterns that failed, so nothing else is checked against those."""
     from hcsc.datalake.dre.checks.registry import (
         _conf_names, _pattern_checks, pattern_causes, pattern_file, pattern_kind,
     )
 
     found = []
+    broken: set[str] = set()
     for pattern in sorted(_conf_names()):
         for read in (pattern_kind, _pattern_checks, pattern_causes):
             try:
@@ -302,65 +308,87 @@ def _check_patterns(config: Config) -> list[ConfigError]:
             except ValueError as exc:
                 found.append(ConfigError(pattern_file(pattern), 1, "", str(exc).replace(pattern_file(pattern) + ": ", ""),
                                          "fix the pattern file; the packaged patterns/*.yaml are the examples"))
+                broken.add(pattern)
                 break
-    return found
+    return found, broken
 
 
 def _check_check_params(config: Config, kind: str, obj_id: str, pattern: str | None, feed: Any,
                         ds: Any) -> list[ConfigError]:
-    """`check_params` on a feed or a dataset: each key a parametrised check its pattern lists, and the
-    values valid once the pattern's defaults, the feed's and the dataset's are merged. A missing
-    field is reported on the dataset, where the merge is complete; a wrong value where it is written."""
+    """`check_params` on a feed or a dataset. The object's own entries must name a parametrised check
+    its pattern lists. Then every check that will be planned for a dataset (configured at any level:
+    pattern defaults, feed, dataset) must validate once merged: a wrong value is reported where it
+    is written, a field missing at every level on the dataset."""
     from pydantic import ValidationError
 
     from hcsc.datalake.dre.checks.base import configured_params
-    from hcsc.datalake.dre.checks.registry import CHECKS, TABLE_WIDE, pattern_check_ids
+    from hcsc.datalake.dre.checks.registry import CHECKS, TABLE_WIDE, pattern_check_ids, pattern_check_params
 
     obj = ds if kind == "dataset" else feed
     source = config.sources[(kind, obj_id)]
     found: list[ConfigError] = []
     listed = pattern_check_ids(pattern or TABLE_WIDE)
-    for check_id, raw in obj.check_params.items():
+
+    def report(loc: tuple[Any, ...], problem: str, fix: str, level: str = "error") -> None:
+        file, line = config.locate(kind, obj_id, loc)
+        found.append(ConfigError(file, line, format_loc(loc), problem, fix, level))
+
+    usable: list[str] = []
+    for check_id in obj.check_params:
         loc = ("check_params", check_id)
         check = CHECKS.get(check_id)
         if check is None:
-            file, line = config.locate(kind, obj_id, loc)
-            found.append(ConfigError(file, line, format_loc(loc), f"unknown check {check_id!r}",
-                                     f"use one of {[c for c in CHECKS.ids() if CHECKS[c].params_model is not None]}"))
-            continue
-        if check.params_model is None:
-            file, line = config.locate(kind, obj_id, loc)
-            found.append(ConfigError(file, line, format_loc(loc), f"{check_id} takes no parameters", "remove it"))
-            continue
-        if check_id not in listed:
-            file, line = config.locate(kind, obj_id, loc)
-            found.append(ConfigError(file, line, format_loc(loc), f"pattern {pattern or TABLE_WIDE} does not list "
-                                     f"{check_id}, so it will not run", "remove it, or use a pattern that lists it",
-                                     level="warning"))
-            continue
-        if kind == "feed":
-            # the feed's own values, with the pattern's defaults under them; missing fields may come from a dataset
-            merged = configured_params(check, ds_placeholder(), feed, pattern) or {}
+            report(loc, f"unknown check {check_id!r}",
+                   f"use one of {[c for c in CHECKS.ids() if CHECKS[c].params_model is not None]}")
+        elif check.params_model is None:
+            report(loc, f"{check_id} takes no parameters", "remove it")
+        elif check_id not in listed:
+            report(loc, f"pattern {pattern or TABLE_WIDE} does not list {check_id}, so it will not run",
+                   "remove it, or use a pattern that lists it", level="warning")
         else:
-            merged = configured_params(check, ds, feed, pattern) or {}
-        try:
-            check.params_model.model_validate(merged)
-        except ValidationError as exc:
-            for err in exc.errors():
+            usable.append(check_id)
+
+    if kind == "feed":
+        # the feed's own values, with the pattern's defaults under them: only wrong values are reported here;
+        # a field missing at every level is reported on each dataset, where the merge is complete
+        for check_id in usable:
+            merged = configured_params(CHECKS[check_id], ds_placeholder(), feed, pattern) or {}
+            for err in _value_errors(CHECKS[check_id], merged):
                 field_name = str(err["loc"][0]) if err["loc"] else ""
-                if kind == "feed" and (err["type"] == "missing" or field_name not in raw):
-                    continue  # reported on the dataset, or written elsewhere
-                if kind == "dataset" and err["type"] == "missing":
-                    file, line = config.locate(kind, obj_id, loc)
-                    found.append(ConfigError(file, line, format_loc(loc + (field_name,)),
-                                             f"`{field_name}` is not set at any level",
-                                             f"set it under check_params.{check_id} in the feed or this dataset"))
-                    continue
+                if err["type"] != "missing" and field_name in obj.check_params[check_id]:
+                    problem, fix = describe(err)
+                    where = ("check_params", check_id, *err["loc"])
+                    found.append(ConfigError(source.file, line_of(source.node, where), format_loc(where), problem, fix))
+        return found
+
+    planned = set(usable) | {c for c in (feed.check_params if feed else {}) if c in listed and CHECKS.get(c)} \
+        | set(pattern_check_params(pattern or TABLE_WIDE))
+    for check_id in sorted(planned):
+        merged = configured_params(CHECKS[check_id], ds, feed, pattern) or {}
+        own = check_id in obj.check_params
+        for err in _value_errors(CHECKS[check_id], merged):
+            field_name = str(err["loc"][0]) if err["loc"] else ""
+            if err["type"] == "missing":
+                where_feed = f" in feed {feed.feed}," if feed else ""
+                where = ("check_params", check_id, field_name) if own else ("check_params",)
+                report(where, f"`{field_name}` is not set at any level" if own
+                       else f"check_params.{check_id}: `{field_name}` is not set at any level",
+                       f"set it under check_params.{check_id}{where_feed} or in this dataset")
+            elif own and (not err["loc"] or field_name in obj.check_params[check_id]):  # a value written here
                 problem, fix = describe(err)
-                where = loc + tuple(err["loc"])
-                file = source.file
-                found.append(ConfigError(file, line_of(source.node, where), format_loc(where), problem, fix))
+                where = ("check_params", check_id, *err["loc"])
+                found.append(ConfigError(source.file, line_of(source.node, where), format_loc(where), problem, fix))
     return found
+
+
+def _value_errors(check: Any, merged: dict[str, Any]) -> list[dict[str, Any]]:
+    from pydantic import ValidationError
+
+    try:
+        check.params_model.model_validate(merged)
+    except ValidationError as exc:
+        return list(exc.errors())
+    return []
 
 
 def ds_placeholder() -> Any:

@@ -71,12 +71,32 @@ def load_extensions(names: list[str]) -> tuple[list[Loaded], list[str]]:
             ep.load()
         except Exception as exc:  # an import error, or a duplicate id from Registry.register
             problems.append(f"extension {name!r} ({ep.value}) failed to load: {type(exc).__name__}: {exc}")
+            _roll_back(registries, before, ep.value)  # whatever it registered before failing goes too
             continue
         added = {kind: sorted(set(reg.ids()) - before[kind]) for kind, reg in registries.items()}
         record = Loaded(name, ep.value, {k: v for k, v in added.items() if v})
         _LOADED[name] = record
         loaded.append(record)
     return loaded, problems
+
+
+def _roll_back(registries: dict[str, Any], before: dict[str, set[str]], module: str) -> None:
+    """Unregister what a failed load added, and forget the module so a later attempt imports again."""
+    import sys
+
+    for kind, reg in registries.items():
+        for item_id in set(reg.ids()) - before[kind]:
+            reg.unregister(item_id)
+    for name in [m for m in sys.modules if m == module or m.startswith(module + ".")]:
+        del sys.modules[name]
+
+
+def sync_extensions(names: list[str]) -> tuple[list[Loaded], list[str]]:
+    """The conf's list is the whole truth: unload any extension not in it (a process that loads
+    one conf after another), then load the listed ones."""
+    for name in [n for n in _LOADED if n not in names]:
+        unload(name)
+    return load_extensions(names)
 
 
 def loaded() -> list[Loaded]:
