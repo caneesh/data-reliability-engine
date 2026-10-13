@@ -173,7 +173,7 @@ def plan_rules(config: Config, feed_id: str | None = None) -> list[Planned]:
         if feed_id is not None and (feed is None or feed.feed != feed_id):
             continue
         spec = TEMPLATES[rule.template]
-        named = spec.related(spec.params.model_validate(rule.params)).values()
+        named = spec.related(spec.params_model.model_validate(rule.params)).values()
         related = {d: config.datasets[d] for d in named if d in config.datasets}
         planned.append(Planned(feed, config.datasets[rule.dataset], RuleCheck(rule, related)))
     return planned

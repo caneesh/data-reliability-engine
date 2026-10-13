@@ -25,17 +25,17 @@ BUILTIN = "builtin"
 @dataclass(frozen=True)
 class Probe:
     name: str
-    params: type[Model]  # every field None by default; the probe runs only when all are set (is_ready)
+    params_model: type[Model]  # every field None by default; the probe runs only when all are set (is_ready)
     run: Callable[[CauseContext, Any, Failure], Outcome]
 
 
 PROBES: Registry[Probe] = Registry("probe", ("hcsc.datalake.dre.causes",))
 
 
-def probe(name: str, params: type[Model]) -> Callable[[Callable[..., Outcome]], Callable[..., Outcome]]:
-    """Register the decorated function as the probe type `name`, taking `params`."""
+def probe(name: str, params_model: type[Model]) -> Callable[[Callable[..., Outcome]], Callable[..., Outcome]]:
+    """Register the decorated function as the probe type `name`, taking `params_model`."""
     def register(fn: Callable[..., Outcome]) -> Callable[..., Outcome]:
-        PROBES.register(name, Probe(name, params, fn))
+        PROBES.register(name, Probe(name, params_model, fn))
         return fn
     return register
 

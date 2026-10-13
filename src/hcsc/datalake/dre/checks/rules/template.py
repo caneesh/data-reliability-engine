@@ -28,7 +28,7 @@ def no_related(params: Any) -> dict[str, str]:
 @dataclass(frozen=True)
 class TemplateSpec:
     name: str
-    params: type[Model]
+    params_model: type[Model]
     sql: Callable[..., str]  # renders the statement from the template arguments (keyword arguments)
     columns: Callable[[Dataset, Any], list[str]]  # columns the rule reads on its dataset, besides group_by
     # Template arguments beyond table, feed_filter and group_by: (dataset, params, related datasets).

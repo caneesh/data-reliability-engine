@@ -25,7 +25,7 @@ class RuleCheck(Check):
         self.check_id = rule.rule
         self.severity = rule.severity
         self.spec = TEMPLATES[rule.template]
-        self.params: Any = self.spec.params.model_validate(rule.params)
+        self.params: Any = self.spec.params_model.model_validate(rule.params)
         self.related = related or {}  # other datasets the template names (spec.related), by id
 
     def required_columns(self, dataset: Dataset) -> list[str]:

@@ -55,7 +55,7 @@ def test_rule_open_when_is_scanned_through_its_template() -> None:
     from hcsc.datalake.dre.checks.rules.template import TEMPLATES
 
     with pytest.raises(ValueError, match="JAVA_METHOD is not allowed"):
-        TEMPLATES["max_open_rows_per_key"].params.model_validate(
+        TEMPLATES["max_open_rows_per_key"].params_model.model_validate(
             {"open_when": "java_method('java.lang.System', 'exit', 0) IS NULL", "max": 1})
     assert Rule(rule="r", template="max_open_rows_per_key", dataset="d", params={"open_when": "x = 1", "max": 1},
                 owner="o", status="approved", severity="low").params["max"] == 1

@@ -36,7 +36,7 @@ def _arguments(ds: Dataset, p: ChildWithinParent, related: dict[str, Dataset]) -
 
 register_template(TemplateSpec(
     name="child_within_parent",
-    params=ChildWithinParent,
+    params_model=ChildWithinParent,
     sql=partial(render_sql, "rule_child_within_parent.sql.j2"),
     columns=lambda ds, p: [*p.join, p.child_start],
     arguments=_arguments,

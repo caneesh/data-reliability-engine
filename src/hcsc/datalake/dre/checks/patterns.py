@@ -134,7 +134,7 @@ def checks_for(dataset: Dataset, pattern: str | None, feed: Feed | None = None) 
 class CauseEntry:
     code: str
     probe: str | None  # a registered probe type, or "builtin"; None for the fallback
-    params: str | None  # the feed's `probes:` key with this probe's parameters
+    params_key: str | None  # the feed's `probes:` key with this probe's parameters
     fallback: bool = False
 
 
@@ -176,14 +176,14 @@ def pattern_causes(pattern: str) -> dict[str, FailureType]:
         for raw in body.get("order") or []:
             entry = CauseEntry(raw["code"], raw.get("probe"), raw.get("params"), bool(raw.get("fallback")))
             if entry.fallback:
-                if entry.probe or entry.params:
+                if entry.probe or entry.params_key:
                     raise ValueError(f"{where}: fallback {entry.code} takes no probe")
             elif entry.probe == BUILTIN:
                 if entry.code not in BUILTINS:
                     raise ValueError(f"{where}: {entry.code} names no builtin cause check")
             elif entry.probe not in PROBES:
                 raise ValueError(f"{where}: {entry.code} has unknown probe {entry.probe!r}")
-            elif PROBES[entry.probe].params.model_fields and not entry.params:
+            elif PROBES[entry.probe].params_model.model_fields and not entry.params_key:
                 raise ValueError(f"{where}: {entry.code} uses probe {entry.probe} but names no params key")
             entries.append(entry)
         if not entries or not entries[-1].fallback or sum(e.fallback for e in entries) != 1:
@@ -201,9 +201,9 @@ def probe_keys(pattern: str) -> dict[str, str]:
     keys: dict[str, str] = {}
     for failure in pattern_causes(pattern).values():
         for entry in failure.order:
-            if entry.params:
-                if keys.setdefault(entry.params, entry.probe) != entry.probe:
-                    raise ValueError(f"{pattern_file(pattern)}: params key {entry.params} is used by two probe types")
+            if entry.params_key:
+                if keys.setdefault(entry.params_key, entry.probe) != entry.probe:
+                    raise ValueError(f"{pattern_file(pattern)}: params key {entry.params_key} is used by two probe types")
     return keys
 
 

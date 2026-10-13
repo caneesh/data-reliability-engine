@@ -69,12 +69,12 @@ def test_a_conf_template_is_known_once_the_conf_is_loaded(conf: Path) -> None:
     assert errors == [], "\n".join(map(str, errors))
     assert "not_after" in TEMPLATES and list(config.templates) == ["not_after"]
     spec = TEMPLATES["not_after"]
-    p = spec.params.model_validate({"column": "eff", "limit": "2026-06-30"})
+    p = spec.params_model.model_validate({"column": "eff", "limit": "2026-06-30"})
     assert (p.column, p.limit, p.format) == ("eff", "2026-06-30", None)
     with pytest.raises(ValueError):
-        spec.params.model_validate({"column": "eff"})  # limit is required
+        spec.params_model.model_validate({"column": "eff"})  # limit is required
     with pytest.raises(ValueError):
-        spec.params.model_validate({"column": "not a column", "limit": "x"})
+        spec.params_model.model_validate({"column": "not a column", "limit": "x"})
     assert spec.columns(gold("x.y"), p) == ["eff"]
 
 

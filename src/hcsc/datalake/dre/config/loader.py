@@ -24,7 +24,7 @@ from hcsc.datalake.dre.checks.rules.template import TEMPLATES
 from hcsc.datalake.dre.config.models import Dataset, Defaults, Feed, Rule, SETTING_FIELDS, Settings, SettingsOverride
 from hcsc.datalake.dre.extensions import sync_extensions
 
-KINDS: dict[str, tuple[str, type[BaseModel]]] = {
+OBJECT_DIRS: dict[str, tuple[str, type[BaseModel]]] = {
     # directory: (id field, model)
     "feeds": ("feed", Feed),
     "datasets": ("dataset", Dataset),
@@ -329,7 +329,7 @@ def load(conf_dir: Path | str) -> tuple[Config, list[ConfigError]]:
     errors.extend(_load_templates(config))  # before the rules, which name them
     errors.extend(_load_calendars(config))  # before the feeds, whose cadences name them
 
-    for directory, (id_field, model) in KINDS.items():
+    for directory, (id_field, model) in OBJECT_DIRS.items():
         kind = id_field
         target: dict[str, Any] = getattr(config, directory)
         paths = sorted([*(conf_dir / directory).glob("*.yaml"), *(conf_dir / directory).glob("*.yml")])

@@ -18,8 +18,8 @@ T = TypeVar("T")
 
 
 class Registry(Generic[T]):
-    def __init__(self, kind: str, discover: tuple[str, ...] = ()) -> None:
-        self.kind = kind
+    def __init__(self, label: str, discover: tuple[str, ...] = ()) -> None:
+        self.label = label  # what an item is called in messages: "check", "probe", ...
         self._discover = discover  # packages (or modules) whose import registers the built-ins
         self._items: dict[str, T] = {}
         self._loaded = False
@@ -27,9 +27,9 @@ class Registry(Generic[T]):
 
     def register(self, item_id: str, item: T) -> T:
         if not item_id:
-            raise ValueError(f"a {self.kind} needs an id")
+            raise ValueError(f"a {self.label} needs an id")
         if item_id in self._items:
-            raise ValueError(f"{self.kind} {item_id!r} is registered twice")
+            raise ValueError(f"{self.label} {item_id!r} is registered twice")
         self._items[item_id] = item
         return item
 
@@ -51,7 +51,7 @@ class Registry(Generic[T]):
         try:
             return self._items[item_id]
         except KeyError:
-            raise KeyError(f"unknown {self.kind} {item_id!r}; known: {self.ids()}") from None
+            raise KeyError(f"unknown {self.label} {item_id!r}; known: {self.ids()}") from None
 
     def unregister(self, item_id: str) -> None:
         """Remove a registration (an extension unloaded, or a test's temporary item)."""

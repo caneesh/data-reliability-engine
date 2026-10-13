@@ -23,7 +23,7 @@ class SupersededStillOpen(Model):
 
 register_template(TemplateSpec(
     name="superseded_still_open",
-    params=SupersededStillOpen,
+    params_model=SupersededStillOpen,
     sql=partial(render_sql, "rule_superseded_still_open.sql.j2"),
     columns=lambda ds, p: [*p.group_key, p.order_column],
     arguments=lambda ds, p, related: {

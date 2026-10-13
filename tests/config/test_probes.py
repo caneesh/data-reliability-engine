@@ -54,7 +54,7 @@ def test_null_parameters_are_not_ready() -> None:
     assert is_ready(FileValueCompare(path="/data/ctl/cursor.txt", extract_regex=r"(\d{8})", format="yyyyMMdd",
                                      compare_to="partition"))
     assert is_ready(TableContains(table="ops_db.rejects", condition="reason IS NOT NULL"))  # id, code_ref optional
-    assert is_ready(PROBES["size_changed"].params())  # needs no parameters
+    assert is_ready(PROBES["size_changed"].params_model())  # needs no parameters
 
 
 def test_sample_probes_validate(conf: Path) -> None:

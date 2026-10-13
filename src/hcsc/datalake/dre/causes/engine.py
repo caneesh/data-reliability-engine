@@ -37,7 +37,7 @@ def failure_type(pattern: str | None, check_id: str) -> FailureType | None:
 
 
 def cause_check_id(entry: CauseEntry) -> str:
-    return f"{entry.probe}:{entry.params}" if entry.params else str(entry.probe)
+    return f"{entry.probe}:{entry.params_key}" if entry.params_key else str(entry.probe)
 
 
 def run_entry(cx: CauseContext, entry: CauseEntry, failure: Failure) -> Outcome:
@@ -47,8 +47,8 @@ def run_entry(cx: CauseContext, entry: CauseEntry, failure: Failure) -> Outcome:
             return not_ready(NO_SECRET)
         if entry.probe == BUILTIN:
             return BUILTINS[entry.code](cx, failure)
-        if entry.params:
-            raw = (cx.feed.probes if cx.feed else {}).get(entry.params)
+        if entry.params_key:
+            raw = (cx.feed.probes if cx.feed else {}).get(entry.params_key)
             sets = parameter_sets(raw)
         else:
             sets = [{}]
@@ -56,19 +56,19 @@ def run_entry(cx: CauseContext, entry: CauseEntry, failure: Failure) -> Outcome:
         outcomes = []
         unready = 0
         for raw_set in sets:
-            params = probe.params.model_validate(raw_set or {})
+            params = probe.params_model.model_validate(raw_set or {})
             if is_ready(params):
                 outcomes.append(probe.run(cx, params, failure))
             else:
                 unready += 1
         if not outcomes:
-            return not_ready(f"probes.{entry.params} is not configured")
+            return not_ready(f"probes.{entry.params_key} is not configured")
         for state in (CONFIRMED, ERROR):
             hit = next((o for o in outcomes if o.state == state), None)
             if hit is not None:
                 return hit
         if unready:  # a set never checked could still confirm the cause: never RULED_OUT
-            return not_ready(f"{unready} of {len(sets)} parameter sets of probes.{entry.params} are not configured")
+            return not_ready(f"{unready} of {len(sets)} parameter sets of probes.{entry.params_key} are not configured")
         return outcomes[0] if len(outcomes) == 1 else Outcome(RULED_OUT, {"parameter_sets": len(outcomes)})
     except Exception as exc:
         return error(exc)

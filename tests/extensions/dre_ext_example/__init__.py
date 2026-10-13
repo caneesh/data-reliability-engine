@@ -60,7 +60,7 @@ class AtMostRows(Model):
 
 
 register_template(TemplateSpec(
-    name="x_at_most_rows", params=AtMostRows,
+    name="x_at_most_rows", params_model=AtMostRows,
     sql=lambda table, feed_filter, group_by, max: (
         f"SELECT {''.join(f'{g} AS g_{i}, ' for i, g in enumerate(group_by, 1))}COUNT(*) AS population, "
         f"CASE WHEN COUNT(*) > {max} THEN COUNT(*) - {max} ELSE 0 END AS violations FROM {table}"

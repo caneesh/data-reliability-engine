@@ -85,7 +85,7 @@ def check_fragments(spark: SparkSession, config: Config, feed_id: str | None = N
             continue
         spec = TEMPLATES[rule.template]
         try:
-            params = spec.params.model_validate(rule.params)
+            params = spec.params_model.model_validate(rule.params)
             sql = spec.sql(table=ds.table, feed_filter=ds.feed_filter, group_by=rule.group_by,
                            **spec.arguments(ds, params, {}))
             spark.sql(f"SELECT * FROM ({sql}) q LIMIT 0")

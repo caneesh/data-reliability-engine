@@ -19,7 +19,7 @@ class MaxOpenRowsPerKey(Model):
 
 register_template(TemplateSpec(
     name="max_open_rows_per_key",
-    params=MaxOpenRowsPerKey,
+    params_model=MaxOpenRowsPerKey,
     sql=partial(render_sql, "rule_max_open_rows_per_key.sql.j2"),
     columns=lambda ds, p: list(ds.key),
     arguments=lambda ds, p, related: {"key_expr": ", ".join(key_exprs(ds)), "open_when": p.open_when, "max": p.max},

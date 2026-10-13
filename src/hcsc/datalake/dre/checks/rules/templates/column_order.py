@@ -19,7 +19,7 @@ class ColumnOrder(Model):
 
 register_template(TemplateSpec(
     name="column_order",
-    params=ColumnOrder,
+    params_model=ColumnOrder,
     sql=partial(render_sql, "rule_column_order.sql.j2"),
     columns=lambda ds, p: [p.lower, p.upper],
     arguments=lambda ds, p, related: {"lower": time_expr(ds, p.lower, p.format),

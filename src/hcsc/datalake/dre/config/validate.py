@@ -268,7 +268,7 @@ def cross_check(config: Config, feeds_complete: bool = True) -> list[ConfigError
         check_owner("rule", rule_id, rule.owner)
         spec = TEMPLATES[rule.template]
         try:
-            params = spec.params.model_validate(rule.params)
+            params = spec.params_model.model_validate(rule.params)
         except ValidationError as exc:
             source = config.sources[("rule", rule_id)]
             errors.extend(errors_from_validation(exc, source.file, source.node, prefix=("params",)))
@@ -404,7 +404,7 @@ def _check_probes(config: Config, feed_id: str) -> list[ConfigError]:
         probe = PROBES.get(keys[key])
         if probe is None:
             continue
-        model = probe.params
+        model = probe.params_model
         many = isinstance(raw, list)
         for i, params in enumerate(parameter_sets(raw)):
             try:

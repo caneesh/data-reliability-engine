@@ -29,7 +29,7 @@ def _result(row: Any, p: NullRateMax, groups: dict[str, str | None]) -> CheckRes
 
 register_template(TemplateSpec(
     name="null_rate_max",
-    params=NullRateMax,
+    params_model=NullRateMax,
     sql=partial(render_sql, "rule_null_rate_max.sql.j2"),
     columns=lambda ds, p: [p.column],
     arguments=lambda ds, p, related: {"column": p.column, "max_rate": double(p.max_rate)},

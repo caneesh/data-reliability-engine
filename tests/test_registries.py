@@ -170,7 +170,7 @@ def test_a_probe_decorator_registers_once(cause_context) -> None:
     def once(cx: CauseContext, params: Flag, failure: Failure) -> Outcome:
         return confirmed()
     try:
-        assert PROBES["x_once"].run is once and PROBES["x_once"].params is Flag
+        assert PROBES["x_once"].run is once and PROBES["x_once"].params_model is Flag
         with pytest.raises(ValueError, match="registered twice"):
             probe("x_once", Flag)(once)
     finally:
@@ -210,7 +210,7 @@ class AtMostRows(Model):
 
 X_TEMPLATE = TemplateSpec(
     name="x_at_most_rows",
-    params=AtMostRows,
+    params_model=AtMostRows,
     sql=lambda table, feed_filter, group_by, max: (
         f"SELECT {''.join(f'{g} AS g_{i}, ' for i, g in enumerate(group_by, 1))}"
         f"COUNT(*) AS population, CASE WHEN COUNT(*) > {max} THEN COUNT(*) - {max} ELSE 0 END AS violations "

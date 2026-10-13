@@ -18,7 +18,7 @@ class ValueFormat(Model):
 
 register_template(TemplateSpec(
     name="value_format",
-    params=ValueFormat,
+    params_model=ValueFormat,
     sql=partial(render_sql, "rule_value_format.sql.j2"),
     columns=lambda ds, p: [p.column],
     arguments=lambda ds, p, related: {"column": p.column, "pattern": sql_string(p.pattern)},

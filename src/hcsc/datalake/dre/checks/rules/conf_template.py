@@ -117,7 +117,7 @@ def spec_from(file: TemplateFile) -> TemplateSpec:
         return found
 
     return TemplateSpec(
-        name=file.template, params=model, sql=sql, columns=columns,
+        name=file.template, params_model=model, sql=sql, columns=columns,
         arguments=lambda ds, p, related: {"params": p, **_helpers(ds)},
         what=lambda p: file.violation, unit=file.unit,
     )
