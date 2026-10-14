@@ -385,7 +385,8 @@ def test_results_older_than_the_history_lookback_do_not_move_the_window(spark, t
 
     replay = replay_conf(spark, tmp_path, "runner_lookback", {"defaults.yaml": [
         ("max_window_hours: 72", "max_window_hours: 24"),
-        ("investigation_retry_days: 7", "investigation_retry_days: 1\nhistory_lookback_days: 2")]})
+        ("investigation_retry_days: 7", "investigation_retry_days: 1"),
+        ("history_lookback_days: 400", "history_lookback_days: 2")]})
     create_table(spark, replay.gold, GOLD_COLUMNS, [gold_row()])
     create_table(spark, replay.curated, CURATED_COLUMNS, [curated_row()])
     now = datetime.now(timezone.utc)
