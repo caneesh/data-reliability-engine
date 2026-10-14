@@ -16,6 +16,7 @@ from hcsc.datalake.dre.checks.base import render_sql, utc_literal
 from hcsc.datalake.dre.checks.derived import UNMATCHED_COLUMN, source_of
 from hcsc.datalake.dre.checks.hop.common import hop_params, register_key_hash
 from hcsc.datalake.dre.checks.keys import column_expr, key_string
+from hcsc.datalake.dre.checks.partitions import partition_filter
 from hcsc.datalake.dre.checks.times import as_utc, sql_string, utc_expr
 
 NO_LOAD_TIME = "this dataset has no load_time"
@@ -264,7 +265,8 @@ def no_upstream_data(cx: CauseContext, failure: Failure) -> Outcome:
                              table=source_of(up, cx.config.datasets, cx.ctx.default_timezone),
                              feed_filter=up.feed_filter,
                              load_expr=utc_expr(up.load_time, cx.ctx.default_timezone),
-                             window_start=utc_literal(start), window_end=utc_literal(end))
+                             window_start=utc_literal(start), window_end=utc_literal(end),
+                             partition_filter=partition_filter(up, start, end, cx.ctx.default_timezone))
             counts[up_id] = cx.spark.sql(sql).collect()[0].loaded
         return counts
     counts = cx.cached(f"upstream_rows:{start.isoformat()}:{end.isoformat()}", query)

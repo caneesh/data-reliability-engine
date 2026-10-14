@@ -106,3 +106,18 @@ def test_dataset_budget_scope_is_shared_by_a_dataset_s_checks_in_a_run(spark, tm
     gold = [row for (ds, _), rows in latest(spark, replay).items() if ds == "gold_member_coverage" for row in rows]
     assert {r.reason_code for r in gold} == {"budget_exceeded"}
     assert any("spent" in (r.detail or "") for r in gold)
+
+
+def test_a_hop_check_s_scan_estimate_includes_its_upstream_tables(spark) -> None:
+    """The scan a hop reads is the dataset's table plus its upstreams' (a derived upstream has none)."""
+    from hcsc.datalake.dre.checks.base import estimated_scan
+    from hcsc.datalake.dre.checks.hop.key_currency import KeyCurrency
+
+    context = ctx(spark)
+    create_table(spark, "budget.up", GOLD_COLUMNS, [gold_row(), gold_row(sub_id="2")])
+    up = Dataset(dataset="up", table="budget.up", layer="CURATED", key=["sub_id"])
+    hop_ctx = CheckContext(spark, context.dataset, None, BUDGET, "UTC", upstreams={"up": up})
+    own = estimated_scan(context, Quick())
+    assert own == estimated_scan_bytes(spark, "budget.gold") > 0
+    assert estimated_scan(hop_ctx, KeyCurrency()) == own + estimated_scan_bytes(spark, "budget.up")
+    assert estimated_scan(hop_ctx, Quick()) == own  # not a hop check: its own table only

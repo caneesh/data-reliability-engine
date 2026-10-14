@@ -8,10 +8,11 @@ check never stops the run.
 
 from __future__ import annotations
 
+import logging
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import date, datetime
 from typing import TYPE_CHECKING, Any
 
 from jinja2 import Environment, PackageLoader, StrictUndefined
@@ -24,6 +25,8 @@ if TYPE_CHECKING:
     from hcsc.datalake.dre.causes.base import CauseContext, Failure
     from hcsc.datalake.dre.checks.events import Event
     from hcsc.datalake.dre.config.models import Dataset, Feed, Model, Settings
+
+log = logging.getLogger(__name__)
 
 PASSED, FAILED, DID_NOT_RUN = "PASSED", "FAILED", "DID_NOT_RUN"
 
@@ -75,6 +78,17 @@ class CheckResult:
     # HOP_KEY_CURRENCY: the temp view holding this hop's judged keys, for the cause engine to read
     # instead of judging again; the runner drops it once the result is explained.
     judged_view: str | None = field(default=None, compare=False, repr=False)
+    # Frames the check materialised (local checkpoints) and the runner releases with the view.
+    checkpoints: tuple[Any, ...] = field(default=(), compare=False, repr=False)
+
+
+def release_checkpoint(frame: Any) -> None:
+    """Free a local checkpoint's blocks on the executors. A checkpointed frame's plan is a
+    LogicalRDD over the persisted RDD; nothing else drops it before the session ends."""
+    try:
+        frame._jdf.queryExecution().logical().rdd().unpersist(False)
+    except Exception as exc:  # only memory is at stake
+        log.warning("could not release a checkpoint: %s", error_detail(exc))
 
 
 def did_not_run(code: str, detail: str | None = None, group_values: dict[str, str | None] | None = None) -> CheckResult:
@@ -115,6 +129,8 @@ class CheckContext:
     # NORMAL runs keep the open-key state (read v_open_keys, write key events); a RERUN or REPLAY
     # of a historical window neither reads nor changes it, so repeating one changes nothing.
     record_key_events: bool = True
+    # The first run_date the hop's open-key read looks at (defaults.history_lookback_days); None: all.
+    history_since: date | None = None
     # The check's parameters (an instance of Check.params_model), resolved by resolve_params (called from
     # run_check) from the pattern's defaults, the feed's and the dataset's `check_params`; None without.
     params: Any = None
@@ -213,17 +229,29 @@ def preconditions(spark: SparkSession, dataset: Dataset, columns: list[str]) -> 
     return None
 
 
+def estimated_scan(ctx: CheckContext, check: Check) -> int | None:
+    """The bytes a check reads, from table statistics: the dataset's table and, for a hop check,
+    its upstream tables (a derived upstream has no table of its own); None without statistics."""
+    from hcsc.datalake.dre.checks.budget import estimated_scan_bytes
+
+    tables = [ctx.dataset.table]
+    if check.check_id.startswith("HOP_"):
+        tables += [up.table for up in ctx.upstreams.values() if up.table is not None]
+    sizes = [estimated_scan_bytes(ctx.spark, table) for table in tables if table is not None]
+    return None if not sizes or any(s is None for s in sizes) else sum(sizes)
+
+
 def run_check(check: Check, ctx: CheckContext, event: Event) -> tuple[list[CheckResult], int]:
     """(results, duration_ms). Never raises: a failure is a DID_NOT_RUN result. The check runs
     within its dataset's compute_budget_minutes (checks/budget.py)."""
-    from hcsc.datalake.dre.checks.budget import BudgetExceeded, estimated_scan_bytes, within_budget
+    from hcsc.datalake.dre.checks.budget import BudgetExceeded, within_budget
 
     started = time.monotonic()
     budget = ctx.settings.compute_budget_minutes if ctx.budget_minutes is None else ctx.budget_minutes
     if budget <= 0:
         return [did_not_run("budget_exceeded", detail="the dataset's compute budget is spent for this run")], 0
     if ctx.scan_mb_per_minute is not None:
-        size = estimated_scan_bytes(ctx.spark, ctx.dataset.table)
+        size = estimated_scan(ctx, check)
         if size is not None and size / 1_000_000 / ctx.scan_mb_per_minute > budget:
             minutes = size / 1_000_000 / ctx.scan_mb_per_minute
             return [did_not_run("budget_exceeded", detail=(
@@ -252,7 +280,7 @@ def run_check(check: Check, ctx: CheckContext, event: Event) -> tuple[list[Check
     try:
         results = within_budget(ctx.spark, budget, work)
     except BudgetExceeded as exc:
-        size = estimated_scan_bytes(ctx.spark, ctx.dataset.table)
+        size = estimated_scan(ctx, check)
         scan = f"; estimated scan {size} bytes" if size is not None else "; no table statistics for a scan estimate"
         results = [did_not_run("budget_exceeded", detail=f"{exc}{scan}")]
     except Exception as exc:

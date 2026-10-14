@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import TYPE_CHECKING
 
+from hcsc.datalake.dre.checks.base import release_checkpoint
 from hcsc.datalake.dre.store import writer
 from hcsc.datalake.dre.store.names import validate_dq_database
 
@@ -30,7 +31,10 @@ def append_key_events(events: DataFrame, dq_database: str, run_id: str, evaluati
         "key_hash", "key_value", "event", "state_detail",
         F.lit(observed_at).cast("timestamp").alias("observed_at"), F.lit(run_date).cast("date").alias("run_date"),
     ).localCheckpoint()  # fix the events before writing: they were computed from dq_key_event itself
-    count = frame.count()
-    if count:
-        writer.append(frame, dq_database, "dq_key_event")
+    try:
+        count = frame.count()
+        if count:
+            writer.append(frame, dq_database, "dq_key_event")
+    finally:
+        release_checkpoint(frame)
     return count

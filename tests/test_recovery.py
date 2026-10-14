@@ -125,3 +125,75 @@ def test_every_row_of_an_evaluation_is_marked_incomplete_together(spark, tmp_pat
     current = [r for r in spark.table(f"{replay.dq}.v_latest_result").collect() if r.check_id == "HOP_KEY_CURRENCY"]
     assert sorted((r.group_values["upstream"], r.reason_code) for r in current) == [
         ("curated_a", "evidence_incomplete"), ("curated_b", "evidence_incomplete")]  # both groups still current
+
+
+def _slow_job(spark) -> None:
+    spark.sparkContext.parallelize(range(4), 2).map(lambda x: __import__("time").sleep(120) or x).count()
+
+
+def test_a_slow_cause_investigation_is_cancelled_by_the_budget_and_retried(spark, tmp_path, monkeypatch) -> None:
+    """The cause engine runs under the dataset's remaining compute budget: past it, the
+    investigation is cancelled, counted as not done (the next run retries it) and the check
+    stands; with the budget spent it is skipped the same way."""
+    from datetime import datetime, timezone
+
+    from hcsc.datalake.dre import runner
+    from hcsc.datalake.dre.checks.base import from_counts
+    from hcsc.datalake.dre.checks.events import Event
+    from hcsc.datalake.dre.checks.tier1.on_time import OnTime
+    from hcsc.datalake.dre.config.loader import load
+    from hcsc.datalake.dre.runner import Evaluation, Investigations, Planned, check_context, result_rows
+    from hcsc.datalake.dre.store import runs
+
+    replay = replay_conf(spark, tmp_path, "recover_budget")
+    config, _ = load(replay.conf)
+    ds = config.datasets["example_curated_enrollment"]
+    planned = Planned(config.feeds["example_realtime"], ds, OnTime())
+    at = datetime(2026, 1, 16, 12, tzinfo=timezone.utc)
+    event = Event(ds.dataset, at - timedelta(hours=1), at)
+    failed = from_counts(1, 1, "1 of 1 slots missed", "every slot loaded")
+    ctx = check_context(spark, config, planned, event)
+    evaluation = Evaluation(planned, event, [failed], at, 10, ctx)
+    run = runs.new_run(now=at)
+    rows = result_rows(evaluation, run, "NORMAL")
+    monkeypatch.setattr(runner, "explain", lambda *args, **kwargs: _slow_job(spark) or [])
+    tally = Investigations()
+    lines = runner.explain_failures(spark, config, evaluation, rows, run, tally, 0.02)
+    assert lines == ["  cause investigation exceeded the compute budget (0.02 minutes); the next run retries it"]
+    assert (tally.expected, tally.done) == (1, 0)
+    lines = runner.explain_failures(spark, config, evaluation, rows, run, tally, 0)
+    assert lines == ["  cause investigation skipped: the dataset's compute budget is spent; the next run retries it"]
+    assert (tally.expected, tally.done) == (2, 0)
+    monkeypatch.setattr(runner, "explain", lambda *args, **kwargs: [])
+    assert runner.explain_failures(spark, config, evaluation, rows, run, tally, 0.5) == []
+    assert (tally.expected, tally.done) == (3, 1)
+
+
+def test_a_slow_key_event_write_is_cancelled_by_the_budget_and_marked_incomplete(spark, tmp_path, monkeypatch) -> None:
+    from dataclasses import replace
+    from datetime import datetime, timezone
+
+    from hcsc.datalake.dre import runner
+    from hcsc.datalake.dre.checks.base import from_counts
+    from hcsc.datalake.dre.checks.events import Event
+    from hcsc.datalake.dre.checks.hop.key_currency import KeyCurrency
+    from hcsc.datalake.dre.config.loader import load
+    from hcsc.datalake.dre.runner import Evaluation, Planned, result_rows, write_evaluation
+    from hcsc.datalake.dre.store import runs
+
+    replay = replay_conf(spark, tmp_path, "recover_write_budget")
+    config, _ = load(replay.conf)
+    gold = config.datasets["gold_member_coverage"]
+    planned = Planned(config.feeds["example_realtime"], gold, KeyCurrency())
+    at = datetime(2026, 1, 16, 12, tzinfo=timezone.utc)
+    event = Event(gold.dataset, at - timedelta(hours=1), at)
+    result = replace(from_counts(3, 1, "1 of 3 keys missing", "every key present",
+                                 group_values={"upstream": "example_curated_enrollment"}), key_events=object())
+    run = runs.new_run(now=at)
+    evaluation = Evaluation(planned, event, [result], at, 10)
+    rows = result_rows(evaluation, run, "NORMAL")
+    monkeypatch.setattr(runner, "write_key_events", lambda *args, **kwargs: _slow_job(spark))
+    stored, complete = write_evaluation(spark, replay.dq, evaluation, rows, run, budget_minutes=0.02)
+    assert (len(stored), complete) == (1, 0)
+    current = [r for r in spark.table(f"{replay.dq}.v_latest_result").collect() if r.check_id == "HOP_KEY_CURRENCY"]
+    assert [(r.state, r.reason_code) for r in current] == [("DID_NOT_RUN", "evidence_incomplete")]

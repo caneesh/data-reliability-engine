@@ -61,10 +61,10 @@ def gold(table: str, dataset: str = "gold", **extra) -> Dataset:
 
 
 def run(spark, check, ds: Dataset, up: Dataset | None, event: Event = EVENT, secret: bytes | None = None,
-        full_sweep: bool = False):
+        full_sweep: bool = False, history_since: date | None = None):
     upstreams = {up.dataset: up} if up is not None else {}
     ctx = CheckContext(spark, ds, None, SETTINGS, "UTC", DQ, upstreams=upstreams, key_secret=secret,
-                       full_sweep=full_sweep)
+                       full_sweep=full_sweep, history_since=history_since)
     results, _ = run_check(check, ctx, event)
     return results
 
@@ -441,3 +441,50 @@ def test_file_completeness_reports_what_it_excluded_and_what_is_pending(spark) -
                           "1 row excluded by hop_exclusions, 1 file pending (within sla_hours)")
     [plain] = run(spark, FileCompleteness(), dn, up)
     assert (plain.state, plain.violations) == ("FAILED", 1)  # without the contract, the test row looks lost
+
+
+def test_the_hop_s_checkpoints_are_released_with_its_views(spark) -> None:
+    """HOP_KEY_CURRENCY materialises its judgement and its events as local checkpoints; the runner
+    releases both with the temp view, so the blocks do not live until the session ends."""
+    from hcsc.datalake.dre.runner import Evaluation, Planned, drop_judged_views
+
+    def persisted() -> set[int]:  # ids, not a count: the context cleaner frees other tests' RDDs at any time
+        return {info.id() for info in spark.sparkContext._jsc.sc().getRDDStorageInfo()}
+
+    up, dn = tables(spark, "kc_release", [curated_row(updated=IN_WINDOW)], [gold_row(record=EARLIER)])
+    before = persisted()
+    [r] = run(spark, KeyCurrency(), dn, up, secret=SECRET)
+    assert r.state == "FAILED" and r.judged_view is not None and len(r.checkpoints) == 2
+    created = persisted() - before
+    assert len(created) >= 2
+    drop_judged_views(spark, Evaluation(Planned(None, dn, KeyCurrency()), EVENT, [r], datetime.now(UTC), 0))
+    assert not (persisted() & created)
+    assert not spark.catalog.tableExists(r.judged_view)
+
+
+def test_open_keys_are_read_from_recent_partitions_only(spark, monkeypatch) -> None:
+    """The hop reads its open keys from dq_key_event's run_date partitions on or after the history
+    lookback (an open key is re-emitted on every evaluation, so its latest event is recent); the
+    plan prunes on run_date, and the result says how many judged keys were open from earlier runs."""
+    expected_hash = key_hash(SECRET, KEY)
+    long_ago = datetime(2026, 1, 10, 9, 0)  # loaded days before the judged range: only an open key gets it judged
+    up, dn = tables(spark, "kc_lookback", [curated_row(updated=long_ago)], [])
+    old_day = datetime(2025, 6, 1, 12, tzinfo=UTC)
+    append_key_events(spark.createDataFrame([(expected_hash, KEY, "FLAGGED", "MISSING")],
+                                            "key_hash STRING, key_value STRING, event STRING, state_detail STRING"),
+                      DQ, "run-old", "eval-old", dn.dataset, "HOP_KEY_CURRENCY",
+                      hop_label(up.dataset, dn.dataset), old_day, old_day.date())
+    seen: list[str] = []
+    real_sql = spark.sql
+    monkeypatch.setattr(spark, "sql", lambda text: seen.append(text) or real_sql(text))
+    # Unbounded: the old FLAGGED event keeps the key open, so it is judged again (and still missing).
+    [r] = run(spark, KeyCurrency(), dn, up, secret=SECRET)
+    assert (r.state, r.population, r.observed) == ("FAILED", 1, "1 missing and 0 stale of 1 keys; 1 key open from earlier runs")
+    # Bounded to after the event's partition: the key is not open as far as the hop can see, and
+    # nothing else puts it in the judged range.
+    [r] = run(spark, KeyCurrency(), dn, up, secret=SECRET, history_since=date(2026, 1, 1))
+    assert (r.state, r.reason_code) == ("DID_NOT_RUN", "empty_population")
+    judged_sql = [s for s in seen if "dq_key_event" in s and "run_date >= DATE'2026-01-01'" in s][-1]
+    plan = real_sql("EXPLAIN FORMATTED " + judged_sql).collect()[0][0]
+    event_scan = [part for part in plan.split("PartitionFilters: [") if "run_date" in part.split("]", 1)[0]]
+    assert event_scan, plan

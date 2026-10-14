@@ -46,7 +46,8 @@ SELECT SUM(CASE WHEN key_state IN ('MISSING', 'STALE', 'UNASSESSABLE', 'CURRENT'
        SUM(CASE WHEN key_state = 'STALE' THEN 1 ELSE 0 END) AS stale,
        SUM(CASE WHEN key_state = 'UNASSESSABLE' THEN 1 ELSE 0 END) AS unassessable,
        SUM(CASE WHEN key_state = 'PENDING' THEN 1 ELSE 0 END) AS pending,
-       SUM(CASE WHEN key_state = 'EXCLUDED' THEN 1 ELSE 0 END) AS excluded
+       SUM(CASE WHEN key_state = 'EXCLUDED' THEN 1 ELSE 0 END) AS excluded,
+       SUM(CASE WHEN was_open AND key_state IN ('MISSING', 'STALE', 'UNASSESSABLE', 'CURRENT') THEN 1 ELSE 0 END) AS open_keys
 FROM assessed
 {% else %}
 SELECT key_hash, k AS key_value,

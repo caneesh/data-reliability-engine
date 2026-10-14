@@ -9,6 +9,7 @@ key_normalise: { sub_id: strip_leading_zeros }
 record_time: { column: src_lcts, format: null }             # format not yet confirmed
 load_time: { column: gld_lcts, format: "yyyy-MM-dd HH:mm:ss:SSSSSS", granularity: minute }
 partition_column: null
+partition_format: null            # how the partition value is written (e.g. yyyy-MM-dd); with it, windowed checks read only the window's partitions
 file_name_column: null
 min_rows_per_load: 1
 key_unique: true

@@ -28,8 +28,9 @@ from typing import TYPE_CHECKING, Any
 
 from hcsc.datalake.dre.causes.base import CauseContext
 from hcsc.datalake.dre.causes.engine import explain, failure_type, summarise
+from hcsc.datalake.dre.checks.budget import BudgetExceeded, within_budget
 from hcsc.datalake.dre.checks.base import (
-    Check, CheckContext, CheckResult, did_not_run, error_detail, from_exception, run_check,
+    Check, CheckContext, CheckResult, did_not_run, error_detail, from_exception, release_checkpoint, run_check,
 )
 from hcsc.datalake.dre.checks.cadence import slots, UnsupportedCalendar
 from hcsc.datalake.dre.checks.derived import base_datasets
@@ -38,6 +39,7 @@ from hcsc.datalake.dre.checks.events import (
     window_histories, WindowHistory,
 )
 from hcsc.datalake.dre.checks.hop.common import hop_label
+from hcsc.datalake.dre.checks.hop.key_currency import judged_view
 from hcsc.datalake.dre.checks.patterns import checks_for
 from hcsc.datalake.dre.checks.rules.rule_check import RuleCheck
 from hcsc.datalake.dre.checks.rules.schedule import is_due, last_completed
@@ -361,7 +363,7 @@ def check_context(spark: SparkSession, config: Config, planned: Planned, event: 
         key_secret=key_secret,
         full_sweep=is_full_sweep(config, ds.dataset, event),
         budget_minutes=budget_minutes, scan_mb_per_minute=config.defaults.scan_mb_per_minute,
-        record_key_events=record_key_events,
+        record_key_events=record_key_events, history_since=history_since(config, event.window_end),
     )
 
 
@@ -436,13 +438,15 @@ class Investigations:
 
 
 def explain_failures(spark: SparkSession, config: Config, evaluation: Evaluation, rows: list[dict[str, Any]],
-                     run: runs.Run, tally: Investigations | None = None) -> list[str]:
+                     run: runs.Run, tally: Investigations | None = None,
+                     budget_minutes: float | None = None) -> list[str]:
     """Run the cause engine for each FAILED result, append its dq_cause_result rows, and return
     one line per resolved cause (codes and counts only, hard rule 6). A failed investigation
     never stops the run or changes the check: it is counted in `tally` as not done, reported by
-    the watchdog and retried by the next NORMAL run (retry_investigations)."""
+    the watchdog and retried by the next NORMAL run (retry_investigations). With a budget (the
+    dataset's compute budget, less what its checks spent), an investigation that runs past it is
+    cancelled and counted the same way; a spent budget skips it."""
     from collections import Counter
-
 
     p = evaluation.planned
     ft = failure_type(p.feed.pattern if p.feed else None, p.check.check_id)
@@ -456,10 +460,20 @@ def explain_failures(spark: SparkSession, config: Config, evaluation: Evaluation
         cx = CauseContext(evaluation.ctx, evaluation.event, config, p.check.check_id, upstream)
         if tally is not None:
             tally.expected += 1
+        if budget_minutes is not None and budget_minutes <= 0:
+            lines.append("  cause investigation skipped: the dataset's compute budget is spent; the next run retries it")
+            continue
+
+        def investigate() -> list[dict[str, Any]]:
+            found = explain(cx, result, row["evaluation_id"], run.run_id, run.run_date, datetime.now(timezone.utc))
+            append_cause_results(spark, config.defaults.dq_database, found)
+            return found
         try:
-            cause_rows = explain(cx, result, row["evaluation_id"], run.run_id, run.run_date,
-                                 datetime.now(timezone.utc))
-            append_cause_results(spark, config.defaults.dq_database, cause_rows)
+            cause_rows = within_budget(spark, budget_minutes, investigate) if budget_minutes is not None else investigate()
+        except BudgetExceeded as exc:
+            lines.append(f"  cause investigation exceeded the compute budget ({exc.minutes:g} minutes); "
+                         "the next run retries it")
+            continue
         except Exception as exc:  # causes never stop the run; the next run retries
             log.error("could not explain %s for %s: %s", p.check.check_id, p.dataset.dataset, error_detail(exc))
             lines.append(f"  cause investigation incomplete ({type(exc).__name__}); the next run retries it")
@@ -508,19 +522,27 @@ def retry_investigations(spark: SparkSession, config: Config, run: runs.Run, key
                              group_values=dict(row["group_values"] or {}), detail=row["detail"])
         ctx = check_context(spark, config, planned, event, key_secret=key_secret, record_key_events=False)
         evaluation = Evaluation(planned, event, [result], datetime.now(timezone.utc), 0, ctx)
-        explained = explain_failures(spark, config, evaluation, [row], run, tally)
+        explained = explain_failures(spark, config, evaluation, [row], run, tally,
+                                     config.dataset_settings(row["dataset"]).compute_budget_minutes)
         lines += [f"{row['dataset']} {row['check_id']}: cause investigation retried"] + explained
     return lines
 
 
 def drop_judged_views(spark: SparkSession, evaluation: Evaluation) -> None:
-    """Release the hop judgements HOP_KEY_CURRENCY kept for the cause engine."""
+    """Release the hop judgements HOP_KEY_CURRENCY kept for the cause engine: the checkpointed
+    frames' blocks and the temp views. Every hop's view is dropped, named from the key_map, so a
+    hop cancelled by the budget after creating its view (its result carries no view) is released too."""
+    views = {r.judged_view for r in evaluation.results if r.judged_view is not None}
+    if evaluation.planned.check.check_id == "HOP_KEY_CURRENCY":
+        views |= {judged_view(evaluation.planned.dataset.dataset, up_id) for up_id in evaluation.planned.dataset.key_map}
     for result in evaluation.results:
-        if result.judged_view is not None:
-            try:
-                spark.catalog.dropTempView(result.judged_view)
-            except Exception as exc:  # only memory is at stake
-                log.warning("could not drop a temp view: %s", error_detail(exc))
+        for frame in result.checkpoints:
+            release_checkpoint(frame)
+    for view in sorted(views):
+        try:
+            spark.catalog.dropTempView(view)
+        except Exception as exc:  # only memory is at stake
+            log.warning("could not drop a temp view: %s", error_detail(exc))
 
 
 def email_digests(spark: SparkSession, config: Config, run: runs.Run) -> list[str]:
@@ -674,11 +696,13 @@ def _preflight(spark: SparkSession, conf: str, feed_id: str | None,
 
 
 def write_evaluation(spark: SparkSession, db: str, evaluation: Evaluation, rows: list[dict[str, Any]],
-                     run_record: runs.Run) -> tuple[list[dict[str, Any]], int]:
+                     run_record: runs.Run, budget_minutes: float | None = None) -> tuple[list[dict[str, Any]], int]:
     """Store an evaluation's results, then its key events. Returns (the rows that are stored, 1 if
     the check counts as written). A check counts as written only once both are stored; a missing
     write makes the run PARTIAL, and a result stored without its key events gets a newer
-    evidence_incomplete row. A stored result is explained either way (the caller's job)."""
+    evidence_incomplete row. A stored result is explained either way (the caller's job). The
+    key-event write runs under budget_minutes (WRITE_BUDGET_MINUTES in a run): one that runs past
+    it takes the evidence_incomplete path like any failed write."""
     check_id, ds_id = evaluation.planned.check.check_id, evaluation.planned.dataset.dataset
     try:
         append_check_results(spark, db, rows)
@@ -686,7 +710,10 @@ def write_evaluation(spark: SparkSession, db: str, evaluation: Evaluation, rows:
         log.error("could not write %s for %s: %s", check_id, ds_id, error_detail(exc))
         return [], 0
     try:
-        write_key_events(db, evaluation, rows, run_record)
+        if budget_minutes is not None:
+            within_budget(spark, budget_minutes, lambda: write_key_events(db, evaluation, rows, run_record))
+        else:
+            write_key_events(db, evaluation, rows, run_record)
     except Exception as exc:
         log.error("could not write the key events of %s for %s: %s", check_id, ds_id, error_detail(exc))
         try:  # say so explicitly; the run is PARTIAL either way, which also holds the window
@@ -695,6 +722,20 @@ def write_evaluation(spark: SparkSession, db: str, evaluation: Evaluation, rows:
             log.error("could not mark %s incomplete: %s", check_id, error_detail(marker_exc))
         return rows, 0
     return rows, 1
+
+
+# How long a key-event write may take before it counts as failed (evidence_incomplete, the window
+# held): a fixed bound, apart from the compute budget, which is about reading production tables.
+WRITE_BUDGET_MINUTES = 15.0
+
+
+def investigation_budget(config: Config, dataset_id: str, spent_minutes: float) -> float:
+    """What a cause investigation may spend: the dataset's compute budget, less what its checks
+    in this run already spent when compute_budget_scope is dataset."""
+    budget = config.dataset_settings(dataset_id).compute_budget_minutes
+    if config.defaults.compute_budget_scope == "dataset":
+        return budget - spent_minutes
+    return budget
 
 
 def run(spark: SparkSession, conf: str, feed_id: str | None = None, selection: Selection | None = None) -> int:
@@ -739,18 +780,19 @@ def run(spark: SparkSession, conf: str, feed_id: str | None = None, selection: S
             evaluation = evaluate(spark, config, planned, event, landing, key_secret, budget,
                                   record_key_events=normal)
             spent[(ds_id, event.event_id)] = spent.get((ds_id, event.event_id), 0.0) + evaluation.duration_ms / 60000
+            remaining = investigation_budget(config, ds_id, spent.get((ds_id, event.event_id), 0.0))
             rows = result_rows(evaluation, run_record, kind)
             if unchanged(rows, stored):  # RERUN, REPLAY: the same outcome is stored already
                 written += 1
                 print(f"{ds_id} {planned.check.check_id}: unchanged since its stored result; not written again")
                 drop_judged_views(spark, evaluation)
                 continue
-            stored_rows, complete = write_evaluation(spark, db, evaluation, rows, run_record)
+            stored_rows, complete = write_evaluation(spark, db, evaluation, rows, run_record, WRITE_BUDGET_MINUTES)
             written += complete
             rows = stored_rows
             explained.update(r["evaluation_id"] for r in rows)
             for line in describe(evaluation) + explain_failures(spark, config, evaluation, rows, run_record,
-                                                                investigations):
+                                                                investigations, remaining):
                 print(line)
             drop_judged_views(spark, evaluation)
         if normal:

@@ -48,8 +48,18 @@ dn_keys AS (
 ),
 open_keys AS (
 {% if p.use_open %}
-  SELECT DISTINCT key_hash FROM {{ p.dq_database }}.v_open_keys
-  WHERE dataset = '{{ p.dataset }}' AND check_id = 'HOP_KEY_CURRENCY' AND hop = '{{ p.hop }}'
+  -- the hop's open keys (latest event FLAGGED or STILL_FLAGGED), as v_open_keys defines them, read
+  -- from the recent run_date partitions only: an open key is re-emitted on every evaluation, so its
+  -- latest event is never older than the hop's last evaluation
+  SELECT key_hash FROM (
+    SELECT key_hash, event, ROW_NUMBER() OVER (PARTITION BY key_hash ORDER BY observed_at DESC, run_id DESC) AS rn
+    FROM {{ p.dq_database }}.dq_key_event
+    WHERE dataset = '{{ p.dataset }}' AND check_id = 'HOP_KEY_CURRENCY' AND hop = '{{ p.hop }}'
+{% if p.events_since %}
+      AND run_date >= DATE'{{ p.events_since }}'
+{% endif %}
+  ) latest
+  WHERE rn = 1 AND event IN ('FLAGGED', 'STILL_FLAGGED')
 {% else %}
   SELECT CAST(NULL AS STRING) AS key_hash WHERE 1 = 0
 {% endif %}

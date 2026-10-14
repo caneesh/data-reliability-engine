@@ -6,6 +6,9 @@ SELECT {% for g in group_by %}{{ g }} AS g_{{ loop.index }}, {% endfor %}
 FROM {{ table }}
 WHERE {{ load_expr }} >= {{ window_start }}
   AND {{ load_expr }} < {{ window_end }}
+{% if partition_filter %}
+  AND {{ partition_filter }}
+{% endif %}
 {% if feed_filter %}
   AND ({{ feed_filter }})
 {% endif %}

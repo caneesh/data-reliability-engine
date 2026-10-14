@@ -59,9 +59,13 @@ class KeyCurrency(Check):
         if params["hashed"]:
             view = judged_view(ctx.dataset.dataset, up_id)
             judged = ctx.spark.sql(render_sql("hop_key_currency.sql.j2", p=params, mode="judged", source=None))
-            judged.localCheckpoint().createOrReplaceTempView(view)
+            judged = judged.localCheckpoint()
+            judged.createOrReplaceTempView(view)
         row = ctx.spark.sql(render_sql("hop_key_currency.sql.j2", p=params, mode="summary", source=view)).collect()[0]
         left_out = not_judged(row.pending, row.excluded, "key")
+        if row.open_keys:  # how much of the judgement is open keys from earlier runs: growth shows here
+            still_open = f"{row.open_keys} key{'s' if row.open_keys != 1 else ''} open from earlier runs"
+            left_out = f"{still_open}, {left_out}" if left_out else still_open
         observed = (f"{row.missing or 0} missing, {row.stale or 0} stale and {row.unassessable} unassessable "
                     f"(no record time) of {row.population} keys" if row.unassessable else
                     f"{row.missing or 0} missing and {row.stale or 0} stale of {row.population} keys")
@@ -74,10 +78,11 @@ class KeyCurrency(Check):
         if result.state == "DID_NOT_RUN" and left_out:  # nothing judged: say what was left out, and why
             result = replace(result, detail=f"no key judged; {left_out}")
         if view is not None and not ctx.record_key_events:  # RERUN, REPLAY: the judgement serves causes only
-            return replace(result, judged_view=view)
+            return replace(result, judged_view=view, checkpoints=(judged,))
         if view is not None:
             events = ctx.spark.sql(render_sql("hop_key_currency.sql.j2", p=params, mode="events", source=view))
-            return replace(result, key_events=events.localCheckpoint(), judged_view=view)
+            events = events.localCheckpoint()
+            return replace(result, key_events=events, judged_view=view, checkpoints=(judged, events))
         if result.state == "FAILED":
             return replace(result, detail="key events not recorded: hmac_secret_file is not set")
         return result

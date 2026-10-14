@@ -16,8 +16,9 @@ WITH periods AS (
 loaded AS (
   SELECT {{ load_expr }} AS load_ts
   FROM {{ table }}
-{% if feed_filter %}
-  WHERE {{ feed_filter }}
+{% if feed_filter or partition_filter %}
+  WHERE {% if feed_filter %}({{ feed_filter }}){% endif %}{% if feed_filter and partition_filter %} AND {% endif %}{% if partition_filter %}{{ partition_filter }}{% endif %}
+
 {% endif %}
 ),
 counts AS (

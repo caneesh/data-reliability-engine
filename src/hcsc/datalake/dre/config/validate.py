@@ -287,6 +287,26 @@ def _check_dataset_fields(r: _Reporter, ds_id: str, broken_patterns: set[str]) -
     if ds.owned_columns and not ds.key_map:
         r.err("dataset", ds_id, ("owned_columns",), "owned_columns needs a key_map",
             "add key_map for the upstream dataset, or remove owned_columns")
+    _check_partitioning(r, ds_id)
+
+
+def _check_partitioning(r: _Reporter, ds_id: str) -> None:
+    """partition_format needs partition_column and a pattern the engine can write (checks/partitions.py);
+    a partition_column without a format prunes nothing, which is worth a warning."""
+    from hcsc.datalake.dre.checks.partitions import granule, strftime_pattern
+
+    ds = r.config.datasets[ds_id]
+    if ds.partition_format is not None and ds.partition_column is None:
+        r.err("dataset", ds_id, ("partition_format",), "partition_format needs partition_column",
+            "set partition_column to the table's partition column, or remove partition_format")
+    elif ds.partition_format is not None and (strftime_pattern(ds.partition_format) is None
+                                              or granule(ds.partition_format) is None):
+        r.err("dataset", ds_id, ("partition_format",), f"partition_format {ds.partition_format!r} cannot be used to "
+            "list partitions", "use a pattern of yyyy, MM, dd, HH and separators, with at least dd (e.g. yyyy-MM-dd)")
+    elif ds.partition_column is not None and ds.partition_format is None and ds.table is not None:
+        r.err("dataset", ds_id, ("partition_column",), "partition_column without partition_format prunes nothing: "
+            "windowed checks read every partition", "set partition_format to the pattern the partition value is "
+            "written in (e.g. yyyy-MM-dd) once the platform confirms it", level="warning")
 
 
 def _check_settings_resolve(r: _Reporter, ds_id: str) -> None:

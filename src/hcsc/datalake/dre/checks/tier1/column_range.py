@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import model_validator
 
+from hcsc.datalake.dre.checks.partitions import partition_filter
 from hcsc.datalake.dre.checks.base import Check, CheckContext, CheckResult, double, from_counts, group_values, needs_load_time, render_sql, utc_literal
 from hcsc.datalake.dre.checks.registry import register_check
 from hcsc.datalake.dre.checks.times import sql_string, utc_expr
@@ -65,6 +66,7 @@ class ColumnRange(Check):
             allowed=None if p.allowed is None else [sql_string(v) for v in p.allowed],
             load_expr=utc_expr(ds.load_time, ctx.default_timezone),
             window_start=utc_literal(event.window_start), window_end=utc_literal(event.window_end),
+            partition_filter=partition_filter(ds, event.window_start, event.window_end, ctx.default_timezone),
         )
         bounds = [b for b in (f"at least {p.min:g}" if p.min is not None else None,
                               f"at most {p.max:g}" if p.max is not None else None,

@@ -93,6 +93,8 @@ def hop_params(ctx: CheckContext, event: Event, up_id: str, up: Dataset | None) 
         # (NORMAL runs only: the open-key state is today's, not a historical window's)
         "hashed": ctx.key_secret is not None, "use_open": ctx.key_secret is not None and ctx.record_key_events,
         "dq_database": ctx.dq_database, "dataset": ds.dataset, "hop": hop_label(up_id, ds.dataset),
+        # open keys are read from dq_key_event's run_date partitions on or after this (None: all of them)
+        "events_since": ctx.history_since.isoformat() if ctx.history_since is not None else None,
     }
 
 

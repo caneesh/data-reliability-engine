@@ -204,3 +204,24 @@ def test_missing_load_time_warns_with_checks(conf: Path, capsys: pytest.CaptureF
     assert "NOT_RUN, OLDER_VERSION_WRITTEN_LATER" in warning.problem  # gold has a key_map
     assert main(["validate", "--conf", str(conf)]) == 0  # warnings do not fail validation
     assert "warning: load_time is not set" in capsys.readouterr().out
+
+
+def test_partitioning_fields_are_checked(conf: Path) -> None:
+    """partition_format needs partition_column and a pattern the engine can list partitions with;
+    a partition_column without a format is a warning (it prunes nothing)."""
+    edit(conf, GOLD, "partition_format: null", "partition_format: yyyy-MM-dd")
+    _, errors, _ = validate_conf(conf)
+    error = _find(errors, conf / GOLD, "partition_format")
+    assert "partition_format needs partition_column" in error.problem and "partition_column" in error.fix
+    edit(conf, GOLD, "partition_column: null", "partition_column: load_dt")
+    edit(conf, GOLD, "partition_format: yyyy-MM-dd", "partition_format: yyyy-MM")
+    _, errors, _ = validate_conf(conf)
+    error = _find(errors, conf / GOLD, "partition_format")
+    assert "cannot be used to list partitions" in error.problem and "yyyy-MM-dd" in error.fix
+    edit(conf, GOLD, "partition_format: yyyy-MM", "partition_format: null")
+    _, errors, warnings = validate_conf(conf)
+    [warning] = [w for w in warnings if "partition_column" in w.problem]
+    assert "prunes nothing" in warning.problem and "partition_format" in warning.fix and errors == []
+    edit(conf, GOLD, "partition_format: null", "partition_format: yyyy-MM-dd")
+    _, errors, warnings = validate_conf(conf)
+    assert not [e for e in errors + warnings if "partition" in e.problem]

@@ -428,6 +428,9 @@ class Dataset(SettingsOverride):
     record_time: TimeColumn | None = None
     load_time: TimeColumn | None = None
     partition_column: Identifier | None = None
+    # How the partition value is written (a Spark date pattern, e.g. yyyy-MM-dd): with it, windowed
+    # scans add a partition predicate beside the parsed load time (checks/partitions.py).
+    partition_format: NonEmptyStr | None = None
     file_name_column: Identifier | None = None
     key_unique: bool = False
     group_by: list[Identifier] = []
