@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -43,7 +43,7 @@ from hcsc.datalake.dre.checks.hop.common import hop_label
 from hcsc.datalake.dre.checks.hop.key_currency import judged_view
 from hcsc.datalake.dre.checks.patterns import checks_for
 from hcsc.datalake.dre.checks.rules.rule_check import RuleCheck
-from hcsc.datalake.dre.checks.rules.schedule import is_due, last_completed
+from hcsc.datalake.dre.checks.rules.schedule import due_moment, is_due, last_completed
 from hcsc.datalake.dre.checks.rules.template import TEMPLATES
 from hcsc.datalake.dre.checks.times import as_utc
 from hcsc.datalake.dre.config.fragments import check_fragments
@@ -325,7 +325,7 @@ def refresh_landing(spark: SparkSession, config: Config, work: list[Planned], ru
     problems: dict[str, CheckResult] = {}
     for feed_id, feed in feeds.items():
         try:
-            files = list_landing(spark, feed.landing.roots, feed.landing.file_name_pattern)
+            files = list_landing(spark, feed.landing.roots, feed.landing.file_name_pattern, feed.landing.max_files)
         except LandingError as exc:
             problems[feed_id] = did_not_run(exc.code, detail=exc.detail)
             continue
@@ -510,7 +510,14 @@ def retry_investigations(spark: SparkSession, config: Config, run: runs.Run, key
     """Explain again, against the data as it is now, the FAILED results whose investigation a run
     could not finish (pending_investigations). Each counts in this run's tally."""
 
-    since = run.run_date - timedelta(days=config.defaults.investigation_retry_days)
+    # Today's pending investigations every run (a store that was down for an hour); older ones once
+    # a day, in the hour from rule_run_at, so a failure that repeats is not retried hourly for a week.
+    d = config.defaults
+    since = run.run_date - timedelta(days=d.investigation_retry_days)
+    daily = due_moment("daily", run.started_at, d.rule_run_at, d.timezone, "MONDAY")
+    retry_older = daily is not None and daily <= as_utc(run.started_at) < daily + timedelta(hours=1)
+    if not retry_older:
+        since = run.run_date
     by_check = {(p.dataset.dataset, p.check.check_id, p.feed.feed if p.feed else None): p
                 for p in plan(config, per_table=False)}
     lines = []
@@ -523,6 +530,7 @@ def retry_investigations(spark: SparkSession, config: Config, run: runs.Run, key
         result = CheckResult("FAILED", row["population"], row["violations"], row["observed"], row["expected"],
                              group_values=dict(row["group_values"] or {}), detail=row["detail"])
         ctx = check_context(spark, config, planned, event, key_secret=key_secret, record_key_events=False)
+        ctx = replace(ctx, judge_open_keys=True)  # the failing judgement included open keys: list them again
         evaluation = Evaluation(planned, event, [result], datetime.now(timezone.utc), 0, ctx)
         explained = explain_failures(spark, config, evaluation, [row], run, tally,
                                      config.dataset_settings(row["dataset"]).compute_budget_minutes)

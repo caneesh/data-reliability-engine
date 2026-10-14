@@ -128,3 +128,24 @@ def test_incomplete_cause_investigations_are_reported_apart_from_the_checks() ->
         "run r3 (started 12:01 UTC): 2 of 3 cause investigations incomplete (the next run retries them)"]
     done = [rows[0], RunRow("r3", started, "COMPLETED", 5, 5, started + timedelta(minutes=2), 3, 3)]
     assert problems(done, now, 30) == []
+
+
+def test_the_watchdog_s_own_failures_have_their_own_exit_code(spark, tmp_path, capsys, monkeypatch) -> None:
+    """0 healthy, 1 alert, 3 the watchdog could not run: a scheduler keyed on exit codes can tell
+    an alert from a broken watchdog. Its store read is bounded by run_date."""
+    from hcsc.datalake.dre import watchdog as wd
+
+    replay = replay_conf(spark, tmp_path, "r12_exit")
+    (replay.conf / "defaults.yaml").write_text("dq_database: [not a name\n", encoding="utf-8")
+    code, out = watchdog(replay, capsys)
+    assert code == 3 and "cannot read" in out
+    replay = replay_conf(spark, tmp_path / "again", "r12_exit_exc")
+    monkeypatch.setattr(wd, "_utc", lambda value: 1 / 0)  # before the store read, whose errors are an alert
+    code, out = watchdog(replay, capsys)
+    assert code == 3 and "dre watchdog: cannot run (ZeroDivisionError)" in out
+    monkeypatch.undo()
+    seen: list[str] = []
+    real_sql = spark.sql
+    monkeypatch.setattr(spark, "sql", lambda text: seen.append(text) or real_sql(text))
+    wd.read_runs(spark, replay.dq, datetime(2026, 1, 15, 11, tzinfo=UTC))
+    assert "run_date >= DATE'2026-01-15'" in seen[-1]

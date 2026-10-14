@@ -41,8 +41,10 @@ def _code(exc: Exception) -> str:
     return "landing_unreadable" if any(name in text for name in _UNREADABLE) else "hdfs_unavailable"
 
 
-def list_landing(spark: SparkSession, roots: list[str], pattern: str = "*") -> list[FileInfo]:
-    """Every file under the roots (recursively) whose name matches pattern, sorted by path."""
+def list_landing(spark: SparkSession, roots: list[str], pattern: str = "*",
+                 max_files: int | None = None) -> list[FileInfo]:
+    """Every file under the roots (recursively) whose name matches pattern, sorted by path. More
+    than max_files of them is a LandingError (landing_unreadable) naming the count."""
     jvm = spark.sparkContext._jvm
     conf = spark.sparkContext._jsc.hadoopConfiguration()
     found: list[FileInfo] = []
@@ -63,6 +65,9 @@ def list_landing(spark: SparkSession, roots: list[str], pattern: str = "*") -> l
                     size_bytes=int(status.getLen()),
                     modified_at=datetime.fromtimestamp(status.getModificationTime() / 1000, tz=timezone.utc),
                 ))
+                if max_files is not None and len(found) > max_files:
+                    raise LandingError("landing_unreadable", f"more than {max_files} files under the landing roots "
+                                       "(landing.max_files): archive or raise the limit")
         except LandingError:
             raise
         except Exception as exc:

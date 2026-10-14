@@ -83,19 +83,33 @@ def problems(rows: list[RunRow], now: datetime, grace_minutes: int) -> list[str]
     return found
 
 
+EXIT_HEALTHY, EXIT_ALERT, EXIT_CANNOT_RUN = 0, 1, 3
+
+
 def read_runs(spark: SparkSession, dq_database: str, since: datetime) -> list[RunRow]:
     dq_database = validate_dq_database(dq_database)
     stamp = _utc(since).strftime("%Y-%m-%d %H:%M:%S")
+    day = _utc(since).date().isoformat()
     return [RunRow(r.run_id, _utc(r.started_at), r.status, r.checks_expected, r.checks_written,
                    _utc(r.ended_at) if r.ended_at else None, r.investigations_expected, r.investigations_done)
             for r in spark.sql(
                 f"SELECT run_id, started_at, ended_at, status, checks_expected, checks_written, "
                 f"investigations_expected, investigations_done "
-                f"FROM {dq_database}.dq_run WHERE started_at >= TIMESTAMP '{stamp}' "
+                f"FROM {dq_database}.dq_run WHERE run_date >= DATE'{day}' AND started_at >= TIMESTAMP '{stamp}' "
                 f"AND coalesce(execution_type, 'NORMAL') = 'NORMAL'").collect()]
 
 
 def watch(spark: SparkSession, conf: str, now: datetime | None = None) -> int:
+    """0 healthy, 1 alert sent (or printed), 3 the watchdog itself could not run (configuration
+    unreadable, or an error outside the store read), so a scheduler can tell the two apart."""
+    try:
+        return _watch(spark, conf, now)
+    except Exception as exc:
+        print(f"dre watchdog: cannot run ({type(exc).__name__})")
+        return EXIT_CANNOT_RUN
+
+
+def _watch(spark: SparkSession, conf: str, now: datetime | None) -> int:
     from pathlib import Path
 
     from hcsc.datalake.dre.config.loader import load
@@ -107,7 +121,7 @@ def watch(spark: SparkSession, conf: str, now: datetime | None = None) -> int:
         for error in errors:
             print(error)
         print(f"dre watchdog: cannot read {conf}/defaults.yaml")
-        return 1
+        return EXIT_CANNOT_RUN
     now = _utc(now or datetime.now(timezone.utc))
     grace = defaults.watchdog_grace_minutes
     try:
@@ -116,7 +130,7 @@ def watch(spark: SparkSession, conf: str, now: datetime | None = None) -> int:
         found = [f"cannot read {defaults.dq_database}.dq_run ({type(exc).__name__})"]
     if not found:
         print(f"dre watchdog: healthy (the run for {expected_hour(now, grace):%Y-%m-%d %H:00} UTC completed)")
-        return 0
+        return EXIT_HEALTHY
     subject = f"DRE {defaults.environment} watchdog: {len(found)} problem(s)"
     body = "\n".join([subject, "", *[f"- {p}" for p in found], ""])
     for line in found:
@@ -127,4 +141,4 @@ def watch(spark: SparkSession, conf: str, now: datetime | None = None) -> int:
         recipients = sorted({address for addresses in defaults.recipients.values() for address in addresses})
     for line in deliver([Message("watchdog", subject, body, recipients)], defaults):
         print(line)
-    return 1
+    return EXIT_ALERT

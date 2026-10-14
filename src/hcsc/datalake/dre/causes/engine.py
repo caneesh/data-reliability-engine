@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Any
 
+from hcsc.datalake.dre.causes.landing import landing_since
 from hcsc.datalake.dre.causes.base import (
     BUILTINS, CONFIRMED, ERROR, NOT_READY, RULED_OUT, CauseContext, Failure, Outcome, error, not_ready,
 )
@@ -101,6 +102,9 @@ def explain(cx: CauseContext, result: CheckResult, evaluation_id: str, run_id: s
     if not failures:  # nothing explainable (say, only UNASSESSABLE keys): recorded, never left silent
         failures, listing_error = [Failure(ref=None)], not_ready(NOTHING_TO_EXPLAIN)
     cx.cache["failure_refs"] = [f.ref for f in failures if f.ref is not None]  # probes look for these only
+    cx.cache["failure_files"] = sorted({p.rstrip("/").rsplit("/", 1)[-1] for f in failures for p in (f.files or ())}
+                                       | {f.file_name for f in failures if f.file_name is not None})
+    cx.cache["landing_since"] = landing_since(cx, failures)
     for failure in failures:
         for order_no, entry in enumerate(ft.order, 1):
             if entry.fallback:

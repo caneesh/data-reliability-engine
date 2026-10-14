@@ -129,6 +129,9 @@ class CheckContext:
     # NORMAL runs keep the open-key state (read v_open_keys, write key events); a RERUN or REPLAY
     # of a historical window neither reads nor changes it, so repeating one changes nothing.
     record_key_events: bool = True
+    # Judge the hop's open keys too (NORMAL runs do; a retried investigation must, to list the keys
+    # the failing evaluation judged only because they were open); None: as record_key_events.
+    judge_open_keys: bool | None = None
     # The first run_date the hop's open-key read looks at (defaults.history_lookback_days); None: all.
     history_since: date | None = None
     # The check's parameters (an instance of Check.params_model), resolved by resolve_params (called from

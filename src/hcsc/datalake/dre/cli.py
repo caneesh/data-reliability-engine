@@ -47,7 +47,9 @@ def build_parser() -> argparse.ArgumentParser:
             cmd.add_argument("--feed", required=True, help="the feed to check")
         if name == "trace":
             cmd.add_argument("--dataset", required=True, help="the dataset to start from")
-            cmd.add_argument("--key", required=True, help='the key values in the dataset\'s key order, "k1,k2,..."')
+            cmd.add_argument("--key", help='the key values in the dataset\'s key order, "k1,k2,..." (visible to ps '
+                                           'and in the shell history: prefer --key-file)')
+            cmd.add_argument("--key-file", help="a file whose first line is the key (- reads it from stdin)")
         if name == "run":
             cmd.add_argument("--feed", help="run one feed only (default: all feeds)")
             cmd.add_argument("--execution-type", default="NORMAL", choices=("NORMAL", "RERUN", "REPLAY"),
@@ -174,7 +176,7 @@ def main(argv: list[str] | None = None) -> int:
         from hcsc.datalake.dre.session import get_spark
         from hcsc.datalake.dre.trace import run_trace
 
-        return run_trace(get_spark(), args.conf, args.dataset, args.key)
+        return run_trace(get_spark(), args.conf, args.dataset, args.key, args.key_file)
     if args.command == "watchdog":
         from hcsc.datalake.dre.session import get_spark
         from hcsc.datalake.dre.watchdog import watch

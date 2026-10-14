@@ -409,6 +409,18 @@ The smaller items of the verification report that need no spec answer. Decisions
 11. **The slot and volume scans read only the span their slots cover (P11, first half).** Before the range join, so the nested loop runs over the window's rows. ON_TIME and ZERO_ROWS still scan separately: sharing a scan across two checks needs state across evaluations the runner does not have; with the pre-filter and partition pruning each scan is small.
 12. **The decisions entry on event windows (D1)** no longer says CONFIGURATION holds a window.
 
+## Independent verification, batch 3b (2026-10-14)
+
+1. **A retried investigation judges the hop's open keys (F6).** The failing evaluation judged them, so the retry must list them too; `CheckContext.judge_open_keys` says so without writing key events. Tested end to end: a key judged only because it was open, its investigation unstorable, then retried with a real cause.
+2. **The landing causes read from the evaluation's earliest failure (H1).** Every landing cause looks at files first seen with or after its own failure, so the read is bounded to files first seen since the earliest missed slot or the earliest first-seen time of the named files (one bounded read of `dq_file`), by `run_date` and `first_seen_at`, and the raw dataset is counted for those files only. A named file the registry does not know leaves the read unbounded.
+3. **`landing.max_files` (P7b).** A listing that passes it is DID_NOT_RUN / landing_unreadable naming the limit; the alternative, skipping files older than the registry retention, is the spec question on first-seen (verification report, section 9) and is not done.
+4. **The log probe collects only lines naming a failing file, at most 500 (P12).** The cause engine records the evaluation's failing files (base names) beside its refs; a probe used on its own, without that list, reads as before.
+5. **Older pending investigations are retried once a day (P15).** Today's every run (a store down for an hour), older ones in the hour from `rule_run_at`, so a failure that repeats is not retried hourly for seven days.
+6. **The watchdog's own failure is exit 3 (N7).** A store that cannot be read stays an alert (exit 1); configuration it cannot read, or an error before the store read, is exit 3, so a scheduler keyed on exit codes tells them apart. Its `dq_run` read is bounded by `run_date`.
+7. **`dre trace` takes the key from a file or stdin and carries it as data (N2).** `--key-file FILE` (first line; `-` for stdin) keeps the key off the command line; `--key` stays for interactive use with a warning in its help. The key parts go into a one-row temp view (a local relation, whose rows no plan prints) that the layer queries cross-join, so no SQL text, plan or history-server page carries them; the normalisers apply to the view's columns in SQL as before.
+
+Not done from the report's batch-3 list: P16 (a derived upstream materialised once per hop; P3's candidate keys took most of its cost), the second half of P11 (one scan for ON_TIME and ZERO_ROWS), and everything waiting on a spec answer (F1, F4, F7, F9, P9, P13, the STILL_FLAGGED question).
+
 ## Notes for later steps
 
 - **Step 4:** done: `dre dry-run` parses SQL fragments (`config/fragments.py`).

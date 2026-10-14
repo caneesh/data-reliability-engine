@@ -197,3 +197,53 @@ def test_a_slow_key_event_write_is_cancelled_by_the_budget_and_marked_incomplete
     assert (len(stored), complete) == (1, 0)
     current = [r for r in spark.table(f"{replay.dq}.v_latest_result").collect() if r.check_id == "HOP_KEY_CURRENCY"]
     assert [(r.state, r.reason_code) for r in current] == [("DID_NOT_RUN", "evidence_incomplete")]
+
+
+def test_older_pending_investigations_are_retried_once_a_day(spark, tmp_path, monkeypatch) -> None:
+    """A pending investigation from today is retried every run; older ones only in the hour from
+    rule_run_at, so a failure that repeats is not retried hourly for a week."""
+    from datetime import datetime, timezone
+
+    from hcsc.datalake.dre import runner
+    from hcsc.datalake.dre.config.loader import load
+    from hcsc.datalake.dre.runner import Investigations, retry_investigations
+    from hcsc.datalake.dre.store import runs
+
+    replay = replay_conf(spark, tmp_path, "recover_cadence")
+    config, _ = load(replay.conf)  # rule_run_at 06:00 America/Chicago = 12:00 UTC in January
+    asked: list = []
+    monkeypatch.setattr(runner, "pending_investigations", lambda spark_, config_, since, skip: asked.append(since) or [])
+    tally = Investigations()
+    off_hour = runs.new_run(now=datetime(2026, 1, 15, 15, tzinfo=timezone.utc))
+    retry_investigations(spark, config, off_hour, None, tally, set())
+    assert asked[-1] == off_hour.run_date  # today only
+    daily_hour = runs.new_run(now=datetime(2026, 1, 15, 12, 20, tzinfo=timezone.utc))
+    retry_investigations(spark, config, daily_hour, None, tally, set())
+    assert asked[-1] == daily_hour.run_date - timedelta(days=config.defaults.investigation_retry_days)
+
+
+def test_a_retried_hop_investigation_sees_the_keys_judged_because_they_were_open(spark, tmp_path, monkeypatch) -> None:
+    """A key judged only because it was open (R05 then a later window) failed; its investigation
+    could not be stored; the retry must judge the open keys too, or it would find nothing."""
+    from hcsc.datalake.dre import runner
+
+    replay = setup(spark, tmp_path, "recover_open_retry")  # R05: gold holds an older version of the key
+    opened, terminated = curated_load_time(30), curated_load_time(12)
+    create_table(spark, replay.curated, CURATED_COLUMNS,
+                 [curated_row(updated=opened), curated_row(end="2026-06-30", updated=terminated)])
+    create_table(spark, replay.gold, GOLD_COLUMNS, [gold_row(record=opened, loaded=gold_load_time(29))])
+    assert main(["run", "--conf", str(replay.conf)]) == 0  # the key is FLAGGED (STALE) and explained
+    assert key_events(spark, replay) == [(key_hash(SECRET, KEY), "FLAGGED", "STALE")]
+
+    def store_down(*args, **kwargs):
+        raise OSError("synthetic cause store failure")
+    monkeypatch.setattr(runner, "append_cause_results", store_down)
+    # The next window: the key is judged only because it is open; the investigation cannot be stored.
+    assert main(["run", "--conf", str(replay.conf), "--feed", "example_realtime"]) == 0
+    assert key_events(spark, replay)[-1][1] == "STILL_FLAGGED"
+    monkeypatch.undo()
+    assert main(["run", "--conf", str(replay.conf), "--feed", "example_realtime"]) == 0  # retries it
+    rows = spark.table(f"{replay.dq}.dq_cause_result").collect()
+    retried = [r for r in rows if r.run_id == final_runs(spark, replay)[-1].run_id]
+    assert retried and {r.failure_ref for r in retried} == {key_hash(SECRET, KEY)}
+    assert all("nothing to explain" not in (r.evidence or "") for r in retried)

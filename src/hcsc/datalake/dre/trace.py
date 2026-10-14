@@ -4,18 +4,21 @@ Follows one key from D up its `upstream` chain (through each key_map) and prints
 layer, most upstream first: present or not, record time, load time and file of its latest
 version. Then the first hop where the key is absent or older downstream, and that hop's cause
 line from the dq store (HOP_KEY_CURRENCY causes, found by the key's key_hash). Read-only. The
-key itself is never printed.
+key itself is never printed, and it travels as data: a one-row temp view the layer queries join,
+so it appears in no SQL text and no query plan (`--key-file` or `--key -` keep it off the command
+line too).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from hcsc.datalake.dre.checks.base import render_sql
 from hcsc.datalake.dre.checks.keys import column_expr, normalised
-from hcsc.datalake.dre.checks.times import as_utc, sql_string, utc_expr
+from hcsc.datalake.dre.checks.times import as_utc, utc_expr
 from hcsc.datalake.dre.runner import load_config, read_key_secret
 from hcsc.datalake.dre.store.names import validate_dq_database, validate_identifier
 
@@ -26,10 +29,13 @@ if TYPE_CHECKING:
     from hcsc.datalake.dre.config.models import Dataset
 
 
+KEY_VIEW = "dre_trace_key"  # the one-row temp view holding the traced key's raw parts (dre_k0, dre_k1, ...)
+
+
 @dataclass
 class Layer:
     dataset: Dataset
-    values: dict[str, str]          # key column -> normalised value, in this layer's columns
+    values: dict[str, str]          # key column -> SQL for the traced value (normalised), in this layer's columns
     downstream: str | None = None   # the dataset this layer feeds, along the traced chain
     rows: int = 0
     record: datetime | None = None
@@ -41,12 +47,19 @@ def _when(value: datetime | None) -> str:
     return "-" if value is None else as_utc(value).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
-def normalise_values(spark: SparkSession, ds: Dataset, raw: list[str]) -> dict[str, str]:
-    """The given key values (in ds.key order) with ds's key_normalise applied, through Spark."""
-    exprs = [normalised(sql_string(v), ds.key_normalise[c]) if c in ds.key_normalise else sql_string(v)
-             for c, v in zip(ds.key, raw)]
-    row = spark.sql("SELECT " + ", ".join(f"{e} AS k{i}" for i, e in enumerate(exprs))).collect()[0]
-    return {c: row[f"k{i}"] for i, c in enumerate(ds.key)}
+def key_view(spark: SparkSession, raw: list[str]) -> str:
+    """Hold the raw key parts in a one-row temp view: the values are data in a local relation, not
+    literals in SQL text, so they show up in no plan or history-server page."""
+    schema = ", ".join(f"dre_k{i} STRING" for i in range(len(raw)))
+    spark.createDataFrame([tuple(raw)], schema).createOrReplaceTempView(KEY_VIEW)
+    return KEY_VIEW
+
+
+def value_exprs(ds: Dataset) -> dict[str, str]:
+    """Key column -> SQL for the traced value in the starting dataset's normalised form (the form
+    every layer's own normaliser produces for the same key), read from the key view."""
+    return {c: normalised(f"{KEY_VIEW}.dre_k{i}", ds.key_normalise[c]) if c in ds.key_normalise
+            else f"{KEY_VIEW}.dre_k{i}" for i, c in enumerate(ds.key)}
 
 
 def chain(config: Config, ds: Dataset, values: dict[str, str]) -> list[Layer]:
@@ -75,9 +88,9 @@ def look_up(spark: SparkSession, layer: Layer, config: Config) -> None:
     default_tz = config.defaults.timezone
     if ds.record_time is None:
         raise ValueError(f"{ds.dataset} has no record_time")
-    match = [(column_expr(ds, c), sql_string(v)) for c, v in layer.values.items()]
+    match = [(column_expr(ds, c), expr) for c, expr in layer.values.items()]
     sql = render_sql("trace_layer.sql.j2", table=source_of(ds, config.datasets, default_tz),
-                     feed_filter=ds.feed_filter, match=match,
+                     feed_filter=ds.feed_filter, match=match, key_view=KEY_VIEW,
                      record_expr=utc_expr(ds.record_time, default_tz),
                      load_expr=utc_expr(ds.load_time, default_tz) if ds.load_time else None,
                      file_column=ds.file_name_column)
@@ -106,8 +119,8 @@ def layer_key_hash(spark: SparkSession, layer: Layer, key_secret: bytes) -> str:
 
     register_key_hash(spark, key_secret)
     ds = layer.dataset
-    parts = ["CAST(NULL AS STRING)" if layer.values[c] is None else sql_string(layer.values[c]) for c in ds.key]
-    return spark.sql(f"SELECT {HASH_FUNCTION}({key_string(parts)}) AS h").collect()[0].h
+    parts = [layer.values[c] for c in ds.key]
+    return spark.sql(f"SELECT {HASH_FUNCTION}({key_string(parts)}) AS h FROM {KEY_VIEW}").collect()[0].h
 
 
 def cause_line(spark: SparkSession, config: Config, up: Layer, down: Layer, key_secret: bytes | None) -> str:
@@ -139,7 +152,8 @@ def cause_line(spark: SparkSession, config: Config, up: Layer, down: Layer, key_
 def trace(spark: SparkSession, config: Config, dataset_id: str, raw_key: list[str],
           key_secret: bytes | None) -> list[str]:
     ds = config.datasets[dataset_id]
-    layers = chain(config, ds, normalise_values(spark, ds, raw_key))
+    key_view(spark, raw_key)
+    layers = chain(config, ds, value_exprs(ds))
     lines = []
     for layer in layers:
         look_up(spark, layer, config)
@@ -161,7 +175,19 @@ def trace(spark: SparkSession, config: Config, dataset_id: str, raw_key: list[st
     return lines
 
 
-def run_trace(spark: SparkSession, conf: str, dataset_id: str, key: str) -> int:
+def read_key(key: str | None, key_file: str | None) -> str | None:
+    """The key text: --key as given, or the first non-empty line of --key-file ("-" is stdin)."""
+    import sys
+
+    if key is not None:
+        return key
+    if key_file is None:
+        return None
+    text = sys.stdin.read() if key_file == "-" else Path(key_file).read_text(encoding="utf-8")
+    return next((line.strip() for line in text.splitlines() if line.strip()), None)
+
+
+def run_trace(spark: SparkSession, conf: str, dataset_id: str, key: str | None, key_file: str | None = None) -> int:
     config = load_config(conf, "trace")
     if config is None:
         return 3
@@ -169,7 +195,15 @@ def run_trace(spark: SparkSession, conf: str, dataset_id: str, key: str) -> int:
     if ds is None:
         print(f"dre trace: unknown dataset {dataset_id!r}")
         return 3
-    raw_key = [part.strip() for part in key.split(",")]
+    try:
+        key_text = read_key(key, key_file)
+    except OSError as exc:
+        print(f"dre trace: cannot read the key file ({type(exc).__name__})")
+        return 3
+    if not key_text:
+        print("dre trace: give the key with --key-file FILE (its first line; - for stdin) or --key")
+        return 3
+    raw_key = [part.strip() for part in key_text.split(",")]
     if len(raw_key) != len(ds.key):
         print(f"dre trace: {dataset_id} has a {len(ds.key)}-part key ({', '.join(ds.key)}); "
               f"got {len(raw_key)} value(s)")

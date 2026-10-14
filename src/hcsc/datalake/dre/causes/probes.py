@@ -149,6 +149,9 @@ def _names(failure: Failure) -> list[str]:
     return [failure.file_name] if failure.file_name else []
 
 
+LOG_LINES = 500  # the most matching lines a log probe keeps
+
+
 @probe("log_contains", LogContains)
 def log_contains(cx: CauseContext, params: Any, failure: Failure) -> Outcome:
     from pyspark.sql import functions as F
@@ -157,16 +160,26 @@ def log_contains(cx: CauseContext, params: Any, failure: Failure) -> Outcome:
     if not names:
         return ruled_out(reason="no file to look for")
 
+    # Every failing file of the evaluation (the cause engine lists them): the lines read once serve
+    # every failure. Without the list (a probe used on its own) nothing narrows the read by name.
+    wanted = sorted(set(cx.cache["failure_files"])) if cx.cache.get("failure_files") else None
+
     def matching() -> tuple[int, list[tuple[str, str]]]:
-        """(log files, (log, line) for every line matching the pattern): read once per evaluation.
-        The lines stay in memory; only log paths and counts go into evidence."""
+        """(log files, (log, line) for lines matching the pattern that name a failing file): read
+        once per evaluation, bounded in Spark to the files looked for and to LOG_LINES lines. The
+        lines stay in memory; only log paths and counts go into evidence."""
+        from functools import reduce
+
         logs = glob_files(cx.spark, params.path_glob)
         if not logs:
             return 0, []
         lines = cx.spark.read.text(logs).withColumn("log", F.input_file_name())
-        return len(logs), [(r["log"], r["value"]) for r in lines.filter(F.col("value").rlike(params.pattern))
-                           .select("log", "value").collect()]
-    logs, lines = cx.cached(f"log_contains:{params.path_glob}:{params.pattern}", matching)
+        matches = F.col("value").rlike(params.pattern)
+        if wanted:
+            matches = matches & reduce(lambda a, b: a | b, (F.col("value").contains(n) for n in wanted))
+        return len(logs), [(r["log"], r["value"]) for r in lines.filter(matches)
+                           .select("log", "value").limit(LOG_LINES).collect()]
+    logs, lines = cx.cached(f"log_contains:{params.path_glob}:{params.pattern}:{hash(tuple(wanted or ()))}", matching)
     if not logs:
         return ruled_out(logs=0)
     found: dict[str, int] = {}

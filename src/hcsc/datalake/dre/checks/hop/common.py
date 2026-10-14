@@ -100,7 +100,9 @@ def hop_params(ctx: CheckContext, event: Event, up_id: str, up: Dataset | None) 
         "full_sweep": ctx.full_sweep, "hash_fn": HASH_FUNCTION,
         # hashed: compute key_hash with the secret; use_open: also judge keys open in v_open_keys
         # (NORMAL runs only: the open-key state is today's, not a historical window's)
-        "hashed": ctx.key_secret is not None, "use_open": ctx.key_secret is not None and ctx.record_key_events,
+        "hashed": ctx.key_secret is not None,
+        "use_open": ctx.key_secret is not None and (ctx.record_key_events if ctx.judge_open_keys is None
+                                                    else ctx.judge_open_keys),
         "dq_database": ctx.dq_database, "dataset": ds.dataset, "hop": hop_label(up_id, ds.dataset),
         # open keys are read from dq_key_event's run_date partitions on or after this (None: all of them)
         "events_since": ctx.history_since.isoformat() if ctx.history_since is not None else None,

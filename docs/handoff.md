@@ -9,7 +9,7 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
 - **Release 1** (spec section 10, steps 1 to 11) is done. It was then extended by two code reviews and an architecture review.
 - **Release 2** has started. Derived datasets (join and aggregate hops) are built.
 - **Release 3** (extensibility) is built: the eight-step plan in `docs/design/extensibility.md`, agreed by the user, built in order; each step has a spec amendment and a `docs/decisions.md` entry, and `docs/extending.md` is the how-to.
-- **Tests:** 652, all passing (`pytest --collect-only -q | tail -1` gives the exact count). A full local run takes about 20 minutes; CI about 15. Replay scenarios R01 to R13 all pass, plus a three-layer acceptance test.
+- **Tests:** 688, all passing (`pytest --collect-only -q | tail -1` gives the exact count). A full local run takes about 20 minutes; CI about 15. Replay scenarios R01 to R13 all pass, plus a three-layer acceptance test.
 
 ## History, in order (each step green in CI)
 
@@ -32,6 +32,11 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
 | Extensibility step 8: `docs/extending.md` | `a8a0107` | #38 |
 | Code review of release 3 (`docs/code-review-2026-10-13.md`) and its fixes A1 to A11 | `23de7a7` (#40 red: the review alone), then `9591b1e`, `1243f93`, `614a5b3`, `7eac24e`, `01fcadf` | #41 (one run for the push of all five) |
 | Design pass from that review (section B) | `9b3592d`, `d74e5c8`, `7fdc435`, `85d10f8`, `05c9464` | #42 (one run for the push of all five) |
+| Independent verification (the uploaded brief; report kept outside the repository), batch 1: N3, N1, N5, F2, P5, P2, P14 | `c089dbb` (#44 red: a test's duplicate YAML key), `e4d549d` | #45 |
+| Verification batch 2: partition pruning (P4), budgeted investigations and writes (P6), released checkpoints (P8), bounded open-key read (P1) | `9782c38` | #46 |
+| Verification P3: candidate keys before the hop's window functions | `02274b7` | #47 |
+| Verification batch 3a: script transform by its USING, framed run output, bounded reads, validate warnings, null keys | `8e10e19` | #48 |
+| Verification batch 3b: retried investigations judge open keys, bounded landing and log reads, `landing.max_files`, daily retry cadence, watchdog exit codes, `dre trace --key-file` | the commit after `8e10e19` | the run for its push |
 
 Each row has a section in `docs/decisions.md` saying what was decided and why.
 
@@ -42,6 +47,17 @@ Each row has a section in `docs/decisions.md` saying what was decided and why.
 1. Turn it into configuration, or a small change.
 2. Add tests, and get CI green.
 3. Summarise, starting with the CI result.
+
+**Spec questions from the independent verification (2026-10-13; the report itself is outside the repository).** Each changes behaviour, so the engine keeps today's reading until the user answers; the finding ids are the report's:
+
+1. Section 4: rows whose `load_time` lands in an already-closed window are never re-read; require `settle_minutes` to exceed the longest write, or re-read the previous window (F9)?
+2. Section 4: RERUN "for every dataset planned" and REPLAY "exactly" versus the code's due-ness gate, which skips windows that were due only because files landed (F1)?
+3. Section 6: "its latest load time plus sla_hours": the key's latest load time, or the load time of its latest version (F4)?
+4. Section 4 and 5: should RERUN and REPLAY write `dq_cause_result` rows under the NORMAL `evaluation_id` (F7)?
+5. Section 5: what first-seen means for a file still under its root after its `dq_file` rows aged out (P9)?
+6. Section 6: STILL_FLAGGED written per evaluation (every open key, every evaluation), or only changes with "still open" derived in the view (P1)?
+7. Section 6: T1_KEY_DUPLICATES per window (keys loaded in it) or whole table (P13)?
+8. Section 11: record the platform prerequisites explicitly: service-account grants (SELECT on sources, read on landing and log paths, INSERT on dq only, no HDFS write), the Spark settings for secret and key-string exposure on executors (`spark.authenticate`, `spark.network.crypto.enabled`, `spark.io.encryption.enabled`), plan redaction (`spark.sql.redaction.string.regex`), and dynamic allocation keeping executors with cached blocks.
 
 **Developer: 16 questions.** They are in the user's Claude Doc, "DRE: questions for the developer" (https://claude.ai/code/artifact/0364b496-8c3e-437a-a070-ccd20af9174c):
 

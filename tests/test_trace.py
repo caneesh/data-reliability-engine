@@ -6,6 +6,7 @@ from hcsc.datalake.dre.cli import main
 from tests.fixtures.layers import CURATED_COLUMNS, GOLD_COLUMNS, create_table, curated_load_time, curated_row, gold_row
 from tests.replay.conftest import replay_conf
 
+CURATED = "datasets/example_curated_enrollment.yaml"
 CURATED_LOAD_TIME = ("load_time: null ", "load_time: { column: sourcelastupdatets, granularity: minute } ")
 KEY = ["--dataset", "gold_member_coverage", "--key", "000123401,01,2026-01-01,AGR-A"]
 
@@ -73,3 +74,28 @@ def test_the_cause_line_is_the_gap_hop_s_own(spark, tmp_path, capsys) -> None:
     code, lines = trace(replay, capsys)
     assert code == 0
     assert lines[-1] == "cause: not evaluated (no failed HOP_KEY_CURRENCY for this key at this hop in the dq store)"
+
+
+def test_the_key_can_come_from_a_file_or_stdin_and_never_enters_sql_text(spark, tmp_path, capsys, monkeypatch) -> None:
+    """--key-file keeps the key off the command line; either way the key is data in a one-row temp
+    view, so no SQL the trace runs carries it as a literal."""
+    import io
+
+    replay = replay_conf(spark, tmp_path, "trace_key_file", {CURATED: [CURATED_LOAD_TIME]})
+    create_table(spark, replay.curated, CURATED_COLUMNS, [curated_row()])
+    create_table(spark, replay.gold, GOLD_COLUMNS, [gold_row()])
+    key_file = tmp_path / "key.txt"
+    key_file.write_text("\n000123401,01,2026-01-01,AGR-A\n", encoding="utf-8")
+    seen: list[str] = []
+    real_sql = spark.sql
+    monkeypatch.setattr(spark, "sql", lambda text: seen.append(text) or real_sql(text))
+    code, lines = trace(replay, capsys, ["--dataset", "gold_member_coverage", "--key-file", str(key_file)])
+    assert code == 0 and lines[-1].startswith("no gap")
+    assert not [s for s in seen if "123401" in s or "AGR-A" in s]  # literals nowhere in the SQL text
+    monkeypatch.setattr("sys.stdin", io.StringIO("000123401,01,2026-01-01,AGR-A\n"))
+    code, lines = trace(replay, capsys, ["--dataset", "gold_member_coverage", "--key-file", "-"])
+    assert code == 0 and lines[-1].startswith("no gap")
+    code, lines = trace(replay, capsys, ["--dataset", "gold_member_coverage"])
+    assert code == 3 and "--key-file" in lines[-1]
+    code, lines = trace(replay, capsys, ["--dataset", "gold_member_coverage", "--key-file", str(tmp_path / "missing.txt")])
+    assert code == 3 and "cannot read the key file" in lines[-1]

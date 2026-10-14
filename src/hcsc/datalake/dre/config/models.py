@@ -302,6 +302,9 @@ class Landing(Model):
     roots: Annotated[list[NonEmptyStr], Field(min_length=1)]
     file_format: FileFormat
     file_name_pattern: NonEmptyStr = "*"
+    # More files than this under the roots (an archive that is never cleared) and the listing is
+    # DID_NOT_RUN / landing_unreadable with the count, rather than walking the archive every hour.
+    max_files: int | None = Field(default=None, ge=1)
 
 
 class Cadence(Model):

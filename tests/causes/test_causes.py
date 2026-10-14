@@ -505,3 +505,51 @@ def test_file_value_compare_can_confirm_on_any_different_partition(spark, tmp_pa
     assert file_value_compare(cx, params("20260930", "later"), failing).state == "RULED_OUT"
     assert file_value_compare(cx, params("20260930", "different"), failing).state == "CONFIRMED"
     assert file_value_compare(cx, params("20261001", "different"), failing).state == "RULED_OUT"
+
+
+def test_log_contains_collects_only_lines_naming_a_failing_file(spark, tmp_path, monkeypatch) -> None:
+    """The log probe reads the lines that match the pattern and name one of the evaluation's
+    failing files, bounded in Spark; a log of many matching lines costs the driver only those."""
+    from pyspark.sql import DataFrame
+
+    log = tmp_path / "load.log"
+    log.write_text("\n".join([f"ERROR line {n} something else" for n in range(2000)]
+                             + ["ERROR failed to load rt_0001.seq", "INFO rt_0001.seq ok"]), encoding="utf-8")
+    collected: list[int] = []
+    real_collect = DataFrame.collect
+
+    def counting_collect(frame):
+        rows = real_collect(frame)
+        collected.append(len(rows))
+        return rows
+    monkeypatch.setattr(DataFrame, "collect", counting_collect)
+    cx = context(spark, gold("causes.unused"), "T1_FILES_NOT_LOADED", feed())
+    cx.cache["failure_files"] = ["rt_0001.seq"]
+    params = LogContains(path_glob=str(tmp_path / "*.log"), pattern="ERROR")
+    out = log_contains(cx, params, Failure("rt_0001.seq", files=(f"{tmp_path}/landing/rt_0001.seq",)))
+    assert out.state == "CONFIRMED" and list(out.evidence["logs"].values()) == [1]
+    assert [k.endswith("load.log") for k in out.evidence["logs"]] == [True]
+    assert max(collected) == 1  # not the 2000 other ERROR lines
+
+
+def test_landing_files_are_read_from_the_earliest_failure_on(spark) -> None:
+    """The landing causes look at files first seen with or after their failure, so the read is
+    bounded to files first seen since the evaluation's earliest failure (the cause engine records
+    it): an old file is neither collected nor counted, and the raw count covers those files only."""
+    from hcsc.datalake.dre.causes.landing import landing_files, landing_since
+
+    # the bound sits after every dq_file row the module's other tests register (January 15th)
+    old, recent = datetime(2025, 6, 1, 12, tzinfo=UTC), datetime(2026, 1, 16, 10, tzinfo=UTC)
+    append_rows(spark, DQ, "dq_file", [
+        {"path": "file:/landing/old_0001.seq", "feed": "example_realtime", "first_seen_at": old, "size_bytes": 10,
+         "run_id": "r0", "run_date": old.date()},
+        {"path": "file:/landing/rt_0009.seq", "feed": "example_realtime", "first_seen_at": recent, "size_bytes": 10,
+         "run_id": "r9", "run_date": recent.date()}])
+    cx = context(spark, gold("causes.unused"), "T1_ON_TIME", feed())
+    failures = [Failure("2026-01-16T09:00:00+00:00", slot=datetime(2026, 1, 16, 9, tzinfo=UTC)),
+                Failure("file:/landing/rt_0009.seq", files=("file:/landing/rt_0009.seq",))]
+    since = landing_since(cx, failures)
+    assert since == datetime(2026, 1, 16, 9, tzinfo=UTC)  # the slot comes first
+    cx.cache["landing_since"] = since
+    assert set(landing_files(cx)) == {"file:/landing/rt_0009.seq"}
+    assert landing_since(cx, [Failure("x", files=("file:/landing/unknown.seq",))]) is None  # unknown file: no bound
