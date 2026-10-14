@@ -32,7 +32,7 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
 | Extensibility step 8: `docs/extending.md` | `a8a0107` | #38 |
 | Code review of release 3 (`docs/code-review-2026-10-13.md`) and its fixes A1 to A11 | `23de7a7` (#40 red: the review alone), then `9591b1e`, `1243f93`, `614a5b3`, `7eac24e`, `01fcadf` | #41 (one run for the push of all five) |
 | Design pass from that review (section B) | `9b3592d`, `d74e5c8`, `7fdc435`, `85d10f8`, `05c9464` | #42 (one run for the push of all five) |
-| Independent verification (the uploaded brief; report kept outside the repository), batch 1: N3, N1, N5, F2, P5, P2, P14 | `c089dbb` (#44 red: a test's duplicate YAML key), `e4d549d` | #45 |
+| Independent verification (the uploaded brief; report in `docs/verification-2026-10-13.md`), batch 1: N3, N1, N5, F2, P5, P2, P14 | `c089dbb` (#44 red: a test's duplicate YAML key), `e4d549d` | #45 |
 | Verification batch 2: partition pruning (P4), budgeted investigations and writes (P6), released checkpoints (P8), bounded open-key read (P1) | `9782c38` | #46 |
 | Verification P3: candidate keys before the hop's window functions | `02274b7` | #47 |
 | Verification batch 3a: script transform by its USING, framed run output, bounded reads, validate warnings, null keys | `8e10e19` | #48 |
@@ -48,7 +48,7 @@ Each row has a section in `docs/decisions.md` saying what was decided and why.
 2. Add tests, and get CI green.
 3. Summarise, starting with the CI result.
 
-**Spec questions from the independent verification (2026-10-13; the report itself is outside the repository).** Each changes behaviour, so the engine keeps today's reading until the user answers; the finding ids are the report's:
+**Spec questions from the independent verification (2026-10-13; `docs/verification-2026-10-13.md`, section 9).** Each changes behaviour, so the engine keeps today's reading until the user answers; the finding ids are the report's:
 
 1. Section 4: rows whose `load_time` lands in an already-closed window are never re-read; require `settle_minutes` to exceed the longest write, or re-read the previous window (F9)?
 2. Section 4: RERUN "for every dataset planned" and REPLAY "exactly" versus the code's due-ness gate, which skips windows that were due only because files landed (F1)?

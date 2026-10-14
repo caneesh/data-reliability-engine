@@ -23,3 +23,5 @@ The rules from earlier work that still apply:
 - Never invent production table, column or path names. Real keys and tables come in later iterations, from me.
 - When I upload a review or principles document, check each point against the code and tell me where you disagree. Don't follow it blindly.
 - No pull request or merge unless I ask. When I do ask, use a merge commit.
+
+- Gate every commit on the test suite's exit status (`pytest ...; test $? -eq 0 && git commit`), never on a command that cannot fail: a commit chained after `tail` went out red twice (CI runs #33 and #44).
