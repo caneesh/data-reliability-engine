@@ -229,7 +229,8 @@ def test_one_broken_hop_does_not_hide_the_others(spark, check) -> None:
     results = run_hops(spark, check, dn, [a, b])
     assert results["curated_a"].state in ("FAILED", "DID_NOT_RUN")
     assert results["curated_a"].reason_code != "table_missing"
-    assert (results["curated_b"].state, results["curated_b"].reason_code) == ("DID_NOT_RUN", "table_missing")
+    assert (results["curated_b"].state, results["curated_b"].reason_code) == ("DID_NOT_RUN", "table_missing"), (
+        results["curated_b"].detail)
 
 
 def test_full_sweep_clears_keys_no_longer_upstream(spark) -> None:
@@ -488,3 +489,33 @@ def test_open_keys_are_read_from_recent_partitions_only(spark, monkeypatch) -> N
     plan = real_sql("EXPLAIN FORMATTED " + judged_sql).collect()[0][0]
     event_scan = [part for part in plan.split("PartitionFilters: [") if "run_date" in part.split("]", 1)[0]]
     assert event_scan, plan
+
+
+def test_only_candidate_keys_go_through_the_window_functions(spark, monkeypatch) -> None:
+    """On a normal day the hop pre-selects the keys the window can judge or count (loaded upstream
+    since the judged range began, reloaded here in the window, or open) before the window functions
+    and the key hashing; the judged conditions still decide. The results match the unrestricted
+    judgement: one key judged, one pending, one untouched. The full sweep takes every key."""
+    before_range, pending_load = datetime(2026, 1, 10, 9, 0), datetime(2026, 1, 16, 11, 0)
+    rows = [curated_row(sub_id="1", updated=before_range), curated_row(sub_id="2", updated=IN_WINDOW),
+            curated_row(sub_id="3", updated=pending_load)]
+    gold_rows = [gold_row(sub_id="000000001", record=before_range), gold_row(sub_id="000000002", record=EARLIER)]
+    up, dn = tables(spark, "kc_candidates", rows, gold_rows)
+    seen: list[str] = []
+    real_sql = spark.sql
+    monkeypatch.setattr(spark, "sql", lambda text: seen.append(text) or real_sql(text))
+    [r] = run(spark, KeyCurrency(), dn, up, secret=SECRET)
+    assert (r.state, r.population, r.violations) == ("FAILED", 1, 1)  # key 2 stale; key 1 untouched; key 3 pending
+    assert r.observed == "0 missing and 1 stale of 1 keys; 1 key pending (within sla_hours)"
+    judged_sql = [s for s in seen if "mode" not in s and "candidates AS" in s]
+    assert judged_sql and "JOIN candidates c ON c.k = u.k" in judged_sql[0]
+    seen.clear()
+    [sweep] = run(spark, KeyCurrency(), dn, up, secret=SECRET, full_sweep=True)
+    assert (sweep.state, sweep.population, sweep.violations) == ("FAILED", 2, 1)  # keys 1 and 2 judged, 3 pending
+    assert not [s for s in seen if "candidates AS" in s]
+    # A key regressed here in the window is a candidate through the downstream side.
+    reloaded = tables(spark, "kc_candidates_dn", [curated_row(sub_id="1", updated=before_range)],
+                      [gold_row(sub_id="000000001", record=before_range, loaded="2026-01-15 20:00:00:000000")])
+    [r] = run(spark, KeyCurrency(), gold(reloaded[1].table, dataset=reloaded[1].dataset, load_time=GOLD_LOAD),
+              reloaded[0], secret=SECRET)
+    assert (r.state, r.population) == ("PASSED", 1)

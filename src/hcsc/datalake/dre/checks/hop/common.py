@@ -18,7 +18,7 @@ from dataclasses import replace
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Callable
 
-from hcsc.datalake.dre.checks.base import CheckContext, CheckResult, did_not_run, from_exception, utc_literal
+from hcsc.datalake.dre.checks.base import CheckContext, CheckResult, did_not_run, error_detail, from_exception, utc_literal
 from hcsc.datalake.dre.checks.derived import source_of
 from hcsc.datalake.dre.checks.keys import column_expr, key_string
 from hcsc.datalake.dre.checks.times import utc_expr
@@ -70,6 +70,13 @@ def hop_params(ctx: CheckContext, event: Event, up_id: str, up: Dataset | None) 
     except (KeyError, ValueError) as exc:
         return did_not_run("invalid_config", detail=f"upstream {up_id} cannot be read: {type(exc).__name__}",
                            group_values={"upstream": up_id})
+    if up.table is not None:  # the hop's own precondition: the analyzer's error for a gone table is not reliable
+        try:
+            exists = ctx.spark.catalog.tableExists(up.table)
+        except Exception as exc:
+            return did_not_run("metastore_unavailable", detail=error_detail(exc), group_values={"upstream": up_id})
+        if not exists:
+            return did_not_run("table_missing", detail=f"table {up.table} not found", group_values={"upstream": up_id})
     sla = timedelta(hours=ctx.settings.sla_hours)
     owned = [{"up": column_expr(up, u), "dn": column_expr(ds, d)} for u, d in ds.owned_columns.items()]
     filters = [f"({up.feed_filter})" if up.feed_filter else None,
