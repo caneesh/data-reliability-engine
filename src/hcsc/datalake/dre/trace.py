@@ -122,17 +122,18 @@ def cause_line(spark: SparkSession, config: Config, up: Layer, down: Layer, key_
     dq_database = validate_dq_database(config.defaults.dq_database)
     hop = hop_label(validate_identifier(up.dataset.dataset, "dataset id"),
                     validate_identifier(ds.dataset, "dataset id"))
-    rows = [r.asDict() for r in spark.sql(
-        f"SELECT c.*, r.evaluated_at AS result_at FROM {dq_database}.dq_cause_result c "
+    rows = [r.asDict() for r in spark.sql(  # the latest evaluation's rows only, ranked in SQL
+        f"SELECT * FROM (SELECT c.*, r.evaluated_at AS result_at, "
+        f"DENSE_RANK() OVER (ORDER BY r.evaluated_at DESC) AS latest_rank "
+        f"FROM {dq_database}.dq_cause_result c "
         f"JOIN {dq_database}.dq_check_result r ON r.evaluation_id = c.evaluation_id AND r.run_id = c.run_id "
         f"WHERE r.dataset = '{ds.dataset}' AND r.check_id = 'HOP_KEY_CURRENCY' "
-        f"AND c.hop = '{hop}' AND c.failure_ref = '{ref}'").collect()]
+        f"AND c.hop = '{hop}' AND c.failure_ref = '{ref}') ranked WHERE latest_rank = 1").collect()]
     feed = config.feed_of(ds.dataset)
     ft = failure_type(feed.pattern if feed else None, "HOP_KEY_CURRENCY")
     if not rows or ft is None:
         return "cause: not evaluated (no failed HOP_KEY_CURRENCY for this key at this hop in the dq store)"
-    latest = max(r["result_at"] for r in rows)
-    return resolve([r for r in rows if r["result_at"] == latest], ft).text()
+    return resolve(rows, ft).text()
 
 
 def trace(spark: SparkSession, config: Config, dataset_id: str, raw_key: list[str],

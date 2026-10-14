@@ -16,9 +16,12 @@ WITH periods AS (
 loaded AS (
   SELECT {{ load_expr }} AS load_ts
   FROM {{ table }}
-{% if feed_filter or partition_filter %}
-  WHERE {% if feed_filter %}({{ feed_filter }}){% endif %}{% if feed_filter and partition_filter %} AND {% endif %}{% if partition_filter %}{{ partition_filter }}{% endif %}
-
+  WHERE {{ load_expr }} >= {{ range_start }} AND {{ load_expr }} < {{ range_end }}
+{% if feed_filter %}
+    AND ({{ feed_filter }})
+{% endif %}
+{% if partition_filter %}
+    AND {{ partition_filter }}
 {% endif %}
 ),
 counts AS (

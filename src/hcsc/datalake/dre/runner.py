@@ -31,6 +31,7 @@ from hcsc.datalake.dre.causes.engine import explain, failure_type, summarise
 from hcsc.datalake.dre.checks.budget import BudgetExceeded, within_budget
 from hcsc.datalake.dre.checks.base import (
     Check, CheckContext, CheckResult, did_not_run, error_detail, from_exception, release_checkpoint, run_check,
+    utc_literal,
 )
 from hcsc.datalake.dre.checks.cadence import slots, UnsupportedCalendar
 from hcsc.datalake.dre.checks.derived import base_datasets
@@ -56,6 +57,7 @@ from hcsc.datalake.dre.store import runs
 from hcsc.datalake.dre.store.causes import append_cause_results
 from hcsc.datalake.dre.store.files import register_files
 from hcsc.datalake.dre.store.install import missing_objects
+from hcsc.datalake.dre.store.names import validate_identifier
 from hcsc.datalake.dre.store.key_events import append_key_events
 from hcsc.datalake.dre.store.results import append_check_results
 
@@ -637,20 +639,24 @@ def historical_jobs(spark: SparkSession, config: Config, planned_all: list[Plann
     return jobs, landing
 
 
-def stored_outcomes(spark: SparkSession, db: str, event_ids: list[str]) -> dict[str, tuple[Any, ...]]:
-    """evaluation_id -> the OUTCOME of its latest stored result row, for the given events."""
-    ids = sorted(set(event_ids))
-    if not ids:
+def stored_outcomes(spark: SparkSession, db: str, jobs: list[Job]) -> dict[str, tuple[Any, ...]]:
+    """evaluation_id -> the OUTCOME of its latest stored result row, for the jobs' events. Read by
+    dataset and the span the events cover (one predicate however many events), then kept for the
+    jobs' event ids in Python."""
+    if not jobs:
         return {}
+    ids = {event.event_id for _, event in jobs}
     if not all(_HEX.match(e) for e in ids):
         raise ValueError("unexpected event id")
+    datasets = ", ".join(f"'{validate_identifier(d, 'dataset id')}'" for d in sorted({p.dataset.dataset for p, _ in jobs}))
+    lo = utc_literal(min(event.window_start for _, event in jobs))
+    hi = utc_literal(max(event.window_end for _, event in jobs))
     columns = ", ".join(OUTCOME)
-    in_list = ", ".join(f"'{e}'" for e in ids)
     rows = spark.sql(
-        f"SELECT evaluation_id, {columns} FROM (SELECT r.*, ROW_NUMBER() OVER (PARTITION BY evaluation_id "
+        f"SELECT evaluation_id, event_id, {columns} FROM (SELECT r.*, ROW_NUMBER() OVER (PARTITION BY evaluation_id "
         f"ORDER BY evaluated_at DESC, run_id DESC) AS rn FROM {db}.dq_check_result r "
-        f"WHERE event_id IN ({in_list})) latest WHERE rn = 1").collect()
-    return {r.evaluation_id: tuple(r[c] for c in OUTCOME) for r in rows}
+        f"WHERE dataset IN ({datasets}) AND window_start >= {lo} AND window_end <= {hi}) latest WHERE rn = 1").collect()
+    return {r.evaluation_id: tuple(r[c] for c in OUTCOME) for r in rows if r.event_id in ids}
 
 
 def unchanged(rows: list[dict[str, Any]], stored: dict[str, tuple[Any, ...]]) -> bool:
@@ -751,6 +757,7 @@ def run(spark: SparkSession, conf: str, feed_id: str | None = None, selection: S
     kind = selection.execution_type
     normal = kind == "NORMAL"
     run_record = runs.start_run(spark, db, conf_dir=conf, execution_type=kind)
+    print(f"dre run: started {run_record.run_id} ({kind} run, {run_record.started_at:%Y-%m-%d %H:%M} UTC)")
     written = expected = 0
     investigations = Investigations()
     explained: set[str] = set()  # evaluation ids this run already investigated
@@ -764,7 +771,7 @@ def run(spark: SparkSession, conf: str, feed_id: str | None = None, selection: S
             print(f"note: a {kind} reads the tables as they are now, not as they were in the window; rows "
                   "changed or purged since are not seen (a best-effort re-evaluation, not a snapshot)")
             jobs, landing = historical_jobs(spark, config, planned_all, selection, feed_id, run_record.started_at)
-            stored = stored_outcomes(spark, db, [event.event_id for _, event in jobs])
+            stored = stored_outcomes(spark, db, jobs)
         expected = len(jobs) + len(gap_rows)
         for planned, gap, held_by in gap_rows:
             append_check_results(spark, db, [gap_row(planned, gap, held_by, run_record, kind,
@@ -796,12 +803,21 @@ def run(spark: SparkSession, conf: str, feed_id: str | None = None, selection: S
                 print(line)
             drop_judged_views(spark, evaluation)
         if normal:
-            for line in retry_investigations(spark, config, run_record, key_secret, investigations, explained):
-                print(line)
+            try:
+                for line in retry_investigations(spark, config, run_record, key_secret, investigations, explained):
+                    print(line)
+            except Exception as exc:  # every check is written by now: the retries are not worth a FAILED run
+                log.error("could not retry pending investigations: %s", error_detail(exc))
+                print(f"pending cause investigations not retried ({type(exc).__name__}); the next run retries them")
     except Exception as exc:
         log.error("run %s failed: %s", run_record.run_id, error_detail(exc))
-        runs.finish_run(spark, db, run_record, expected, written, failed=True,
-                        investigations=(investigations.expected, investigations.done))
+        print(f"dre run: FAILED, {written} of {expected} checks written ({kind} run {run_record.run_id}): "
+              f"{error_detail(exc)}")
+        try:
+            runs.finish_run(spark, db, run_record, expected, written, failed=True,
+                            investigations=(investigations.expected, investigations.done))
+        except Exception as final_exc:  # the run stays STARTED, which the watchdog reports
+            log.error("could not write the final row of run %s: %s", run_record.run_id, error_detail(final_exc))
         return EXIT_PARTIAL
     if normal:
         for line in email_digests(spark, config, run_record):

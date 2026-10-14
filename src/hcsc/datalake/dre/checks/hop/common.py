@@ -80,7 +80,9 @@ def hop_params(ctx: CheckContext, event: Event, up_id: str, up: Dataset | None) 
     sla = timedelta(hours=ctx.settings.sla_hours)
     owned = [{"up": column_expr(up, u), "dn": column_expr(ds, d)} for u, d in ds.owned_columns.items()]
     filters = [f"({up.feed_filter})" if up.feed_filter else None,
-               f"NOT coalesce(({ds.hop_exclusions[up_id]}), FALSE)" if up_id in ds.hop_exclusions else None]
+               f"NOT coalesce(({ds.hop_exclusions[up_id]}), FALSE)" if up_id in ds.hop_exclusions else None,
+               has_a_key([mapping[c] for c in ds.key])]
+    dn_filters = [f"({ds.feed_filter})" if ds.feed_filter else None, has_a_key(list(ds.key))]
     return {
         "up_table": up_source, "up_filter": " AND ".join(f for f in filters if f) or None,
         # for counting what the exclusions keep out: the upstream's own filter, and the exclusion
@@ -88,7 +90,7 @@ def hop_params(ctx: CheckContext, event: Event, up_id: str, up: Dataset | None) 
         "up_key": key_string([column_expr(up, mapping[c]) for c in ds.key]),
         "up_record": utc_expr(up.record_time, tz), "up_load": utc_expr(up.load_time, tz),
         "up_file": up.file_name_column,
-        "dn_table": ds.table, "dn_filter": ds.feed_filter,
+        "dn_table": ds.table, "dn_filter": " AND ".join(f for f in dn_filters if f),
         "dn_key": key_string([column_expr(ds, c) for c in ds.key]),
         "dn_record": utc_expr(ds.record_time, tz), "dn_file": ds.file_name_column,
         "dn_load": utc_expr(ds.load_time, tz) if ds.load_time is not None else None,
@@ -103,6 +105,12 @@ def hop_params(ctx: CheckContext, event: Event, up_id: str, up: Dataset | None) 
         # open keys are read from dq_key_event's run_date partitions on or after this (None: all of them)
         "events_since": ctx.history_since.isoformat() if ctx.history_since is not None else None,
     }
+
+
+def has_a_key(columns: list[str]) -> str:
+    """A row whose every key column is null has no key: it is not a version of anything and is
+    never judged (T1_KEY_NULLS counts it). A partly null key is still a key."""
+    return "NOT (" + " AND ".join(f"{c} IS NULL" for c in columns) + ")"
 
 
 def not_judged(pending: int | None, excluded: int | None, unit: str, excluded_unit: str | None = None) -> str:

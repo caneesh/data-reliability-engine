@@ -49,7 +49,8 @@ def judge_due_slots(ctx: CheckContext, event: Event, check_id: str, minimum: int
         feed_filter=ds.feed_filter,
         sla_minutes=int(sla.total_seconds() // 60),
         minimum=minimum,
-        partition_filter=partition_filter(ds, due[0], due[-1] + sla, ctx.default_timezone),
+        first_slot=utc_literal(min(due)), last_slot=utc_literal(max(due)),
+        partition_filter=partition_filter(ds, min(due), max(due) + sla, ctx.default_timezone),
     )
     row = ctx.spark.sql(sql).collect()[0]
     counts = {"violations": row.violations or 0, "population": row.population}

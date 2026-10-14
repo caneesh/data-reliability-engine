@@ -8,6 +8,8 @@ exists.
 
 from __future__ import annotations
 
+from hcsc.datalake.dre.checks.base import error_detail
+
 import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -65,7 +67,7 @@ def install_command(spark: SparkSession | None, dq_database: str, mode: str) -> 
                 spark.sql(statement)
             except Exception as exc:  # report and stop: the store needs a person to look
                 first_line = statement.splitlines()[0]
-                print(f"dre install: failed at `{first_line}`: {str(exc).splitlines()[0]}. "
+                print(f"dre install: failed at `{first_line}`: {error_detail(exc)}. "
                       "Run dre install --check to see what differs.")
                 return 1
         print(f"dre install: dq store tables and views are in place in {dq_database}")

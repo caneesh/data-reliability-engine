@@ -519,3 +519,23 @@ def test_only_candidate_keys_go_through_the_window_functions(spark, monkeypatch)
     [r] = run(spark, KeyCurrency(), gold(reloaded[1].table, dataset=reloaded[1].dataset, load_time=GOLD_LOAD),
               reloaded[0], secret=SECRET)
     assert (r.state, r.population) == ("PASSED", 1)
+
+
+def test_a_file_with_more_rows_here_than_upstream_passes_and_is_counted(spark) -> None:
+    """HOP_FILE_COMPLETENESS presumes a file keeps its row count: a file that grew here is not a
+    violation, and the result says so rather than passing silently."""
+    up, dn = file_tables(spark, "fc_more", [("a", IN_WINDOW, "rt_0001.seq")],
+                         [("a", IN_WINDOW, "rt_0001.seq"), ("a", IN_WINDOW, "rt_0001.seq")])
+    [r] = run(spark, FileCompleteness(), dn, up)
+    assert (r.state, r.population, r.violations) == ("PASSED", 1, 0)
+    assert r.observed == "0 of 1 upstream files have fewer rows here; 1 file with more rows here than upstream"
+
+
+def test_a_key_whose_every_column_is_null_is_not_judged(spark) -> None:
+    """An all-null key is not a key (T1_KEY_NULLS counts it); a partly null key still is."""
+    rows = [curated_row(sub_id=None, mem_nbr=None, eff=None, agreement=None, updated=IN_WINDOW),
+            curated_row(sub_id=None, updated=IN_WINDOW)]
+    up, dn = tables(spark, "kc_nulls", rows, [])
+    [r] = run(spark, KeyCurrency(), dn, up, secret=SECRET)
+    assert (r.state, r.population, r.violations) == ("FAILED", 1, 1)  # the partly null key, missing here
+    assert [e[3] for e in events_of(r)] == ["<null>|01|2026-01-01|AGR-A"]

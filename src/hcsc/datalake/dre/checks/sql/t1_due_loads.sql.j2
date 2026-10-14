@@ -11,9 +11,12 @@ FROM (
   LEFT JOIN (
     SELECT {{ load_expr }} AS load_ts
     FROM {{ table }}
-{% if feed_filter or partition_filter %}
-    WHERE {% if feed_filter %}({{ feed_filter }}){% endif %}{% if feed_filter and partition_filter %} AND {% endif %}{% if partition_filter %}{{ partition_filter }}{% endif %}
-
+    WHERE {{ load_expr }} >= {{ first_slot }} AND {{ load_expr }} < {{ last_slot }} + INTERVAL {{ sla_minutes }} MINUTES
+{% if feed_filter %}
+      AND ({{ feed_filter }})
+{% endif %}
+{% if partition_filter %}
+      AND {{ partition_filter }}
 {% endif %}
   ) t
     ON t.load_ts >= s.slot AND t.load_ts < s.slot + INTERVAL {{ sla_minutes }} MINUTES

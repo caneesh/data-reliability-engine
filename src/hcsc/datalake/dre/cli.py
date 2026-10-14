@@ -133,7 +133,18 @@ def retention(conf: str, apply: bool) -> int:
                              datetime.now(timezone.utc).date())
 
 
+def configure_logging() -> None:
+    """The engine's log lines (errors and warnings) to stderr with a time and a level, once per
+    process, unless the host configured logging already."""
+    import logging
+
+    if not logging.getLogger().handlers:
+        logging.basicConfig(level=logging.WARNING, stream=sys.stderr,
+                            format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+
 def main(argv: list[str] | None = None) -> int:
+    configure_logging()
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command is None:

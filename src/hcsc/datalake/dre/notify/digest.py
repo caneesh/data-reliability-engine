@@ -198,7 +198,7 @@ def _cause_lines(config: Config, row: dict[str, Any], causes: list[dict[str, Any
 
     from hcsc.datalake.dre.causes.engine import failure_type, summarise
 
-    rows = [c for c in causes if c["evaluation_id"] == row["evaluation_id"]]
+    rows = causes  # this evaluation's rows (the caller groups them once)
     feed = config.feeds.get(row.get("feed") or "")
     ft = failure_type(feed.pattern if feed else None, row["check_id"])
     if ft is None:
@@ -229,6 +229,9 @@ def build_digests(config: Config, run: Run, data: dict[str, Any]) -> list[Digest
     defaults = config.defaults
     digests: dict[str, Digest] = {}
     current = data["current"]
+    causes_by_evaluation: dict[str, list[dict[str, Any]]] = {}
+    for cause in data["causes"]:
+        causes_by_evaluation.setdefault(cause["evaluation_id"], []).append(cause)
     # One alert for T1_ON_TIME and T1_ZERO_ROWS failing for the same loads of a dataset.
     merged: set[str] = set()
     by_check = {(r["dataset"], r["check_id"], r["groups"]): r for r in current}
@@ -279,7 +282,7 @@ def build_digests(config: Config, run: Run, data: dict[str, Any]) -> list[Digest
                 item.first_failed = as_utc(since).date() if since else None
                 digest.still_failing.append(item)
             else:
-                item.causes = _cause_lines(config, row, data["causes"])
+                item.causes = _cause_lines(config, row, causes_by_evaluation.get(row["evaluation_id"], []))
                 if row["evaluation_id"] in on_time_notes:
                     item.notes.append(on_time_notes[row["evaluation_id"]])
                 if config.dataset_settings(row["dataset"]).email_sample_keys:

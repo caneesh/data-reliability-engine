@@ -47,6 +47,9 @@ class FileCompleteness(Check):
             return params
         row = ctx.spark.sql(render_sql("hop_file_completeness.sql.j2", p=params, limit=LISTED)).collect()[0]
         left_out = not_judged(row.pending, row.excluded, "file", excluded_unit="row")
+        if row.more_here:  # the check presumes a file keeps its row count: say when one grew instead
+            grew = f"{row.more_here} file{'s' if row.more_here != 1 else ''} with more rows here than upstream"
+            left_out = f"{grew}, {left_out}" if left_out else grew
         result = from_counts(
             row.population, row.violations,
             observed=f"{row.violations or 0} of {row.population} upstream files have fewer rows here"

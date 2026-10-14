@@ -339,8 +339,9 @@ def test_a_failed_key_event_write_makes_the_run_partial_and_the_result_is_still_
     assert explained and all(n > 0 for n in explained)  # each with its rows, so causes can be written
 
 
-def test_a_planning_error_ends_the_run_failed(spark, tmp_path, monkeypatch) -> None:
-    """Review finding 18: plan() raising after the STARTED row still writes a final FAILED row."""
+def test_a_planning_error_ends_the_run_failed(spark, tmp_path, monkeypatch, capsys) -> None:
+    """Review finding 18: plan() raising after the STARTED row still writes a final FAILED row, and
+    the log says so: a start line with the run id, and a FAILED summary naming the exception type."""
     from hcsc.datalake.dre import runner
 
     replay = replay_conf(spark, tmp_path, "runner_plan_error")
@@ -352,6 +353,27 @@ def test_a_planning_error_ends_the_run_failed(spark, tmp_path, monkeypatch) -> N
     assert main(["run", "--conf", str(replay.conf)]) == 2
     [run] = spark.table(f"{replay.dq}.v_latest_run").collect()
     assert run.status == "FAILED"
+    out = capsys.readouterr().out
+    assert f"dre run: started {run.run_id} (NORMAL run" in out
+    assert f"dre run: FAILED, 0 of 0 checks written (NORMAL run {run.run_id}): ValueError" in out
+    assert "synthetic planning error" not in out  # the type, never the message
+
+
+def test_a_failing_retry_of_pending_investigations_does_not_fail_the_run(spark, tmp_path, monkeypatch, capsys) -> None:
+    from hcsc.datalake.dre import runner
+
+    replay = replay_conf(spark, tmp_path, "runner_retry_error")
+    create_table(spark, replay.gold, GOLD_COLUMNS, [gold_row()])
+    create_table(spark, replay.curated, CURATED_COLUMNS, [curated_row()])
+
+    def broken(*args, **kwargs):
+        raise OSError("synthetic store failure")
+
+    monkeypatch.setattr(runner, "pending_investigations", broken)
+    assert main(["run", "--conf", str(replay.conf)]) == 0
+    [run] = spark.table(f"{replay.dq}.v_latest_run").collect()
+    assert run.status == "COMPLETED"
+    assert "pending cause investigations not retried (OSError); the next run retries them" in capsys.readouterr().out
 
 
 def test_a_normal_run_in_progress_refuses_a_second_one(spark, tmp_path, capsys) -> None:

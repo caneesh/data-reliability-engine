@@ -68,6 +68,7 @@ class Volume(Check):
             "t1_volume.sql.j2", periods=periods, load_expr=utc_expr(ds.load_time, ctx.default_timezone),
             table=ds.table, feed_filter=ds.feed_filter, dq_database=ctx.dq_database, dataset=ds.dataset,
             partition_filter=partition_filter(ds, judged[0][0], judged[-1][1], ctx.default_timezone),
+            range_start=utc_literal(judged[0][0]), range_end=utc_literal(judged[-1][1]),
             before=utc_literal(event.window_start), limit=HISTORY_EVENTS, min_history=MIN_HISTORY,
             low_factor=double(1 - tolerance), high_factor=double(1 + tolerance),
         )).collect()

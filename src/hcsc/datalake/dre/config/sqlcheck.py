@@ -16,7 +16,12 @@ from dataclasses import dataclass
 
 _WORDS = re.compile(
     r"\b(INSERT|UPDATE|DELETE|MERGE|DROP|ALTER|TRUNCATE|CREATE|LOAD|GRANT|REVOKE|MSCK|REFRESH|CACHE|UNCACHE|"
-    r"ANALYZE|TRANSFORM|JAVA_METHOD|REFLECT|ADD\s+(?:JAR|FILE|ARCHIVE))\b", re.I)
+    r"ANALYZE|JAVA_METHOD|REFLECT\w*|ADD\s+(?:JAR|FILE|ARCHIVE))\b", re.I)
+# The script transform (TRANSFORM (...) USING 'cmd', MAP ... USING 'cmd', REDUCE ... USING 'cmd') runs an
+# external program. Its USING takes a string (blanked below), a join's USING takes a column list in
+# parentheses, and every other USING belongs to a statement refused above: a USING not followed by
+# "(" is the script form. The word TRANSFORM alone is Spark's higher-order function and is allowed.
+_SCRIPT_USING = re.compile(r"\bUSING\b(?!\s*\()", re.I)
 # A single-quoted literal (with '' and \' escapes), a double-quoted one, a -- comment, a /* */ comment.
 _BLANK = re.compile(r"'(?:[^'\\]|\\.|'')*'|\"(?:[^\"\\]|\\.)*\"|--[^\n]*|/\*.*?\*/", re.S)
 
@@ -36,10 +41,16 @@ def blank_literals(text: str) -> str:
 
 def forbidden_sql(text: str) -> SqlProblem | None:
     """The first forbidden word used as SQL, with its line; None when the text is clean."""
-    hit = _WORDS.search(blank_literals(text))
+    blanked = blank_literals(text)
+    hit = _WORDS.search(blanked)
+    script = _SCRIPT_USING.search(blanked)
+    if hit is None or (script is not None and script.start() < hit.start()):
+        hit = script
     if hit is None:
         return None
     word = re.sub(r"\s+", " ", hit.group(0).upper())
+    if hit is script:
+        word = "a script transform (TRANSFORM, MAP or REDUCE ... USING)"
     return SqlProblem(text.count("\n", 0, hit.start()) + 1,
                       f"{word} is not allowed in configuration SQL (hard rule 1: read-only)",
                       "configuration SQL is a query over the tables it names: no commands, no TRANSFORM, "

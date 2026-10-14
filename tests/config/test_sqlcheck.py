@@ -13,7 +13,9 @@ from hcsc.datalake.dre.config.sqlcheck import blank_literals, forbidden_sql
 FORBIDDEN = [
     "INSERT INTO x SELECT 1", "drop table x", "SELECT 1; DELETE FROM x", "CREATE TABLE t AS SELECT 1",
     "MSCK REPAIR TABLE x", "ADD JAR x.jar", "SELECT TRANSFORM(a) USING 'cat' AS (b) FROM t",
+    "MAP a, b USING 'cat' AS (c) FROM t", "FROM t REDUCE a USING 'cat' AS (c)",                 # the other script forms
     "SELECT java_method('java.lang.System', 'getProperty', 'user.dir')", "SELECT reflect('java.util.UUID', 'randomUUID')",
+    "SELECT reflect2('java.util.UUID', 'randomUUID')",
 ]
 
 
@@ -21,6 +23,8 @@ FORBIDDEN = [
 def test_forbidden_words_are_named_with_their_line(statement) -> None:
     problem = forbidden_sql(f"SELECT 1 AS population, 0 AS violations\n-- then\n{statement}")
     assert problem is not None and problem.line == 3 and "read-only" in problem.problem and "TRANSFORM" in problem.fix
+    if "USING" in statement:
+        assert "script transform" in problem.problem
 
 
 @pytest.mark.parametrize("text", [
@@ -29,6 +33,8 @@ def test_forbidden_words_are_named_with_their_line(statement) -> None:
     "x = 1 -- delete nothing here\n  AND y = 'it''s'",   # a comment, and an escaped quote
     "/* CREATE was here */ a JOIN b USING (k)",          # USING alone is a join clause
     "cache_flag = 1 AND load_dt > '2026-01-01'",         # identifiers that contain the words
+    "transform(array(1, 2), x -> x + 1)",                 # the higher-order function, not the script form
+    "a JOIN b USING (k) JOIN c USING (k, j)",            # a join's USING takes a column list
 ])
 def test_literals_comments_and_identifiers_are_not_flagged(text) -> None:
     assert forbidden_sql(text) is None
@@ -45,7 +51,7 @@ def test_blanking_keeps_positions_and_newlines() -> None:
 def test_fragments_in_config_are_scanned(field) -> None:
     bad = "src = 'A' OR EXISTS (SELECT TRANSFORM(1) USING 'cat' AS (x))"
     kwargs = {"feed_filter": bad} if field == "feed_filter" else {"hop_exclusions": {"up": bad}, "key_map": {"up": {"k": "k"}}}
-    with pytest.raises(ValueError, match="TRANSFORM is not allowed in configuration SQL"):
+    with pytest.raises(ValueError, match="script transform .* is not allowed in configuration SQL"):
         Dataset(dataset="d", table="x.y", layer="GOLD", key=["k"], record_time={"column": "rt"}, **kwargs)
     ok = Dataset(dataset="d", table="x.y", layer="GOLD", key=["k"], feed_filter="status = 'LOAD'")
     assert ok.feed_filter == "status = 'LOAD'"

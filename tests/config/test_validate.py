@@ -35,10 +35,11 @@ def test_sample_config_is_valid() -> None:
     assert set(config.datasets) == {"example_curated_enrollment", "gold_member_coverage", "gold_member_coverage_all",
                                     "provider_roster_raw", "provider_directory"}
     assert len(config.rules) == 6
-    # The curated load time column is not confirmed yet: reported, not an error.
-    # Not confirmed yet, so reported, not errors: the curated load time column, and the raw dataset.
+    # Reported, not errors: the curated load time column and the raw dataset are not confirmed yet,
+    # and the default time zone observes daylight saving time (spec section 4).
     assert [(Path(w.file).name, w.field) for w in warnings] == [
-        ("example_curated_enrollment.yaml", "load_time"), ("example_realtime.yaml", "datasets")]
+        ("example_curated_enrollment.yaml", "load_time"), ("defaults.yaml", "timezone"),
+        ("example_realtime.yaml", "datasets")]
 
 
 def test_cli_validate_exit_codes(conf: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -106,7 +107,7 @@ CASES = [
     ("table-wide-needs-version", TABLE_WIDE, "expectation_version: 1 ", "# ", "expectation_version", "dataset: gold_member_coverage_all", "needs an expectation_version", "expectation_version: 1"),
     ("feed-dataset-no-version", GOLD, "layer: GOLD\n", "layer: GOLD\nexpectation_version: 2\n", "expectation_version", "expectation_version: 2", "versions this dataset's checks", "bump the feed's"),
     ("unknown-calendar", FEED, "calendar: EVERYDAY", "calendar: holidays.yaml", "cadence.calendar", "calendar: holidays.yaml", "is not a calendar", "conf/calendars/holidays.yaml"),
-    ("winner-format-not-ordered", GOLD, 'order_by: ["sourcelastupdatets DESC", "enddate DESC"]', 'order_by: ["sourcelastupdatets DESC", "enddate DESC"]\n  formats: { startdate: yyyy-MM-dd }', "winner_rule.formats.startdate", "formats:", "not in winner_rule.order_by", "columns the winner rule orders by"),
+    ("winner-format-not-ordered", GOLD, "formats: { enddate: yyyy-MM-dd }", "formats: { enddate: yyyy-MM-dd, startdate: yyyy-MM-dd }", "winner_rule.formats.startdate", "formats:", "not in winner_rule.order_by", "columns the winner rule orders by"),
     ("hop-exclusion-not-upstream", GOLD, "winner_rule:", "hop_exclusions: { nowhere: \"x = 1\" }\nwinner_rule:", "hop_exclusions.nowhere", "hop_exclusions", "not an upstream in key_map", "upstreams this dataset's key_map maps"),
     ("bad-email", DEFAULTS, "dre-alerts@example.com", "dre-alerts", "recipients.membership-gold[0]", "membership-gold:", "email", "name@domain"),
 ]
@@ -225,3 +226,20 @@ def test_partitioning_fields_are_checked(conf: Path) -> None:
     edit(conf, GOLD, "partition_format: null", "partition_format: yyyy-MM-dd")
     _, errors, warnings = validate_conf(conf)
     assert not [e for e in errors + warnings if "partition" in e.problem]
+
+
+def test_winner_rule_terms_and_dst_zones_are_warned_about(conf: Path) -> None:
+    """A winner_rule term that is neither an upstream time column nor in formats orders as stored
+    (a string date lexicographically); a DST zone on defaults.timezone is ambiguous one hour a year."""
+    _, errors, warnings = validate_conf(conf)
+    assert errors == []
+    assert not [w for w in warnings if "ordered as it is stored" in w.problem]  # the sample gives enddate a format
+    [dst] = [w for w in warnings if "daylight saving" in w.problem]
+    assert dst.field == "timezone" and "fall-back" in dst.fix
+    edit(conf, GOLD, "  formats: { enddate: yyyy-MM-dd }", "")
+    _, errors, warnings = validate_conf(conf)
+    [plain] = [w for w in warnings if "ordered as it is stored" in w.problem]
+    assert "'enddate'" in plain.problem and "winner_rule.formats" in plain.fix and errors == []
+    edit(conf, "defaults.yaml", "timezone: America/Chicago", "timezone: UTC")
+    _, _, warnings = validate_conf(conf)
+    assert not [w for w in warnings if "daylight saving" in w.problem]

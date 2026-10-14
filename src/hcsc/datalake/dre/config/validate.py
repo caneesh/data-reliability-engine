@@ -91,6 +91,18 @@ def cross_check(config: Config, feeds_complete: bool = True) -> list[ConfigError
     return r.errors
 
 
+def observes_dst(timezone: str) -> bool:
+    """Whether the zone's offset differs between January and July."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    try:
+        zone = ZoneInfo(timezone)
+    except Exception:
+        return False
+    return datetime(2026, 1, 15, tzinfo=zone).utcoffset() != datetime(2026, 7, 15, tzinfo=zone).utcoffset()
+
+
 def _check_defaults(r: _Reporter) -> None:
     """The secret file is outside the repository and the conf directory; the watchdog owner has recipients."""
     config, defaults = r.config, r.config.defaults
@@ -100,6 +112,12 @@ def _check_defaults(r: _Reporter) -> None:
             r.err("defaults", "defaults", ("hmac_secret_file",), f"hmac_secret_file is inside {root}",
                 "keep the secret in a protected file outside the repository and the conf directory")
 
+    if defaults is not None and observes_dst(defaults.timezone):
+        r.err("defaults", "defaults", ("timezone",), f"timezone {defaults.timezone} observes daylight saving time: "
+            "a time column written in it without an offset is ambiguous for one hour a year; the repeated "
+            "fall-back hour is read as the first offset (spec section 4)",
+            "nothing to fix in configuration; know that rows stamped in the second 01:xx of the fall-back day "
+            "read an hour early", level="warning")
     if defaults is not None and defaults.watchdog_owner is not None and defaults.watchdog_owner not in defaults.recipients:
         r.err("defaults", "defaults", ("watchdog_owner",), f"watchdog_owner {defaults.watchdog_owner!r} has no recipients",
             f"add `{defaults.watchdog_owner}: [address]` under recipients, or set watchdog_owner: null")
@@ -284,6 +302,19 @@ def _check_dataset_fields(r: _Reporter, ds_id: str, broken_patterns: set[str]) -
             if col not in ordered:
                 r.err("dataset", ds_id, ("winner_rule", "formats", col), f"{col!r} is not in winner_rule.order_by",
                     "give formats only for columns the winner rule orders by")
+        # a term that is neither an upstream time column nor in formats is ordered as stored: a
+        # string date would order lexicographically (an upstream's record_time/load_time are parsed)
+        parsed = set(ds.winner_rule.formats)
+        for up_id in ds.upstream:
+            up = config.datasets.get(up_id)
+            if up is not None:
+                parsed |= {c.column for c in (up.record_time, up.load_time) if c is not None}
+        for i, term in enumerate(ds.winner_rule.order_by):
+            col = term.split()[0]
+            if col not in parsed:
+                r.err("dataset", ds_id, ("winner_rule", "order_by", i), f"{col!r} is ordered as it is stored; a date "
+                    "written as a string orders lexicographically", f"if {col} is a time written as a string, give its "
+                    "pattern under winner_rule.formats; a numeric or TIMESTAMP column needs nothing", level="warning")
     if ds.owned_columns and not ds.key_map:
         r.err("dataset", ds_id, ("owned_columns",), "owned_columns needs a key_map",
             "add key_map for the upstream dataset, or remove owned_columns")

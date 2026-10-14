@@ -177,7 +177,7 @@ DEFAULT_CASES = [
     ("int-default", "limit: { type: string }", "limit: { type: int, default: soon }", "params.limit.default",
      "does not fit type int"),
     ("sql-default", "limit: { type: string }", "limit: { type: sql, default: \"SELECT TRANSFORM(1) USING 'cat'\" }",
-     "params.limit.default", "TRANSFORM is not allowed"),
+     "params.limit.default", "script transform"),
     ("unbuildable", "limit: { type: string }", "model_config: { type: int }", "params", "cannot be built"),
 ]
 
