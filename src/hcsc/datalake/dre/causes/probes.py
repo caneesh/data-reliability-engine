@@ -28,6 +28,7 @@ from typing import Any, Literal
 
 from hcsc.datalake.dre.causes.base import CauseContext, Failure, Outcome, confirmed, not_ready, ruled_out
 from hcsc.datalake.dre.causes.landing import NO_RAW, landing_files
+from hcsc.datalake.dre.causes.merge import hash_literals
 from hcsc.datalake.dre.checks.base import render_sql, utc_literal
 from hcsc.datalake.dre.checks.hop.common import HASH_FUNCTION, register_key_hash
 from hcsc.datalake.dre.checks.keys import column_expr, key_string
@@ -195,11 +196,15 @@ def table_contains(cx: CauseContext, params: Any, failure: Failure) -> Outcome:
     else:
         return ruled_out(reason="no file or key to look for")
 
+    # The evaluation's failing refs (the cause engine lists them once); alone, just this failure's.
+    refs = sorted(set(cx.cache.get("failure_refs") or [ref]))
+    literals = hash_literals(refs) if by == "key" else [sql_string(r) for r in refs]
+
     def query() -> set[str]:
         sql = render_sql("cause_table_contains.sql.j2", by=by, column=column, table=params.table,
-                         condition=params.condition, hash_fn=HASH_FUNCTION)
+                         condition=params.condition, hash_fn=HASH_FUNCTION, refs=literals)
         return {r.ref for r in cx.spark.sql(sql).collect()}
-    found = cx.cached(f"table_contains:{by}:{params.table}:{params.condition}", query)
+    found = cx.cached(f"table_contains:{by}:{params.table}:{params.condition}:{hash(tuple(refs))}", query)
     evidence = {"table": params.table, **({"id": params.id} if params.id else {}),
                 **({"code_ref": params.code_ref} if params.code_ref else {})}
     return confirmed(**evidence) if ref in found else ruled_out(**evidence)

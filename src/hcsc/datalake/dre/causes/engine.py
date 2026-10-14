@@ -100,6 +100,7 @@ def explain(cx: CauseContext, result: CheckResult, evaluation_id: str, run_id: s
         failures, listing_error = [Failure(ref=None)], error(exc)
     if not failures:  # nothing explainable (say, only UNASSESSABLE keys): recorded, never left silent
         failures, listing_error = [Failure(ref=None)], not_ready(NOTHING_TO_EXPLAIN)
+    cx.cache["failure_refs"] = [f.ref for f in failures if f.ref is not None]  # probes look for these only
     for failure in failures:
         for order_no, entry in enumerate(ft.order, 1):
             if entry.fallback:

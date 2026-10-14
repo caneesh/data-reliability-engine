@@ -151,6 +151,34 @@ def test_table_contains_by_file_and_by_key(spark) -> None:
     assert table_contains(cx, params, miss).state == "RULED_OUT"
 
 
+def test_table_contains_reads_only_the_failing_refs(spark, monkeypatch) -> None:
+    """The rows collected are bounded by the evaluation's failing refs (at most 100), not by the
+    table: the rendered SQL names them, and the cached set holds nothing else."""
+    up = Dataset(dataset="example_curated_enrollment", table="causes.tc_curated", layer="CURATED",
+                 key=["subscriberidnumber", "membernumber", "effectivedate", "qualifiedhealthplanid"],
+                 file_name_column="src_file_nm")
+    create_table(spark, "causes.tc_many", [*CURATED_COLUMNS, ("src_file_nm", "STRING"), ("reason", "STRING")], [
+        {**curated_row(sub_id=f"{n:04d}"), "src_file_nm": f"rt_{n:04d}.seq", "reason": "bad plan"} for n in range(1, 41)])
+    params = TableContains(table="causes.tc_many", condition="reason IS NOT NULL", id="rejects")
+    seen: list[str] = []
+    real_sql = spark.sql
+    monkeypatch.setattr(spark, "sql", lambda text: seen.append(text) or real_sql(text))
+    cx = context(spark, gold("causes.unused"), "HOP_FILE_COMPLETENESS", upstream=up)
+    cx.cache["failure_refs"] = ["rt_0003.seq", "rt_0007.seq"]  # what the cause engine listed
+    assert table_contains(cx, params, Failure("rt_0003.seq", file_name="rt_0003.seq")).state == "CONFIRMED"
+    assert table_contains(cx, params, Failure("rt_0007.seq", file_name="rt_0007.seq")).state == "CONFIRMED"
+    [found] = [v for k, v in cx.cache.items() if k.startswith("table_contains:")]
+    assert found == {"rt_0003.seq", "rt_0007.seq"} and "IN ('rt_0003.seq', 'rt_0007.seq')" in seen[-1]
+    assert len([s for s in seen if "causes.tc_many" in s]) == 1  # one query for the evaluation
+    # By key: the hashes of the failing keys, validated, and nothing else collected.
+    cx = context(spark, gold("causes.unused"), "HOP_KEY_CURRENCY", upstream=up, secret=SECRET)
+    failing = key_hash(SECRET, "0005|01|2026-01-01|AGR-A")
+    cx.cache["failure_refs"] = [failing]
+    assert table_contains(cx, params, Failure(failing, key={"key_state": "MISSING"})).state == "CONFIRMED"
+    [found] = [v for k, v in cx.cache.items() if k.startswith("table_contains:")]
+    assert found == {failing}
+
+
 def test_size_changed(spark) -> None:
     append_rows(spark, DQ, "dq_file", [
         {"path": "file:/landing/rt_0001.seq", "feed": "example_realtime", "first_seen_at": IN_WINDOW, "size_bytes": 10,

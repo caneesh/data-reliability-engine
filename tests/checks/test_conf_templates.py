@@ -43,12 +43,24 @@ sql: |
 """
 
 
+RAW_EXPR = """template: raw_expr
+params:
+  expr: { type: string }               # rendered as it is: the scan of the template's text cannot see it
+population: rows
+violation: rows the expression counts
+unit: rows
+sql: |
+  SELECT COUNT(*) AS population, {{ params.expr }} AS violations FROM {{ table }}
+"""
+
+
 @pytest.fixture
 def conf(tmp_path: Path) -> Path:
     target = tmp_path / "conf"
     shutil.copytree(SAMPLE_CONF, target)
     (target / "templates").mkdir()
     (target / "templates" / "not_after.yaml").write_text(NOT_AFTER, encoding="utf-8")
+    (target / "templates" / "raw_expr.yaml").write_text(RAW_EXPR, encoding="utf-8")
     return target
 
 
@@ -67,7 +79,7 @@ def test_a_conf_template_is_known_once_the_conf_is_loaded(conf: Path) -> None:
         rule({"column": "mbr_mbrshp_covrg_eff_dt", "limit": "2026-06-30"})
     config, errors = load(conf)
     assert errors == [], "\n".join(map(str, errors))
-    assert "not_after" in TEMPLATES and list(config.templates) == ["not_after"]
+    assert "not_after" in TEMPLATES and sorted(config.templates) == ["not_after", "raw_expr"]
     spec = TEMPLATES["not_after"]
     p = spec.params_model.model_validate({"column": "eff", "limit": "2026-06-30"})
     assert (p.column, p.limit, p.format) == ("eff", "2026-06-30", None)
@@ -181,16 +193,38 @@ def test_param_defaults_are_validated_and_scanned_and_never_a_traceback(conf: Pa
     assert e.field == field and problem in e.problem and e.line >= 1
 
 
-def test_a_command_in_a_registered_template_cannot_run(spark) -> None:
-    """Even a template that got past validation runs wrapped as a subquery, so a command is a
-    parse error and the table is untouched."""
+@pytest.mark.parametrize("sql, category, code", [
+    ("DROP TABLE {{ table }}", "CONFIGURATION", "invalid_config"),  # the rendered SQL is scanned: refused by word
+    ("SET spark.sql.x = 1", "PLATFORM", "query_failed"),              # not a forbidden word: the wrap makes it a parse error
+])
+def test_a_command_in_a_registered_template_cannot_run(spark, sql, category, code) -> None:
+    """Even a template that got past validation is scanned once rendered and runs wrapped as a
+    subquery, so a command is refused or is a parse error, and the table is untouched."""
     from hcsc.datalake.dre.checks.rules.conf_template import spec_from
 
     create_table(spark, "ctpl.keep", GOLD_COLUMNS, [gold_row()])
     sneaky = TemplateFile(template="x_sneaky", population="rows", violation="rows", unit="rows",
                           sql="SELECT 1 AS population, 0 AS violations FROM {{ table }}")
-    with TEMPLATES.temporary("x_sneaky", spec_from(sneaky.model_copy(update={"sql": "DROP TABLE {{ table }}"}))):
+    with TEMPLATES.temporary("x_sneaky", spec_from(sneaky.model_copy(update={"sql": sql}))):
         r = Rule(rule="x_r", template="x_sneaky", dataset="gold", owner="o", status="approved", severity="low")
         [result] = run_check(RuleCheck(r), CheckContext(spark, gold("ctpl.keep"), None, SETTINGS, "UTC"), EVENT)[0]
-    assert result.state == "DID_NOT_RUN" and result.reason_category == "PLATFORM"
+    assert (result.state, result.reason_category, result.reason_code) == ("DID_NOT_RUN", category, code)
     assert spark.catalog.tableExists("ctpl.keep") and spark.table("ctpl.keep").count() == 1
+
+
+def test_the_rendered_sql_is_scanned_too(spark, conf: Path) -> None:
+    """Rule 10 (spec section 9) holds for the SQL that runs, not only the template's text: a
+    parameter value that puts a forbidden word into the rendered SQL makes the rule DID_NOT_RUN /
+    invalid_config, naming the word and never the value; a clean value runs as before."""
+    load(conf)
+    create_table(spark, "ctpl.raw", GOLD_COLUMNS, [gold_row(), gold_row(sub_id="2")])
+
+    def raw_rule(expr: str) -> Rule:
+        return Rule(rule="raw_count", template="raw_expr", dataset="gold", params={"expr": expr},
+                    owner="membership-gold", status="approved", severity="low")
+    ctx = CheckContext(spark, gold("ctpl.raw"), None, SETTINGS, "UTC")
+    [ok] = run_check(RuleCheck(raw_rule("SUM(CASE WHEN src_sys_nm = 'SRC_A' THEN 1 ELSE 0 END)")), ctx, EVENT)[0]
+    assert (ok.state, ok.population, ok.violations) == ("FAILED", 2, 2)
+    [refused] = run_check(RuleCheck(raw_rule("COUNT(*) + reflect")), ctx, EVENT)[0]
+    assert (refused.state, refused.reason_category, refused.reason_code) == ("DID_NOT_RUN", "CONFIGURATION", "invalid_config")
+    assert "REFLECT is not allowed" in refused.detail and "COUNT(*)" not in refused.detail

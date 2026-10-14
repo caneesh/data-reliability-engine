@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from hcsc.datalake.dre.checks.times import as_utc, column_timezone, truncate
@@ -91,23 +91,16 @@ class WindowHistory:
     held_by: tuple[str, ...] = ()           # the reason codes that held them
 
 
-def window_histories(spark: SparkSession, dq_database: str, datasets: list[str]) -> dict[str, WindowHistory]:
-    """Read the datasets' window histories from dq_check_result in one pass. Gold rule results
-    (the only results with a severity) neither move nor hold a window: rules run on their own
-    schedule over the whole table. They are told apart by the row, not by today's rule ids, so a
-    renamed or deleted rule's old results stay out too."""
+def history_sql(dq_database: str, datasets: list[str], since: date | None = None) -> str:
+    """The one query behind window_histories (a function so a test can EXPLAIN it)."""
     validate_dq_database(dq_database)
-    if not datasets:
-        return {}
     names = ", ".join(f"'{validate_identifier(d, 'dataset id')}'" for d in sorted(set(datasets)))
-    found = {d: WindowHistory() for d in datasets}
-    if not spark.catalog.tableExists(f"{dq_database}.dq_check_result"):
-        return found
     blocking = ", ".join(f"'{c}'" for c in BLOCKING_CATEGORIES)
+    lookback = f" AND r.run_date >= DATE'{since.isoformat()}'" if since is not None else ""
     # A run that did not finish COMPLETED (PARTIAL, FAILED, or died while STARTED) may not have
     # stored all its evidence: its events are held too. A result with no run row is not held.
     incomplete = "coalesce(u.status, 'COMPLETED') <> 'COMPLETED'"
-    rows = spark.sql(
+    return (
         f"WITH events AS ("
         f"  SELECT r.dataset, r.event_id, MIN(r.window_start) AS window_start, MAX(r.window_end) AS window_end,"
         f"         MAX(CASE WHEN (r.state = 'DID_NOT_RUN' AND r.reason_category IN ({blocking})) OR {incomplete}"
@@ -117,7 +110,7 @@ def window_histories(spark: SparkSession, dq_database: str, datasets: list[str])
         f"                          WHEN {incomplete} THEN concat('run_', lower(u.status)) END) AS held_by"
         f"  FROM {dq_database}.dq_check_result r"
         f"  LEFT JOIN {dq_database}.v_latest_run u ON u.run_id = r.run_id"
-        f"  WHERE r.dataset IN ({names}) AND r.execution_type = 'NORMAL' AND r.severity IS NULL"
+        f"  WHERE r.dataset IN ({names}) AND r.execution_type = 'NORMAL' AND r.severity IS NULL{lookback}"
         f"  GROUP BY r.dataset, r.event_id"
         f"), good AS (SELECT dataset, MAX(CASE WHEN held = 0 THEN window_end END) AS previous_end"
         f"            FROM events GROUP BY dataset) "
@@ -126,7 +119,24 @@ def window_histories(spark: SparkSession, dq_database: str, datasets: list[str])
         f"FROM good g LEFT JOIN events e ON e.dataset = g.dataset AND e.held = 1"
         f"  AND (g.previous_end IS NULL OR e.window_end > g.previous_end) "
         f"GROUP BY g.dataset, g.previous_end"
-    ).collect()
+    )
+
+
+def window_histories(spark: SparkSession, dq_database: str, datasets: list[str],
+                     since: date | None = None) -> dict[str, WindowHistory]:
+    """Read the datasets' window histories from dq_check_result in one pass, from the run_date
+    partitions on or after `since` (the history lookback; None reads them all). A dataset whose
+    last NORMAL event is older than the lookback windows as on a first run. Gold rule results
+    (the only results with a severity) neither move nor hold a window: rules run on their own
+    schedule over the whole table. They are told apart by the row, not by today's rule ids, so a
+    renamed or deleted rule's old results stay out too."""
+    validate_dq_database(dq_database)
+    if not datasets:
+        return {}
+    found = {d: WindowHistory() for d in datasets}
+    if not spark.catalog.tableExists(f"{dq_database}.dq_check_result"):
+        return found
+    rows = spark.sql(history_sql(dq_database, datasets, since)).collect()
     utc = (lambda t: None if t is None else as_utc(t))
     for row in rows:
         found[row.dataset] = WindowHistory(utc(row.previous_end), utc(row.held_start), utc(row.first_held_end),

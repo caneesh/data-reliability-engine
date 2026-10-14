@@ -60,6 +60,16 @@ class TemplateFile(Model):
         return dict(self.params)
 
 
+class ForbiddenSql(ValueError):
+    """A rendered template holds a forbidden SQL word (spec section 9, rule 10): the template's
+    source was clean, so the word came from a rule's parameter value. The rule is DID_NOT_RUN /
+    invalid_config; the message names the word, never the value."""
+
+    def __init__(self, problem: SqlProblem) -> None:
+        super().__init__(problem.problem)
+        self.problem = problem
+
+
 def forbidden_statement(text: str) -> SqlProblem | None:
     """The first forbidden SQL word in a template's text, with its line (config/sqlcheck.py)."""
     return forbidden_sql(text)
@@ -108,6 +118,9 @@ def spec_from(file: TemplateFile) -> TemplateSpec:
 
     def sql(table: str, feed_filter: str | None, group_by: list[str], **args: Any) -> str:
         rendered = compiled.render(table=table, feed_filter=feed_filter, group_by=group_by, **args)
+        problem = forbidden_sql(rendered)  # the template's text was scanned; a rule's values are only here
+        if problem is not None:
+            raise ForbiddenSql(problem)
         return f"SELECT * FROM (\n{rendered}\n) {WRAP}"  # a query, or a parse error (spec section 9, rule 10)
 
     def columns(ds: Dataset, p: Any) -> list[str]:

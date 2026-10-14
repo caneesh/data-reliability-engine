@@ -257,6 +257,10 @@ class Defaults(SettingsOverride):
     watchdog_grace_minutes: int = Field(default=30, ge=1, le=59)
     # How far back a run looks for FAILED results whose cause investigation never finished, to retry it.
     investigation_retry_days: int = Field(default=7, ge=1)
+    # How far back (run_date) the hourly reads of the dq store look: the window history, the rule
+    # schedule and the digest's earlier results. Bounds every hourly scan of dq_check_result to
+    # recent partitions; a dataset with no NORMAL result inside it windows as on a first run.
+    history_lookback_days: int = Field(default=400, ge=1)
     watchdog_owner: NonEmptyStr | None = None  # whose recipients get watchdog alerts; null: every recipient
     # Compute budget (spec section 8): each check gets its dataset's compute_budget_minutes
     # ("check"), or the dataset's checks in a run share it ("dataset").
@@ -281,6 +285,13 @@ class Defaults(SettingsOverride):
                     "hmac_secret_file must be an absolute path",
                     "point it at a protected file outside the repository; never commit the secret",
                 )
+        longest_hold = (self.max_window_hours or 0) / 24
+        if self.history_lookback_days < max(longest_hold, self.investigation_retry_days):
+            raise invalid(
+                f"history_lookback_days ({self.history_lookback_days}) is shorter than max_window_hours "
+                f"({self.max_window_hours} hours) or investigation_retry_days ({self.investigation_retry_days})",
+                "the lookback must cover the longest hold and the investigation retry span; raise it",
+            )
         return self
 
 

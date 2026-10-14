@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from hcsc.datalake.dre.checks.base import Check, CheckContext, CheckResult, did_not_run, from_counts, group_values
+from hcsc.datalake.dre.checks.rules.conf_template import ForbiddenSql
 from hcsc.datalake.dre.checks.rules.template import TEMPLATES
 
 if TYPE_CHECKING:
@@ -37,8 +38,12 @@ class RuleCheck(Check):
         if missing:
             return [did_not_run("invalid_config", detail=f"dataset {missing[0]} named by rule {self.rule.rule} "
                                                         "is not configured")]
-        sql = spec.sql(table=ds.table, feed_filter=ds.feed_filter, group_by=self.rule.group_by,
-                       **spec.arguments(ds, p, self.related))
+        try:
+            sql = spec.sql(table=ds.table, feed_filter=ds.feed_filter, group_by=self.rule.group_by,
+                           **spec.arguments(ds, p, self.related))
+        except ForbiddenSql as exc:  # a parameter value put a forbidden word into the rendered SQL
+            return [did_not_run("invalid_config", detail=f"rule {self.rule.rule}: {exc.problem.problem}; "
+                                                        f"{exc.problem.fix}")]
         rows = ctx.spark.sql(sql).collect()
         if spec.result is not None:
             return [spec.result(row, p, group_values(row, self.rule.group_by)) for row in rows]

@@ -154,7 +154,7 @@ def rules_due(spark: SparkSession, config: Config, planned: list[Planned], run_s
     rules = [p for p in planned if is_rule(p)]
     if not rules:
         return []
-    done = last_completed(spark, config.defaults.dq_database)
+    done = last_completed(spark, config.defaults.dq_database, history_since(config, run_start))
     d = config.defaults
     return [p for p in rules
             if is_due(p.check.rule.frequency, run_start, d.rule_run_at, d.timezone,
@@ -216,6 +216,11 @@ def once_per_table(work: list[Planned], check_id: str) -> list[Planned]:
     return [p for p in work if p.check.check_id != check_id or keep[p.dataset.table] is p]
 
 
+def history_since(config: Config, run_start: datetime) -> date:
+    """The first run_date the hourly store reads look at (defaults.history_lookback_days)."""
+    return (as_utc(run_start) - timedelta(days=config.defaults.history_lookback_days)).date()
+
+
 def events_for(spark: SparkSession, config: Config, work: list[Planned], run_start: datetime,
                read_store: bool = True,
                gaps: dict[str, tuple[Event, tuple[str, ...]]] | None = None) -> dict[str, Event]:
@@ -226,7 +231,7 @@ def events_for(spark: SparkSession, config: Config, work: list[Planned], run_sta
     events: dict[str, Event] = {}
     datasets = list(dict.fromkeys(p.dataset.dataset for p in work))
     try:
-        histories = window_histories(spark, config.defaults.dq_database, datasets)
+        histories = window_histories(spark, config.defaults.dq_database, datasets, history_since(config, run_start))
     except Exception:
         if read_store:
             raise
@@ -392,16 +397,20 @@ def result_rows(evaluation: Evaluation, run: runs.Run, execution_type: str) -> l
 
 
 def incomplete_rows(evaluation: Evaluation, rows: list[dict[str, Any]], now: datetime) -> list[dict[str, Any]]:
-    """For results stored without their key events: a DID_NOT_RUN / PLATFORM / evidence_incomplete row
-    under the same evaluation_id, newer than the result, so the current state says the evidence is
-    incomplete and the window is held and evaluated again (spec section 4)."""
+    """For an evaluation whose key events were not all stored: a DID_NOT_RUN / PLATFORM /
+    evidence_incomplete row for every one of its results, under the same evaluation_id and one
+    shared time, newer than the results, so the current state says the evidence is incomplete and
+    the window is held and evaluated again (spec section 4). Every row, not only the ones that
+    carried key events: v_latest_result ranks a (dataset, check) by evaluated_at, so a marker for
+    some groups only would hide the evaluation's other groups until the next run. An evaluation
+    that carried no key events at all had nothing to lose: no marker."""
+    if all(result.key_events is None for result in evaluation.results):
+        return []
     marked = []
-    for result, row in zip(evaluation.results, rows):
-        if result.key_events is None:
-            continue
+    for row in rows:
         marked.append({**row, "state": "DID_NOT_RUN", "reason_category": "PLATFORM",
                        "reason_code": "evidence_incomplete", "population": None, "violations": None,
-                       "observed": f"{row['state']} result stored; its key events were not",
+                       "observed": f"{row['state']} result stored; the evaluation's key events were not all stored",
                        "expected": "the result and its key events stored together", "evaluated_at": now,
                        "detail": "the window is held and evaluated again"})
     return marked
@@ -528,12 +537,17 @@ def email_digests(spark: SparkSession, config: Config, run: runs.Run) -> list[st
         return [f"email: not sent ({type(exc).__name__})"]
 
 
+CONFIG_GROUPS = ("upstream",)  # group keys whose values are configuration ids, not data
+
+
 def describe(evaluation: Evaluation) -> list[str]:
-    """Counts, check ids and table names only (hard rule 6)."""
+    """Counts, check ids and table names only (hard rule 6): a group_by value is data, so a grouped
+    result is named by its column and its place in the evaluation, never by the value (the value
+    is in the dq store and in the email). The hop's upstream is a dataset id and is printed."""
     p = evaluation.planned
     lines = []
-    for r in evaluation.results:
-        groups = ",".join(f"{k}={v}" for k, v in sorted(r.group_values.items()))
+    for n, r in enumerate(evaluation.results, 1):
+        groups = ",".join(f"{k}={v}" if k in CONFIG_GROUPS else f"{k} #{n}" for k, v in sorted(r.group_values.items()))
         what = (f"{r.reason_category}/{r.reason_code}" if r.reason_code
                 else f"population {r.population}, violations {r.violations}")
         lines.append(f"{p.dataset.dataset} {p.check.check_id}{' [' + groups + ']' if groups else ''}: "
@@ -625,8 +639,8 @@ def unchanged(rows: list[dict[str, Any]], stored: dict[str, tuple[Any, ...]]) ->
 def _preflight(spark: SparkSession, conf: str, feed_id: str | None,
                selection: Selection) -> tuple[Config, bytes | None] | int:
     """Everything a run needs before it starts, or the exit code that says why it cannot: valid
-    configuration, a known feed, a historical window that is historical, the store installed, the
-    HMAC secret readable."""
+    configuration, a known feed, a historical window that is historical, the store installed, no
+    other NORMAL run in progress, the HMAC secret readable."""
     config = load_config(conf, "run")
     if config is None:
         return EXIT_CANNOT_START
@@ -643,6 +657,14 @@ def _preflight(spark: SparkSession, conf: str, feed_id: str | None,
         print(f"dre run: the dq store is not installed in {db} (missing: {', '.join(missing)}). "
               "Run dre install --apply once the platform team has created the database.")
         return EXIT_CANNOT_START
+    if selection.execution_type == "NORMAL":
+        grace = config.defaults.watchdog_grace_minutes
+        busy = runs.in_progress(spark, db, datetime.now(timezone.utc), grace)
+        if busy is not None:  # two NORMAL runs would evaluate the same windows and store everything twice
+            run_id, started = busy
+            print(f"dre run: a NORMAL run is in progress (run {run_id}, started {started:%H:%M} UTC); "
+                  f"a run still STARTED after {grace} minutes counts as dead and no longer blocks")
+            return EXIT_CANNOT_START
     try:
         key_secret = read_key_secret(config)
     except OSError as exc:

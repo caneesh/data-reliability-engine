@@ -124,6 +124,20 @@ def test_window_histories_read_every_dataset_in_one_query(spark) -> None:
     assert found["never_run"] == WindowHistory()
 
 
+def test_window_histories_read_only_the_lookback(spark) -> None:
+    """since bounds the read by run_date: an older NORMAL result neither moves nor holds the window,
+    so the dataset windows as on a first run."""
+    create_store(spark, "dq_windows_lookback")
+    old = {**_result("e0", 1), "run_date": date(2026, 1, 1)}  # an older partition
+    held_old = {**_result("e0b", 2, "DID_NOT_RUN", "PLATFORM", code="query_failed"), "run_date": date(2026, 1, 1)}
+    append_rows(spark, "dq_windows_lookback", "dq_check_result", [old, held_old, _result("e1", 5)])
+    assert window_history(spark, "dq_windows_lookback", "gold") == WindowHistory(
+        previous_end=datetime(2026, 1, 15, 5, tzinfo=UTC))
+    assert window_histories(spark, "dq_windows_lookback", ["gold"], since=date(2026, 1, 10))["gold"] == WindowHistory(
+        previous_end=datetime(2026, 1, 15, 5, tzinfo=UTC))
+    assert window_histories(spark, "dq_windows_lookback", ["gold"], since=date(2026, 1, 16))["gold"] == WindowHistory()
+
+
 HELD = WindowHistory(previous_end=datetime(2026, 1, 15, 3, tzinfo=UTC), held_start=datetime(2026, 1, 15, 3, tzinfo=UTC),
                      first_held_end=datetime(2026, 1, 15, 4, tzinfo=UTC),
                      last_held_end=datetime(2026, 1, 15, 9, tzinfo=UTC), held_by=("query_failed",))

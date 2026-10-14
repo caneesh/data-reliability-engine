@@ -117,9 +117,13 @@ def _groups(values: dict[str, str | None] | None) -> str:
     return ",".join(f"{k}={'' if v is None else v}" for k, v in sorted((values or {}).items()))
 
 
-def read_run(spark: SparkSession, dq_database: str, run_id: str, run_date: date | None = None) -> dict[str, Any]:
+def read_run(spark: SparkSession, dq_database: str, run_id: str, run_date: date | None = None,
+             with_samples: bool = True, since: date | None = None) -> dict[str, Any]:
     """Everything a run's digests need from the dq store. Every row a run writes carries its
-    run_date, so with run_date given the run's own rows are read from that partition only."""
+    run_date, so with run_date given the run's own rows are read from that partition only; the
+    earlier results a digest compares with are read from run_date >= since (the history lookback).
+    Key-hash samples are read only when some dataset wants them (with_samples), at most
+    SAMPLE_KEYS per evaluation, bounded in SQL rather than on the driver."""
     validate_dq_database(dq_database)
     if not _RUN_ID.match(run_id):
         raise ValueError("unexpected run id")
@@ -132,9 +136,10 @@ def read_run(spark: SparkSession, dq_database: str, run_id: str, run_date: date 
     pairs = sorted({(r["dataset"], r["check_id"]) for r in current})
     datasets = ", ".join(f"'{validate_identifier(d, 'dataset id')}'" for d in sorted({d for d, _ in pairs}))
     checks = ", ".join(f"'{validate_identifier(c, 'check id')}'" for c in sorted({c for _, c in pairs}))
+    lookback = f" AND run_date >= DATE'{since.isoformat()}'" if since else ""
     earlier = (f"SELECT *, {GROUPS_SQL} AS groups FROM {dq_database}.dq_check_result "
                f"WHERE execution_type = 'NORMAL' AND run_id <> '{run_id}' AND evaluated_at < {utc_literal(started)} "
-               f"AND dataset IN ({datasets}) AND check_id IN ({checks})")
+               f"AND dataset IN ({datasets}) AND check_id IN ({checks}){lookback}")
     history = {
         (r.dataset, r.check_id, r.groups): r.asDict() for r in spark.sql(
             f"WITH h AS ({earlier}), "
@@ -161,9 +166,12 @@ def read_run(spark: SparkSession, dq_database: str, run_id: str, run_date: date 
     causes = [r.asDict() for r in spark.sql(
         f"SELECT * FROM {dq_database}.dq_cause_result WHERE {this_run}").collect()]
     samples: dict[str, list[str]] = {}
-    for r in spark.sql(
-            f"SELECT evaluation_id, key_hash FROM {dq_database}.dq_key_event WHERE {this_run} "
-            f"AND event IN ('FLAGGED', 'STILL_FLAGGED') ORDER BY evaluation_id, key_hash").collect():
+    sample_rows = spark.sql(
+        f"SELECT evaluation_id, key_hash FROM ("
+        f"  SELECT evaluation_id, key_hash, ROW_NUMBER() OVER (PARTITION BY evaluation_id ORDER BY key_hash) AS rn "
+        f"  FROM {dq_database}.dq_key_event WHERE {this_run} AND event IN ('FLAGGED', 'STILL_FLAGGED')"
+        f") ranked WHERE rn <= {SAMPLE_KEYS} ORDER BY evaluation_id, key_hash").collect() if with_samples else []
+    for r in sample_rows:
         samples.setdefault(r.evaluation_id, []).append(r.key_hash)
     return {"current": current, "history": history, "previous_groups": previous_groups,
             "causes": causes, "samples": samples}
@@ -299,7 +307,10 @@ def build_digests(config: Config, run: Run, data: dict[str, Any]) -> list[Digest
 
 
 def digests_for_run(spark: SparkSession, config: Config, run: Run) -> list[Digest]:
-    return build_digests(config, run, read_run(spark, config.defaults.dq_database, run.run_id, run.run_date))
+    with_samples = any(config.dataset_settings(ds).email_sample_keys for ds in config.datasets)
+    since = (run.run_date - timedelta(days=config.defaults.history_lookback_days))
+    return build_digests(config, run, read_run(spark, config.defaults.dq_database, run.run_id, run.run_date,
+                                               with_samples=with_samples, since=since))
 
 
 def to_send(digests: list[Digest], defaults: Defaults, run_started: datetime) -> list[Digest]:

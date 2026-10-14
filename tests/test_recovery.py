@@ -9,6 +9,8 @@ it as incomplete (the watchdog reports it) and the next run retries it.
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 from hcsc.datalake.dre.checks.hop.common import key_hash
 from hcsc.datalake.dre.cli import main
 from tests.fixtures.layers import (
@@ -86,3 +88,40 @@ def test_a_cause_investigation_that_cannot_be_stored_is_tracked_and_retried(spar
     rows = spark.table(f"{replay.dq}.dq_cause_result").collect()
     assert {r.evaluation_id for r in rows} >= {zero.evaluation_id}
     assert runner.pending_investigations(spark, runner.load_config(str(replay.conf), "test"), run.run_date, set()) == []
+
+
+def test_every_row_of_an_evaluation_is_marked_incomplete_together(spark, tmp_path) -> None:
+    """A marker for some groups only would outrank the evaluation's other groups in v_latest_result
+    (it ranks a dataset's check by evaluated_at), hiding them until the next run. So every row is
+    marked, with one shared time, whether or not that result carried key events."""
+    from dataclasses import replace
+    from datetime import datetime, timezone
+
+    from hcsc.datalake.dre.checks.base import did_not_run, from_counts
+    from hcsc.datalake.dre.checks.events import Event
+    from hcsc.datalake.dre.checks.hop.key_currency import KeyCurrency
+    from hcsc.datalake.dre.config.loader import load
+    from hcsc.datalake.dre.runner import Evaluation, Planned, incomplete_rows, result_rows
+    from hcsc.datalake.dre.store import runs
+    from tests.store.conftest import append_rows
+
+    replay = replay_conf(spark, tmp_path, "recover_groups")
+    config, _ = load(replay.conf)
+    gold = config.datasets["gold_member_coverage"]
+    planned = Planned(config.feeds["example_realtime"], gold, KeyCurrency())
+    at = datetime(2026, 1, 16, 12, tzinfo=timezone.utc)
+    event = Event(gold.dataset, at - timedelta(hours=1), at)
+    with_events = replace(from_counts(3, 1, "1 of 3 keys missing", "every key present",
+                                      group_values={"upstream": "curated_a"}), key_events=object())
+    without = did_not_run("invalid_config", detail="synthetic", group_values={"upstream": "curated_b"})
+    run = runs.new_run(now=at)
+    evaluation = Evaluation(planned, event, [with_events, without], at, 10)
+    rows = result_rows(evaluation, run, "NORMAL")
+    marked = incomplete_rows(evaluation, rows, at + timedelta(minutes=1))
+    assert [m["group_values"]["upstream"] for m in marked] == ["curated_a", "curated_b"]
+    assert {(m["state"], m["reason_category"], m["reason_code"], m["evaluated_at"]) for m in marked} == {
+        ("DID_NOT_RUN", "PLATFORM", "evidence_incomplete", at + timedelta(minutes=1))}
+    append_rows(spark, replay.dq, "dq_check_result", rows + marked)
+    current = [r for r in spark.table(f"{replay.dq}.v_latest_result").collect() if r.check_id == "HOP_KEY_CURRENCY"]
+    assert sorted((r.group_values["upstream"], r.reason_code) for r in current) == [
+        ("curated_a", "evidence_incomplete"), ("curated_b", "evidence_incomplete")]  # both groups still current

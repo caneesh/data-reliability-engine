@@ -27,7 +27,10 @@ def test_run_writes_results_and_windows_follow_on(spark, tmp_path, capsys) -> No
 
     assert main(["run", "--conf", str(replay.conf)]) == 0  # FAILED checks still exit 0
     out = capsys.readouterr().out
-    assert "gold_member_coverage T1_KEY_DUPLICATES [src_sys_nm=SRC_A]: FAILED (population 1, violations 1)" in out
+    # A group's value is data (hard rule 6): the log names the column and the group's place, never the value.
+    assert "gold_member_coverage T1_KEY_DUPLICATES [src_sys_nm #1]: FAILED (population 1, violations 1)" in out
+    assert "=SRC_A" not in out and "SRC_A]" not in out
+    assert "HOP_KEY_CURRENCY [upstream=example_curated_enrollment]" in out  # a dataset id, not data
     rows = {r.dataset: r for r in spark.table(f"{replay.dq}.dq_check_result").collect()
             if r.check_id == "T1_KEY_DUPLICATES"}
     first = rows["gold_member_coverage"]
@@ -89,7 +92,7 @@ def test_dry_run_prints_results_and_writes_nothing(spark, tmp_path, capsys) -> N
     before = counts(spark, replay.dq)
     assert main(["dry-run", "--conf", str(replay.conf), "--feed", "example_realtime"]) == 0
     out = capsys.readouterr().out
-    assert "gold_member_coverage T1_KEY_DUPLICATES [src_sys_nm=SRC_A]: PASSED" in out
+    assert "gold_member_coverage T1_KEY_DUPLICATES [src_sys_nm #1]: PASSED" in out
     assert "nothing written" in out
     assert counts(spark, replay.dq) == before
 
@@ -302,7 +305,7 @@ def test_weekly_rules_use_rule_weekly_day_when_set(monkeypatch, tmp_path) -> Non
                         encoding="utf-8")
     config, _ = load(conf)
     days = []
-    monkeypatch.setattr(runner, "last_completed", lambda spark, db: {})
+    monkeypatch.setattr(runner, "last_completed", lambda spark, db, since=None: {})
     monkeypatch.setattr(runner, "is_due", lambda freq, start, at, tz, day, done: days.append(day) or True)
     rules_due(None, config, plan_rules(config), datetime(2026, 1, 16, tzinfo=timezone.utc))
     assert set(days) == {"MONDAY"}
@@ -349,3 +352,54 @@ def test_a_planning_error_ends_the_run_failed(spark, tmp_path, monkeypatch) -> N
     assert main(["run", "--conf", str(replay.conf)]) == 2
     [run] = spark.table(f"{replay.dq}.v_latest_run").collect()
     assert run.status == "FAILED"
+
+
+def test_a_normal_run_in_progress_refuses_a_second_one(spark, tmp_path, capsys) -> None:
+    """Two NORMAL runs at once would evaluate the same windows and store everything twice. A run
+    whose latest row is STARTED within watchdog_grace_minutes blocks; an older one is dead."""
+    from hcsc.datalake.dre.store import runs
+
+    replay = replay_conf(spark, tmp_path, "runner_in_progress")
+    create_table(spark, replay.gold, GOLD_COLUMNS, [gold_row()])
+    create_table(spark, replay.curated, CURATED_COLUMNS, [curated_row()])
+    live = runs.start_run(spark, replay.dq, now=datetime.now(timezone.utc) - timedelta(minutes=5))
+    assert main(["run", "--conf", str(replay.conf)]) == 3
+    out = capsys.readouterr().out
+    assert f"dre run: a NORMAL run is in progress (run {live.run_id}" in out
+    assert [r.run_id for r in spark.table(f"{replay.dq}.dq_run").collect()] == [live.run_id]  # nothing written
+    # A RERUN does not write key events or files, and does not block on it.
+    assert main(["run", "--conf", str(replay.conf), "--execution-type", "RERUN", "--window-start", "2026-01-15T00:00",
+                 "--window-end", "2026-01-15T01:00"]) == 0
+    runs.finish_run(spark, replay.dq, live, 1, 1)
+    dead = runs.start_run(spark, replay.dq, now=datetime.now(timezone.utc) - timedelta(minutes=31))  # past the grace
+    assert main(["run", "--conf", str(replay.conf)]) == 0
+    statuses = {r.run_id: r.status for r in spark.table(f"{replay.dq}.v_latest_run").collect()}
+    assert statuses[dead.run_id] == "STARTED" and statuses[live.run_id] == "COMPLETED"
+    assert sorted(statuses.values()).count("COMPLETED") == 3  # the RERUN, the finished one, the new NORMAL run
+
+
+def test_results_older_than_the_history_lookback_do_not_move_the_window(spark, tmp_path) -> None:
+    """history_lookback_days bounds the hourly store reads by run_date; a dataset whose last NORMAL
+    result is older than that windows as on a first run (initial_lookback_hours)."""
+    from hcsc.datalake.dre.checks.events import history_sql
+
+    replay = replay_conf(spark, tmp_path, "runner_lookback", {"defaults.yaml": [
+        ("max_window_hours: 72", "max_window_hours: 24"),
+        ("investigation_retry_days: 7", "investigation_retry_days: 1\nhistory_lookback_days: 2")]})
+    create_table(spark, replay.gold, GOLD_COLUMNS, [gold_row()])
+    create_table(spark, replay.curated, CURATED_COLUMNS, [curated_row()])
+    now = datetime.now(timezone.utc)
+    old_end = (now - timedelta(days=5)).replace(second=0, microsecond=0)
+    append_rows(spark, replay.dq, "dq_check_result", [{
+        "evaluation_id": "old-eval", "run_id": "old-run", "event_id": "old-event", "window_start": old_end - timedelta(hours=1),
+        "window_end": old_end, "execution_type": "NORMAL", "dataset": "gold_member_coverage", "check_id": "T1_KEY_NULLS",
+        "expectation_version": 1, "state": "PASSED", "evaluated_at": old_end, "run_date": old_end.date()}])
+    assert previous_window_end(spark, replay.dq, "gold_member_coverage") == old_end  # unbounded: it is there
+    assert main(["run", "--conf", str(replay.conf), "--feed", "example_realtime"]) == 0
+    [run] = [r for r in spark.table(f"{replay.dq}.v_latest_run").collect() if r.run_id != "old-run"]
+    nulls = [r for r in spark.table(f"{replay.dq}.dq_check_result").collect()
+             if r.check_id == "T1_KEY_NULLS" and r.dataset == "gold_member_coverage" and r.run_id == run.run_id]
+    end = (run.started_at - timedelta(minutes=15)).replace(second=0, microsecond=0)
+    assert [(r.window_start, r.window_end) for r in nulls] == [(end - timedelta(hours=24), end)]
+    plan = spark.sql("EXPLAIN FORMATTED " + history_sql(replay.dq, ["gold_member_coverage"], now.date())).collect()[0][0]
+    assert "PartitionFilters: [" in plan and "run_date" in plan.split("PartitionFilters: [", 1)[1].split("]", 1)[0]

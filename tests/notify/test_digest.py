@@ -158,3 +158,23 @@ def test_proposed_rules_are_report_only_and_never_counted(digests) -> None:
     d = digests["membership-gold"]
     assert {i.check_id for i in d.report_only} == {"one_open_row_per_coverage", "end_not_before_start"}
     assert "one_open_row_per_coverage" not in {i.check_id for i in d.changed + d.still_failing + d.did_not_run}
+
+
+def test_key_samples_are_bounded_in_sql_and_read_only_when_wanted(spark, config) -> None:
+    """At most SAMPLE_KEYS hashes per evaluation reach the driver, and none at all unless some
+    dataset sets email_sample_keys (the config fixture's feed does)."""
+    from hcsc.datalake.dre.notify.digest import SAMPLE_KEYS, read_run
+
+    run_id = "00000000-0000-0000-0000-000000000009"
+    at = datetime(2026, 1, 17, 12, 5)
+    create_store(spark, DQ)
+    append_rows(spark, DQ, "dq_check_result", [{**result(CURRENT, "gold_member_coverage", "HOP_KEY_CURRENCY", "FAILED",
+                                                           UPSTREAM, violations=20), "run_id": run_id,
+                                                 "evaluation_id": "many-keys", "evaluated_at": at, "run_date": at.date()}])
+    append_rows(spark, DQ, "dq_key_event", [
+        {"run_id": run_id, "evaluation_id": "many-keys", "dataset": "gold_member_coverage", "check_id": "HOP_KEY_CURRENCY",
+         "hop": "h", "key_hash": f"{n:064x}", "key_value": KEY_VALUE, "event": "FLAGGED", "state_detail": "MISSING",
+         "observed_at": at, "run_date": at.date()} for n in range(20)])
+    data = read_run(spark, DQ, run_id, at.date(), with_samples=True)
+    assert data["samples"] == {"many-keys": [f"{n:064x}" for n in range(SAMPLE_KEYS)]}
+    assert read_run(spark, DQ, run_id, at.date(), with_samples=False)["samples"] == {}
