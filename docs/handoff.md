@@ -62,8 +62,8 @@ Each row has a section in `docs/decisions.md` saying what was decided and why.
 
 **Developer: 16 questions.** They are in the user's Claude Doc, "DRE: questions for the developer" (https://claude.ai/code/artifact/0364b496-8c3e-437a-a070-ccd20af9174c):
 
-1. The curated load-time column. **Answered 2026-10-15: `cdc_upd_ts`** (`docs/decisions.md`, "Curated load time column"). Its format and granularity are still open, under question 2.
-2. Record-time formats, and now the format of `cdc_upd_ts` (read as a TIMESTAMP until confirmed). This is the most urgent: a wrong format parses every load time as null.
+1. The curated load-time column. **Answered 2026-10-15: `cdc_upd_ts`**, a string in `yyyy-MM-dd HH:mm:ss:SSSSSS`, minute granularity (`docs/decisions.md`, "Curated load time column").
+2. Record-time formats. This is now the most urgent: a wrong format parses every record time as null.
 3. The raw table's columns and load time.
 4. What raw's file-name column holds.
 5. How long raw keeps rows.

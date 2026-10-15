@@ -55,11 +55,10 @@ def run_types(spark, replay) -> dict[str, str]:
 
 
 def test_a_rerun_re_evaluates_a_historical_window_idempotently(spark, tmp_path) -> None:
-    # R05: gold holds an older version of the key. A RERUN names one window for every dataset, and
-    # the named bounds match a dataset's NORMAL window only at that dataset's granularity, so
-    # curated takes gold's (minute) here.
-    replay = setup(spark, tmp_path, "rerun", {"datasets/example_curated_enrollment.yaml": [
-        ("load_time: { column: cdc_upd_ts, format: null }", "load_time: { column: cdc_upd_ts, granularity: minute }")]})
+    # R05: gold holds an older version of the key. (A RERUN names one window for every dataset, and
+    # the named bounds match a dataset's NORMAL window only at that dataset's granularity: the
+    # sample gives curated and gold the same, minute.)
+    replay = setup(spark, tmp_path, "rerun")
     opened, terminated = curated_load_time(30), curated_load_time(12)
     create_table(spark, replay.curated, CURATED_COLUMNS,
                  [curated_row(updated=opened), curated_row(end="2026-06-30", updated=terminated)])

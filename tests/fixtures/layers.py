@@ -10,6 +10,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 GOLD_LOAD_FORMAT = "%Y-%m-%d %H:%M:%S:000000"  # gld_lcts, minute-granular, written in Chicago time
+CURATED_LOAD_FORMAT = "%Y-%m-%d %H:%M:%S:%f"  # cdc_upd_ts, microseconds after a colon, Chicago time
 CHICAGO = ZoneInfo("America/Chicago")
 
 
@@ -32,7 +33,7 @@ GOLD_COLUMNS = [
 CURATED_COLUMNS = [
     ("subscriberidnumber", "STRING"), ("membernumber", "STRING"), ("effectivedate", "STRING"),
     ("qualifiedhealthplanid", "STRING"), ("enddate", "STRING"), ("sourcelastupdatets", "TIMESTAMP"),
-    ("cdc_upd_ts", "TIMESTAMP"),
+    ("cdc_upd_ts", "STRING"),
 ]
 
 # Synthetic raw layer (test-only columns): one raw table holds two feeds, told apart by file name.
@@ -72,11 +73,13 @@ def gold_row(sub_id: str = "000123401", mem_nbr: str = "01", eff: str = "2026-01
 def curated_row(sub_id: str = "123401", mem_nbr: str = "01", eff: str = "2026-01-01", agreement: str = "AGR-A",
                 end: str = "9999-12-31", updated: datetime = datetime(2026, 1, 2, 8, 0),
                 loaded: datetime | None = None) -> dict[str, Any]:
-    """updated: sourcelastupdatets, the source version; loaded: cdc_upd_ts, when curated wrote the row
-    (defaults to the record time, so a row is loaded the moment it was updated)."""
+    """updated: sourcelastupdatets, the source version (Chicago wall time); loaded: cdc_upd_ts, when
+    curated wrote the row, written as the string curated writes (defaults to the record time, so a
+    row is loaded the moment it was updated)."""
+    loaded = loaded if loaded is not None else updated
     return {"subscriberidnumber": sub_id, "membernumber": mem_nbr, "effectivedate": eff,
             "qualifiedhealthplanid": agreement, "enddate": end, "sourcelastupdatets": updated,
-            "cdc_upd_ts": loaded if loaded is not None else updated}
+            "cdc_upd_ts": loaded.strftime(CURATED_LOAD_FORMAT)}
 
 
 def create_table(spark, table: str, columns: list[tuple[str, str]], rows: list[dict[str, Any]] = (),
