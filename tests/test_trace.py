@@ -6,8 +6,6 @@ from hcsc.datalake.dre.cli import main
 from tests.fixtures.layers import CURATED_COLUMNS, GOLD_COLUMNS, create_table, curated_load_time, curated_row, gold_row
 from tests.replay.conftest import replay_conf
 
-CURATED = "datasets/example_curated_enrollment.yaml"
-CURATED_LOAD_TIME = ("load_time: null ", "load_time: { column: sourcelastupdatets, granularity: minute } ")
 KEY = ["--dataset", "gold_member_coverage", "--key", "000123401,01,2026-01-01,AGR-A"]
 
 
@@ -18,8 +16,7 @@ def trace(replay, capsys, key=KEY) -> tuple[int, list[str]]:
 
 
 def test_a_key_missing_downstream_and_no_secret(spark, tmp_path, capsys) -> None:
-    replay = replay_conf(spark, tmp_path, "trace_missing",
-                         {"datasets/example_curated_enrollment.yaml": [CURATED_LOAD_TIME]})
+    replay = replay_conf(spark, tmp_path, "trace_missing")
     create_table(spark, replay.curated, CURATED_COLUMNS, [curated_row(updated=curated_load_time(12))])
     create_table(spark, replay.gold, GOLD_COLUMNS)
     code, lines = trace(replay, capsys)
@@ -81,7 +78,7 @@ def test_the_key_can_come_from_a_file_or_stdin_and_never_enters_sql_text(spark, 
     view, so no SQL the trace runs carries it as a literal."""
     import io
 
-    replay = replay_conf(spark, tmp_path, "trace_key_file", {CURATED: [CURATED_LOAD_TIME]})
+    replay = replay_conf(spark, tmp_path, "trace_key_file")
     create_table(spark, replay.curated, CURATED_COLUMNS, [curated_row()])
     create_table(spark, replay.gold, GOLD_COLUMNS, [gold_row()])
     key_file = tmp_path / "key.txt"

@@ -694,6 +694,7 @@ Build in this order. Each step ends with its tests passing and is usable before 
 
 | Item | Status |
 | --- | --- |
+| Curated load time column | Confirmed `cdc_upd_ts` (developer, 2026-10-15). Its format and granularity are not: the sample reads it as a TIMESTAMP (`format: null`) until developer question 2 is answered |
 | Curated winner rule across loads | Within one load confirmed (`sourcelastupdatets DESC, enddate DESC`); across loads: developer question 2 |
 | Gold merge clause and dedupe | Developer question 3 |
 | CDC table and key | Not confirmed; developer question 4 |
@@ -711,5 +712,5 @@ The real RMS values (landing path, stopper and handoff file names, database and 
   - the handoff file naming the partition passed between phases: `probes.partition_cursor: { path: <handoff file>, extract_regex: <partition pattern>, format: <its date format>, compare_to: partition }` (`file_value_compare`, for SKIPPED\_BEHIND\_CURSOR and WRONG\_PARTITION);
   - the job log: `probes.load_log: { path_glob: <log glob>, pattern: <error pattern> }` (`log_contains`, for LOAD\_ERROR);
   - filter rules and the rejects table: `probes.filter_rules` and `probes.rejects` (`table_contains`, for FILTERED and REJECTED), once developer question 6 is answered.
-- Three datasets: raw (dates MM/DD/YYYY, partitioned by file date, real-time rows told apart by file name); curated (several versions per key, its own load time and record time); gold (four-part key with a zero-padded subscriber id, minute-granular load time, `feed_filter` on source system).
+- Three datasets: raw (dates MM/DD/YYYY, partitioned by file date, real-time rows told apart by file name); curated (several versions per key, its own load time `cdc_upd_ts` and record time); gold (four-part key with a zero-padded subscriber id, minute-granular load time, `feed_filter` on source system).
 - Three rules: `one_row_per_coverage` (max\_rows\_per\_key), `end_not_before_start` (column\_order), `older_coverage_still_open` (superseded\_still\_open, grouped by source system).

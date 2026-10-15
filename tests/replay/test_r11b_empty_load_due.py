@@ -10,13 +10,12 @@ from tests.fixtures.layers import CURATED_COLUMNS, GOLD_COLUMNS, create_table
 from tests.replay.conftest import REALTIME_DATASETS, latest, replay_conf
 
 CURATED = "datasets/example_curated_enrollment.yaml"
-CURATED_LOAD_TIME = ("load_time: null ", "load_time: { column: sourcelastupdatets, granularity: minute } ")
 PRESENCE = {"T1_ON_TIME", "T1_ZERO_ROWS"}
 
 
 def test_r11b_load_due_presence_checks_fail_row_checks_did_not_run(spark, tmp_path) -> None:
     replay = replay_conf(spark, tmp_path, "r11b", {
-        CURATED: [("key_unique: false", "key_unique: true"), CURATED_LOAD_TIME],
+        CURATED: [("key_unique: false", "key_unique: true")],
     })
     create_table(spark, replay.gold, GOLD_COLUMNS)
     create_table(spark, replay.curated, CURATED_COLUMNS)

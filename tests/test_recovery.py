@@ -17,9 +17,8 @@ from tests.fixtures.layers import (
     CURATED_COLUMNS, GOLD_COLUMNS, create_table, curated_load_time, curated_row, gold_load_time, gold_row,
 )
 from tests.replay.conftest import latest, replay_conf
-from tests.replay.test_r04_to_r07_hops import CURATED_LOAD_TIME, KEY, SECRET, key_events, setup
+from tests.replay.test_r04_to_r07_hops import KEY, SECRET, key_events, setup
 
-CURATED = "datasets/example_curated_enrollment.yaml"
 
 
 def final_runs(spark, replay) -> list:
@@ -58,7 +57,7 @@ def test_a_cause_investigation_that_cannot_be_stored_is_tracked_and_retried(spar
                                                                             capsys) -> None:
     from hcsc.datalake.dre import runner
 
-    replay = replay_conf(spark, tmp_path, "recover_causes", {CURATED: [CURATED_LOAD_TIME]})  # R03
+    replay = replay_conf(spark, tmp_path, "recover_causes")  # R03
     create_table(spark, replay.gold, GOLD_COLUMNS, [gold_row(loaded=gold_load_time(72))])
     create_table(spark, replay.curated, CURATED_COLUMNS,
                  [curated_row(sub_id=f"1234{h:02d}", updated=curated_load_time(h)) for h in range(1, 40)])

@@ -50,9 +50,11 @@ def main() -> None:
 
     spark = get_spark("dre-e2e-build")
     create_database(spark, "dq")  # the platform team's part on the cluster
-    # First feed: gold loads every two hours for two days; curated likewise.
+    # First feed: curated loads every two hours for two days; gold merges each version the same hour,
+    # so the hops are healthy.
     create_table(spark, "gold_db.member_coverage", GOLD_COLUMNS,
-                 [gold_row(sub_id=f"0001234{h:02d}", loaded=gold_load_time(h, now)) for h in range(1, 48, 2)])
+                 [gold_row(sub_id=f"0001234{h:02d}", record=curated_load_time(h, now), loaded=gold_load_time(h, now))
+                  for h in range(1, 48, 2)])
     create_table(spark, "curated_db.enrollment", CURATED_COLUMNS,
                  [curated_row(sub_id=f"1234{h:02d}", updated=curated_load_time(h, now)) for h in range(1, 48, 2)])
     # Second feed: the roster loaded daily for the last 40 days; the merge likewise.

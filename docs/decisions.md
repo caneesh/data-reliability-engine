@@ -89,7 +89,7 @@ The engine field names chosen in step 2 are in spec section 3. The other assumpt
 5. **Key normaliser `parse_date`.** R04 needs raw dates (MM/dd/yyyy) to match curated ones (yyyy-MM-dd). `key_normalise` now also takes `{ parse_date: <format> }`, which reads the string with that format and writes it as yyyy-MM-dd. A generic capability, not per-source code.
 6. **Rule `format`.** `column_order`, `superseded_still_open` and `child_within_parent` take an optional `format` so string dates are parsed, not compared as strings (CLAUDE.md). The sample gold rules set `format: yyyy-MM-dd` (gold dates are YYYY-MM-DD, spec section 9).
 7. **Rules run over the whole table** (after `feed_filter`), not only over the event window: the rules describe the table's state. proposed and approved rules both run; the email (step 9) marks proposed ones report only. How often they run: see the step 7 review, item 2.
-8. **Sample config: curated's `load_time` is not confirmed**, so gold's hop checks are DID\_NOT\_RUN / invalid\_config on every run until it is (spec section 11). Since the step 7 review this no longer holds gold's window.
+8. **Sample config: curated's `load_time` is not confirmed**, so gold's hop checks are DID\_NOT\_RUN / invalid\_config on every run until it is (spec section 11). Confirmed on 2026-10-15: see "Curated load time column" below. Since the step 7 review this no longer holds gold's window.
 9. **R04 at check level** uses a synthetic raw dataset (test-only columns, with `msg_ts` as its record and load time), since the sample config has no raw dataset until its columns are confirmed.
 
 ## Step 7 review (2026-10-10)
@@ -420,6 +420,16 @@ The smaller items of the verification report that need no spec answer. Decisions
 7. **`dre trace` takes the key from a file or stdin and carries it as data (N2).** `--key-file FILE` (first line; `-` for stdin) keeps the key off the command line; `--key` stays for interactive use with a warning in its help. The key parts go into a one-row temp view (a local relation, whose rows no plan prints) that the layer queries cross-join, so no SQL text, plan or history-server page carries them; the normalisers apply to the view's columns in SQL as before.
 
 Not done from the report's batch-3 list: P16 (a derived upstream materialised once per hop; P3's candidate keys took most of its cost), the second half of P11 (one scan for ON_TIME and ZERO_ROWS), and everything waiting on a spec answer (F1, F4, F7, F9, P9, P13, the STILL_FLAGGED question).
+
+## Curated load time column (2026-10-15)
+
+Developer question 1 answered: the curated table's load time is `cdc_upd_ts`. The other two timestamp columns (`sourcelastupdatets`, the source's last update, already curated's `record_time`; and `src_upd_ts`, the RMS record time) are record times, not load times.
+
+1. **Sample config.** `example_curated_enrollment.yaml` sets `load_time: { column: cdc_upd_ts, format: null }`. Gold's hop checks (HOP\_KEY\_CURRENCY, HOP\_VALUE\_AGREEMENT) now run on the unedited sample instead of DID\_NOT\_RUN / invalid\_config, and `dre validate` no longer warns on it.
+2. **Format and granularity: assumption.** Neither is confirmed. `format: null` reads the column as a TIMESTAMP; if it is a string such as `yyyy-MM-dd HH:mm:ss:SSSSSS`, the deployed config must set `format` or every parse returns null. No `granularity`, so windows are not truncated for curated. Both are developer question 2 (formats), now covering load times too. Note for the deployed config: a RERUN names one window for every dataset of the feed, and the named bounds match a dataset's NORMAL window only at that dataset's granularity, so curated and gold should share one (the rerun idempotency test gives curated gold's `minute`); otherwise a RERUN of gold's window writes curated's windowed results again under a new span.
+3. **Fixtures.** `CURATED_COLUMNS` carries `cdc_upd_ts`; `curated_row(loaded=...)` sets it, defaulting to the record time so every existing scenario keeps its meaning. The replay, trace and R11 tests stop patching `load_time` into the sample, because the sample now has it; their behaviour is unchanged except that windows are no longer truncated to the minute for curated (the patched value had `granularity: minute`).
+4. **End-to-end.** The synthetic gold rows carry the curated version's record time, so the member feed's hops are healthy like the provider feed's, and `verify.py` asserts them.
+5. **Proving test.** `tests/replay/test_r04_to_r07_hops.py::test_curated_keys_are_judged_by_cdc_upd_ts_not_by_their_record_time`: a version updated 60 hours ago but written 12 hours ago is judged in this window; read by its record time it would not be.
 
 ## Notes for later steps
 

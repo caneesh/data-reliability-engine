@@ -19,13 +19,12 @@ NO_LOAD_DUE = (
     "  kind: times\n  times: [",
     "  kind: calendar_dates\n  dates: [2020-01-01]\n  times: [",
 )
-CURATED_LOAD_TIME = ("load_time: null ", "load_time: { column: sourcelastupdatets, granularity: minute } ")
 
 
 def test_r11a_no_load_due_everything_did_not_run(spark, tmp_path) -> None:
     replay = replay_conf(spark, tmp_path, "r11a", {
         FEED: [NO_LOAD_DUE],
-        CURATED: [("key_unique: false", "key_unique: true"), CURATED_LOAD_TIME],
+        CURATED: [("key_unique: false", "key_unique: true")],
     })
     create_table(spark, replay.gold, GOLD_COLUMNS)
     create_table(spark, replay.curated, CURATED_COLUMNS)

@@ -1,4 +1,4 @@
-# Handoff: where the build stands (2026-10-12)
+# Handoff: where the build stands (2026-10-15)
 
 Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec.md` (the source of truth), `docs/decisions.md` (every assumption, with its reason) and `docs/architecture.md` (guarantees and limits). This file only says where things stand and what is waiting.
 
@@ -9,7 +9,7 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
 - **Release 1** (spec section 10, steps 1 to 11) is done. It was then extended by two code reviews and an architecture review.
 - **Release 2** has started. Derived datasets (join and aggregate hops) are built.
 - **Release 3** (extensibility) is built: the eight-step plan in `docs/design/extensibility.md`, agreed by the user, built in order; each step has a spec amendment and a `docs/decisions.md` entry, and `docs/extending.md` is the how-to.
-- **Tests:** 688, all passing (`pytest --collect-only -q | tail -1` gives the exact count). A full local run takes about 20 minutes; CI about 15. Replay scenarios R01 to R13 all pass, plus a three-layer acceptance test.
+- **Tests:** 689, all passing (`pytest --collect-only -q | tail -1` gives the exact count). A full local run takes about 20 minutes; CI about 15. Replay scenarios R01 to R13 all pass, plus a three-layer acceptance test.
 
 ## History, in order (each step green in CI)
 
@@ -37,12 +37,13 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
 | Verification P3: candidate keys before the hop's window functions | `02274b7` | #47 |
 | Verification batch 3a: script transform by its USING, framed run output, bounded reads, validate warnings, null keys | `8e10e19` | #48 |
 | Verification batch 3b: retried investigations judge open keys, bounded landing and log reads, `landing.max_files`, daily retry cadence, watchdog exit codes, `dre trace --key-file` | `1594c4a` | #49 |
+| Developer question 1: curated load time is `cdc_upd_ts` (sample config, fixtures, e2e) | (this commit) | |
 
 Each row has a section in `docs/decisions.md` saying what was decided and why.
 
 ## What is waiting
 
-**Next action:** the user said that real keys, tables and columns come in later iterations. Until they arrive, wait for the user. When an answer arrives:
+**Next action:** the user said that real keys, tables and columns come in later iterations (the first, the curated load time column, arrived on 2026-10-15). Until more arrive, wait for the user. When an answer arrives:
 
 1. Turn it into configuration, or a small change.
 2. Add tests, and get CI green.
@@ -61,8 +62,8 @@ Each row has a section in `docs/decisions.md` saying what was decided and why.
 
 **Developer: 16 questions.** They are in the user's Claude Doc, "DRE: questions for the developer" (https://claude.ai/code/artifact/0364b496-8c3e-437a-a070-ccd20af9174c):
 
-1. The curated load-time column. This is the most urgent: until it is set, gold's hop checks are DID_NOT_RUN on every run.
-2. Record-time formats.
+1. The curated load-time column. **Answered 2026-10-15: `cdc_upd_ts`** (`docs/decisions.md`, "Curated load time column"). Its format and granularity are still open, under question 2.
+2. Record-time formats, and now the format of `cdc_upd_ts` (read as a TIMESTAMP until confirmed). This is the most urgent: a wrong format parses every load time as null.
 3. The raw table's columns and load time.
 4. What raw's file-name column holds.
 5. How long raw keeps rows.
@@ -180,6 +181,6 @@ Production table, column and path names stay null: CLAUDE.md forbids inventing t
 - **End-to-end check by hand:**
   1. In an empty directory, run `python <repo>/tests/e2e/build_synthetic.py`.
   2. Run `dre install --conf conf --apply`, then `dre run --conf conf`.
-  3. Run `python <repo>/tests/e2e/verify.py`. Expect `42 results {'DID_NOT_RUN': 19, 'PASSED': 23}`, run COMPLETED. Set `PYSPARK_PYTHON` to the venv's interpreter if the workers pick up another Python.
+  3. Run `python <repo>/tests/e2e/verify.py`. Expect `47 results {'DID_NOT_RUN': 19, 'PASSED': 28}`, run COMPLETED (since curated's load time was confirmed, its windowed checks and gold's hops run). Set `PYSPARK_PYTHON` to the venv's interpreter if the workers pick up another Python.
 - **CI.** Check it with the GitHub MCP `actions_list` tool. After a push, schedule a `send_later` check-in about 15 minutes out instead of polling.
 - **Uploaded review documents.** Check each point against the code before acting; don't follow them blindly. Reproduce a reported defect with a failing test before fixing it.

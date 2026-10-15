@@ -5,7 +5,7 @@ layer: CURATED
 upstream: []
 key: [subscriberidnumber, membernumber, effectivedate, qualifiedhealthplanid]
 record_time: { column: sourcelastupdatets, format: null }   # format not yet confirmed
-load_time: null               # load time column not yet confirmed
+load_time: { column: cdc_upd_ts, format: null }           # format and granularity not yet confirmed (developer, 2026-10-15)
 partition_column: null
 partition_format: null            # how the partition value is written (e.g. yyyy-MM-dd); with it, windowed checks read only the window's partitions
 file_name_column: null

@@ -1,6 +1,6 @@
 """Check an end-to-end `dre run`: one COMPLETED run, results for every synthetic feed and the
 table-wide dataset, no PLATFORM failures (which would mean an engine error), and the second
-feed's healthy hop (roster to directory) PASSED. Exit 1 if not."""
+feeds' healthy hops (roster to directory; curated to gold) PASSED. Exit 1 if not."""
 
 from __future__ import annotations
 
@@ -26,10 +26,10 @@ def main() -> int:
     platform = [(r.dataset, r.check_id, r.reason_code) for r in results if r.reason_category == "PLATFORM"]
     if platform:
         problems.append(f"PLATFORM failures: {platform}")
-    hops = {r.check_id: r.state for r in results
-            if r.dataset == "provider_directory" and r.check_id.startswith("HOP_")}
-    if hops != {"HOP_KEY_CURRENCY": "PASSED", "HOP_VALUE_AGREEMENT": "PASSED"}:
-        problems.append(f"provider_directory hops {hops}, expected both PASSED")
+    for dataset in ("provider_directory", "gold_member_coverage"):
+        hops = {r.check_id: r.state for r in results if r.dataset == dataset and r.check_id.startswith("HOP_")}
+        if hops != {"HOP_KEY_CURRENCY": "PASSED", "HOP_VALUE_AGREEMENT": "PASSED"}:
+            problems.append(f"{dataset} hops {hops}, expected both PASSED")
     states: dict[str, int] = {}
     for r in results:
         states[r.state] = states.get(r.state, 0) + 1

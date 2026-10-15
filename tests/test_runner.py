@@ -21,7 +21,9 @@ def counts(spark, dq: str) -> tuple[int, int]:
 def test_run_writes_results_and_windows_follow_on(spark, tmp_path, capsys) -> None:
     # Curated has no load time in the sample config, so gold's hop checks are DID_NOT_RUN /
     # invalid_config. A CONFIGURATION reason never holds a window (spec section 4): gold's moves on.
-    replay = replay_conf(spark, tmp_path, "runner_a")
+    # Curated without a load time, so the hop checks have a CONFIGURATION reason to report (below).
+    replay = replay_conf(spark, tmp_path, "runner_a", {"datasets/example_curated_enrollment.yaml": [
+        ("load_time: { column: cdc_upd_ts, format: null }", "load_time: null")]})
     create_table(spark, replay.gold, GOLD_COLUMNS, [gold_row(), gold_row()])  # one duplicated key
     create_table(spark, replay.curated, CURATED_COLUMNS, [curated_row()])
 

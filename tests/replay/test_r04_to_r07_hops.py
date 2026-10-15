@@ -18,7 +18,6 @@ from tests.fixtures.layers import (
 from tests.replay.conftest import cause_rows, causes, latest, replay_conf
 
 CURATED = "datasets/example_curated_enrollment.yaml"
-CURATED_LOAD_TIME = ("load_time: null ", "load_time: { column: sourcelastupdatets, granularity: minute } ")
 SECRET = b"synthetic-replay-secret"
 KEY = "123401|01|2026-01-01|AGR-A"  # curated_row()'s key, and gold_row()'s once sub_id is normalised
 
@@ -26,8 +25,7 @@ KEY = "123401|01|2026-01-01|AGR-A"  # curated_row()'s key, and gold_row()'s once
 def setup(spark, tmp_path: Path, name: str, extra: dict | None = None):
     secret = tmp_path / "hmac.secret"
     secret.write_bytes(SECRET + b"\n")
-    edits = {"defaults.yaml": [("hmac_secret_file: null", f"hmac_secret_file: {secret}")],
-             CURATED: [CURATED_LOAD_TIME]}
+    edits = {"defaults.yaml": [("hmac_secret_file: null", f"hmac_secret_file: {secret}")]}
     for rel, pairs in (extra or {}).items():
         edits[rel] = edits.get(rel, []) + pairs
     return replay_conf(spark, tmp_path, name, edits)
@@ -221,3 +219,21 @@ def test_r05_trace_shows_gold_older_than_curated_and_the_cause(spark, tmp_path, 
         "cause: NOT_RUN (confirmed)",
     ]
     assert "123401" not in out and "AGR-A" not in out  # the key itself is never printed
+
+
+def test_curated_keys_are_judged_by_cdc_upd_ts_not_by_their_record_time(spark, tmp_path) -> None:
+    """The sample config, unedited: curated's load time is cdc_upd_ts (developer, 2026-10-15).
+
+    A version updated at the source 60 hours ago but written to curated 12 hours ago is due in this
+    window (load + sla_hours 8); judged by its record time it would have fallen before the window
+    and the hop would be DID_NOT_RUN / empty_population."""
+    replay = setup(spark, tmp_path, "cdc_load_time")
+    updated, loaded = curated_load_time(60), curated_load_time(12)
+    create_table(spark, replay.curated, CURATED_COLUMNS, [curated_row(updated=updated, loaded=loaded)])
+    create_table(spark, replay.gold, GOLD_COLUMNS, [gold_row(record=updated, loaded=gold_load_time(10))])
+
+    assert main(["run", "--conf", str(replay.conf)]) == 0
+    currency = hop(spark, replay, "HOP_KEY_CURRENCY")
+    assert (currency.state, currency.population, currency.violations) == ("PASSED", 1, 0)
+    agreement = hop(spark, replay, "HOP_VALUE_AGREEMENT")
+    assert (agreement.state, agreement.population, agreement.violations) == ("PASSED", 1, 0)

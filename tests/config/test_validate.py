@@ -35,11 +35,10 @@ def test_sample_config_is_valid() -> None:
     assert set(config.datasets) == {"example_curated_enrollment", "gold_member_coverage", "gold_member_coverage_all",
                                     "provider_roster_raw", "provider_directory"}
     assert len(config.rules) == 6
-    # Reported, not errors: the curated load time column and the raw dataset are not confirmed yet,
-    # and the default time zone observes daylight saving time (spec section 4).
+    # Reported, not errors: the default time zone observes daylight saving time (spec section 4)
+    # and the raw dataset is not confirmed yet. (Curated's load time column was confirmed on 2026-10-15.)
     assert [(Path(w.file).name, w.field) for w in warnings] == [
-        ("example_curated_enrollment.yaml", "load_time"), ("defaults.yaml", "timezone"),
-        ("example_realtime.yaml", "datasets")]
+        ("defaults.yaml", "timezone"), ("example_realtime.yaml", "datasets")]
 
 
 def test_cli_validate_exit_codes(conf: Path, capsys: pytest.CaptureFixture[str]) -> None:

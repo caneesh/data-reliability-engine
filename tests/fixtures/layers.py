@@ -32,6 +32,7 @@ GOLD_COLUMNS = [
 CURATED_COLUMNS = [
     ("subscriberidnumber", "STRING"), ("membernumber", "STRING"), ("effectivedate", "STRING"),
     ("qualifiedhealthplanid", "STRING"), ("enddate", "STRING"), ("sourcelastupdatets", "TIMESTAMP"),
+    ("cdc_upd_ts", "TIMESTAMP"),
 ]
 
 # Synthetic raw layer (test-only columns): one raw table holds two feeds, told apart by file name.
@@ -69,9 +70,13 @@ def gold_row(sub_id: str = "000123401", mem_nbr: str = "01", eff: str = "2026-01
 
 
 def curated_row(sub_id: str = "123401", mem_nbr: str = "01", eff: str = "2026-01-01", agreement: str = "AGR-A",
-                end: str = "9999-12-31", updated: datetime = datetime(2026, 1, 2, 8, 0)) -> dict[str, Any]:
+                end: str = "9999-12-31", updated: datetime = datetime(2026, 1, 2, 8, 0),
+                loaded: datetime | None = None) -> dict[str, Any]:
+    """updated: sourcelastupdatets, the source version; loaded: cdc_upd_ts, when curated wrote the row
+    (defaults to the record time, so a row is loaded the moment it was updated)."""
     return {"subscriberidnumber": sub_id, "membernumber": mem_nbr, "effectivedate": eff,
-            "qualifiedhealthplanid": agreement, "enddate": end, "sourcelastupdatets": updated}
+            "qualifiedhealthplanid": agreement, "enddate": end, "sourcelastupdatets": updated,
+            "cdc_upd_ts": loaded if loaded is not None else updated}
 
 
 def create_table(spark, table: str, columns: list[tuple[str, str]], rows: list[dict[str, Any]] = (),
