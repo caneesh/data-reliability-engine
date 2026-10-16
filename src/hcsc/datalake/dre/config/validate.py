@@ -338,6 +338,11 @@ def _check_partitioning(r: _Reporter, ds_id: str) -> None:
         r.err("dataset", ds_id, ("partition_column",), "partition_column without partition_format prunes nothing: "
             "windowed checks read every partition", "set partition_format to the pattern the partition value is "
             "written in (e.g. yyyy-MM-dd) once the platform confirms it", level="warning")
+    if "T1_PARTITION_DRIFT" in ds.check_params and (ds.partition_column is None or ds.partition_format is None):
+        r.err("dataset", ds_id, ("check_params",), "T1_PARTITION_DRIFT is configured but the dataset has no "
+            "partition_column and partition_format: the check is DID_NOT_RUN / invalid_config",
+            "set both (the table's partition column and how its value is written), or remove the check_params entry",
+            level="warning")
 
 
 def _check_settings_resolve(r: _Reporter, ds_id: str) -> None:

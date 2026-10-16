@@ -80,6 +80,9 @@ class CheckResult:
     judged_view: str | None = field(default=None, compare=False, repr=False)
     # Frames the check materialised (local checkpoints) and the runner releases with the view.
     checkpoints: tuple[Any, ...] = field(default=(), compare=False, repr=False)
+    # T1_PARTITION_DRIFT: the partitions' states to append to dq_partition_state (store/partitions.py),
+    # written by the runner with the run id after the result, like key events.
+    partition_state: tuple[Any, ...] = field(default=(), compare=False, repr=False)
 
 
 def release_checkpoint(frame: Any) -> None:

@@ -20,7 +20,7 @@ pytest                 # all tests, local-mode Spark
 pytest tests/guard     # guard tests only
 ```
 
-Release 1 is built (spec section 10, steps 1 to 11). Commands: `dre validate`, `dre install --print|--apply|--check`, `dre run [--feed F]` (plus `--execution-type RERUN --window-start T --window-end T` or `REPLAY --from T --to T` for historical windows), `dre dry-run --feed F`, `dre trace --dataset D --key "k1,k2,..."`, `dre watchdog` and `dre retention [--apply]`, each with `--conf DIR`; and `dre guard PATH`, which scans a source tree (an extension package) under the engine's read-only and append-only rules. Release 3 adds the extension points: [`docs/extending.md`](docs/extending.md).
+Release 1 is built (spec section 10, steps 1 to 11). Commands: `dre validate`, `dre install --print|--apply|--check`, `dre run [--feed F]` (plus `--execution-type RERUN --window-start T --window-end T` or `REPLAY --from T --to T` for historical windows), `dre dry-run --feed F`, `dre trace --dataset D --key "k1,k2,..."`, `dre watchdog` and `dre retention [--apply]`, each with `--conf DIR`; and `dre guard PATH`, which scans a source tree (an extension package) under the engine's read-only and append-only rules. Release 3 adds the extension points: [`docs/extending.md`](docs/extending.md). Release 4 (outside-in evidence, [`docs/design/outside-in-evidence.md`](docs/design/outside-in-evidence.md)) adds read-only checks that see what an in-pipeline audit sees; built so far: `T1_PARTITION_DRIFT`.
 
 ## Deploying with spark-submit
 

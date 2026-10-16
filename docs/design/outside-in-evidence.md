@@ -1,6 +1,6 @@
 # Design: outside-in evidence (release 4)
 
-Status: proposed on 2026-10-16, waiting for the user's go-ahead on the order and on the file read cap in "Decide before step 1"; the partition-drift evidence question was decided the same day (file metadata plus a bounded count). Nothing in it is built.
+Status: agreed by the user on 2026-10-16 (the order as listed; the 1 GiB file read cap for step 2; partition-drift evidence from file metadata plus a bounded count). Step 1 is built (`docs/decisions.md`, "Release 4, step 1"); two departures from the plan are recorded there: the check is configured through `check_params`, and every changed partition is counted, in or out of the window, so stored counts always match the last state.
 
 ## Why
 
@@ -107,8 +107,8 @@ For hops the configuration declares as copies ("raw and incr are identical copie
 | Decision | Proposal | Who confirms |
 | --- | --- | --- |
 | Partition drift evidence | Decided 2026-10-16: file metadata detects a rewrite, a count of the rewritten partition alone confirms it; no metastore statistics, no full scan (step 1) | User |
-| File read cap | `max_bytes` 1 GiB per file, `landing.max_files` overall; a sequence file's record count through Spark's reader | User |
-| Order | 1 partition drift, 2 file record count, 3 sequence gap, 4 row parity, 5 cardinality | User |
+| File read cap | Decided 2026-10-16: `max_bytes` 1 GiB per file, `landing.max_files` overall; a sequence file's record count through Spark's reader | User |
+| Order | Decided 2026-10-16: 1 partition drift, 2 file record count, 3 sequence gap, 4 row parity, 5 cardinality | User |
 
 ## What this plan does not do, and why
 

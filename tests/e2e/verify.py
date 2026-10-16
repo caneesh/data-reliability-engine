@@ -30,6 +30,13 @@ def main() -> int:
         hops = {r.check_id: r.state for r in results if r.dataset == dataset and r.check_id.startswith("HOP_")}
         if hops != {"HOP_KEY_CURRENCY": "PASSED", "HOP_VALUE_AGREEMENT": "PASSED"}:
             problems.append(f"{dataset} hops {hops}, expected both PASSED")
+    drift = [r for r in results if r.dataset == "provider_directory" and r.check_id == "T1_PARTITION_DRIFT"]
+    if [(r.state, r.reason_code) for r in drift] != [("DID_NOT_RUN", "insufficient_history")]:
+        problems.append(f"provider_directory T1_PARTITION_DRIFT {[(r.state, r.reason_code) for r in drift]}, "
+                        "expected the first run to record the baseline")
+    recorded = spark.table("dq.v_latest_partition_state").filter("dataset = 'provider_directory'").count()
+    if recorded == 0:
+        problems.append("no partition state recorded for provider_directory")
     states: dict[str, int] = {}
     for r in results:
         states[r.state] = states.get(r.state, 0) + 1

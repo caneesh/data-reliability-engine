@@ -43,6 +43,15 @@ CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_file (
   modified_at TIMESTAMP, observed_at TIMESTAMP, run_id STRING
 ) PARTITIONED BY (run_date DATE) STORED AS ORC;
 
+-- Release 4: what each partition of a table looked like at a run (T1_PARTITION_DRIFT).
+-- row_count is the latest known count, carried forward when the files did not change.
+CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_partition_state (
+  dataset STRING, table_name STRING, partition_value STRING,
+  file_count INT, total_bytes BIGINT, latest_modified_at TIMESTAMP,
+  row_count BIGINT, counted_at TIMESTAMP,
+  observed_at TIMESTAMP, run_id STRING
+) PARTITIONED BY (run_date DATE) STORED AS ORC;
+
 -- A run's state is its latest dq_run row: the final row (COMPLETED, PARTIAL or
 -- FAILED) once written, otherwise STARTED.
 CREATE VIEW IF NOT EXISTS {{ dq_database }}.v_latest_run AS
@@ -113,5 +122,16 @@ FROM (
          MIN(first_seen_at) OVER (PARTITION BY path) AS first_seen_at,
          ROW_NUMBER() OVER (PARTITION BY path ORDER BY observed_at DESC, run_id DESC) AS latest_rank
   FROM {{ dq_database }}.dq_file
+) ranked
+WHERE latest_rank = 1;
+
+-- The latest recorded state per dataset and partition (T1_PARTITION_DRIFT compares against it).
+CREATE VIEW IF NOT EXISTS {{ dq_database }}.v_latest_partition_state AS
+SELECT dataset, table_name, partition_value, file_count, total_bytes, latest_modified_at,
+       row_count, counted_at, observed_at, run_id, run_date
+FROM (
+  SELECT s.*,
+         ROW_NUMBER() OVER (PARTITION BY dataset, partition_value ORDER BY observed_at DESC, run_id DESC) AS latest_rank
+  FROM {{ dq_database }}.dq_partition_state s
 ) ranked
 WHERE latest_rank = 1

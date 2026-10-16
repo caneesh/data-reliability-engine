@@ -6,7 +6,11 @@ upstream: [provider_roster_raw]
 key: [provider_id]
 record_time: { column: roster_effective_ts, timezone: UTC }
 load_time: { column: merged_at, granularity: minute, timezone: UTC }
+partition_column: merge_dt        # the merge's UTC date
+partition_format: yyyy-MM-dd
 key_unique: true
+check_params:
+  T1_PARTITION_DRIFT: { tolerance_rows: 0 }   # release 4: a partition rewritten outside the window (spec section 6)
 key_map:
   provider_roster_raw: { provider_id: provider_id }
 owned_columns: { specialty: specialty }

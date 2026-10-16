@@ -75,6 +75,39 @@ def list_landing(spark: SparkSession, roots: list[str], pattern: str = "*",
     return sorted(found, key=lambda f: f.path)
 
 
+@dataclass(frozen=True)
+class DirSummary:
+    """What a directory's files look like, without reading them (T1_PARTITION_DRIFT)."""
+
+    file_count: int
+    total_bytes: int
+    latest_modified_at: datetime | None  # UTC; None when the directory holds no files
+
+
+def summarise_directory(spark: SparkSession, path_text: str) -> DirSummary:
+    """File count, total bytes and latest modification time of the files under the path
+    (recursively, hidden files skipped). A path that cannot be listed is a LandingError."""
+    try:
+        path, fs = _fs(spark, path_text)
+        if not fs.exists(path):
+            raise LandingError("hdfs_unavailable", "partition directory not found")
+        files = fs.listFiles(path, True)
+        count, total, latest = 0, 0, None
+        while files.hasNext():
+            status = files.next()
+            if status.getPath().getName().startswith((".", "_")):
+                continue
+            count += 1
+            total += int(status.getLen())
+            modified = datetime.fromtimestamp(status.getModificationTime() / 1000, tz=timezone.utc)
+            latest = modified if latest is None or modified > latest else latest
+        return DirSummary(count, total, latest)
+    except LandingError:
+        raise
+    except Exception as exc:
+        raise LandingError(_code(exc), f"cannot list a partition directory: {type(exc).__name__}") from None
+
+
 # Read-only helpers for cause probes (spec section 7): existence and glob. Probes read
 # text files with spark.read.text.
 

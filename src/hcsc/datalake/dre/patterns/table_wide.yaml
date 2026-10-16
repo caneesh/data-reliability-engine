@@ -4,6 +4,7 @@ pattern: TABLE_WIDE
 kind: table            # file: data lands as files (the feed needs `landing`); table: it arrives in a table
 checks:
   - T1_SCHEMA_DRIFT
+  - T1_PARTITION_DRIFT  # parametrised (release 4): runs where check_params configures it; once per table
   - T1_KEY_NULLS
   - T1_KEY_DUPLICATES
   - T1_FRESHNESS      # parametrised: runs where check_params configures it (spec section 3)

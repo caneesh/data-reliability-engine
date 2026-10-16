@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from hcsc.datalake.dre.store.names import DQ_TABLES
 from hcsc.datalake.dre.config.models import EmailServer
 from hcsc.datalake.dre.notify import email
 from hcsc.datalake.dre.notify.digest import Digest
@@ -65,8 +66,7 @@ def test_all_clear_digests_follow_the_setting() -> None:
     clear, failing = digest(), digest()
     failing.did_not_run.append(object())
     base = {"dq_database": "dq", "environment": "dev", "timezone": "UTC", "rule_run_at": "06:00",
-            "retention_months": {t: 13 for t in ("dq_run", "dq_check_result", "dq_cause_result", "dq_key_event",
-                                                  "dq_file")}}
+            "retention_months": {t: 13 for t in DQ_TABLES}}
     at = lambda mode: Defaults(**base, email={"all_clear_digest": mode})  # noqa: E731
     six_thirty, noon = datetime(2026, 1, 16, 6, 30, tzinfo=timezone.utc), datetime(2026, 1, 16, 12, tzinfo=timezone.utc)
     assert to_send([clear, failing], at("every_run"), noon) == [clear, failing]

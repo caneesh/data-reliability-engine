@@ -64,7 +64,8 @@ def main() -> None:
     # Each merge, 12 hours after its roster load, copies the roster's version: the hops are healthy.
     create_table(spark, "gold_db.provider_directory", PROVIDER_GOLD_COLUMNS,
                  [provider_gold_row(r["provider_id"], now - timedelta(days=d) + timedelta(hours=12),
-                                    effective=r["roster_effective_ts"]) for d, r in zip(days, roster)])
+                                    effective=r["roster_effective_ts"]) for d, r in zip(days, roster)],
+                 partition_by=["merge_dt"])  # one partition per merge date: T1_PARTITION_DRIFT records them
     spark.stop()
     print(f"e2e: synthetic tables, landing and conf ready in {work}")
 

@@ -83,17 +83,24 @@ def curated_row(sub_id: str = "123401", mem_nbr: str = "01", eff: str = "2026-01
 
 
 def create_table(spark, table: str, columns: list[tuple[str, str]], rows: list[dict[str, Any]] = (),
-                 rename: dict[str, str] | None = None) -> None:
-    """(Re)create an ORC table with these columns, optionally renaming some, and insert rows."""
+                 rename: dict[str, str] | None = None, partition_by: list[str] | None = None) -> None:
+    """(Re)create an ORC table with these columns, optionally renaming some, and insert rows.
+    partition_by names columns (of `columns`) the table is partitioned by; they come last."""
     rename = rename or {}
-    cols = [(rename.get(name, name), kind) for name, kind in columns]
+    partition_by = partition_by or []
+    ordered = [c for c in columns if c[0] not in partition_by] + [c for c in columns if c[0] in partition_by]
+    cols = [(rename.get(name, name), kind) for name, kind in ordered]
+    data_cols = [(n, k) for n, k in cols if n not in {rename.get(p, p) for p in partition_by}]
+    part_cols = [(n, k) for n, k in cols if n in {rename.get(p, p) for p in partition_by}]
     database = table.split(".")[0]
     spark.sql(f"CREATE DATABASE IF NOT EXISTS {database}")
     spark.sql(f"DROP TABLE IF EXISTS {table}")
-    spark.sql(f"CREATE TABLE {table} ({', '.join(f'{n} {k}' for n, k in cols)}) STORED AS ORC")
+    partitioned = f" PARTITIONED BY ({', '.join(f'{n} {k}' for n, k in part_cols)})" if part_cols else ""
+    spark.sql(f"CREATE TABLE {table} ({', '.join(f'{n} {k}' for n, k in data_cols)}){partitioned} STORED AS ORC")
     if rows:
-        data = [tuple(row.get(name) for name, _ in columns) for row in rows]
+        data = [tuple(row.get(name) for name, _ in ordered) for row in rows]
         schema = ", ".join(f"{n} {k}" for n, k in cols)
+        spark.conf.set("hive.exec.dynamic.partition.mode", "nonstrict")
         spark.createDataFrame(data, schema).write.insertInto(table)
 
 
@@ -105,6 +112,7 @@ PROVIDER_RAW_COLUMNS = [
 PROVIDER_GOLD_COLUMNS = [
     ("provider_id", "STRING"), ("provider_name", "STRING"), ("specialty", "STRING"),
     ("roster_effective_ts", "TIMESTAMP"), ("merged_at", "TIMESTAMP"),
+    ("merge_dt", "STRING"),  # the merge's UTC date, the table's partition value (yyyy-MM-dd) in the e2e build
 ]
 
 
@@ -121,4 +129,4 @@ def provider_gold_row(provider_id: str, merged_at: datetime, effective: datetime
     effective = effective if effective is not None else merged_at - timedelta(days=2)
     return {"provider_id": provider_id, "provider_name": f"Provider {provider_id}", "specialty": "general",
             "roster_effective_ts": effective.replace(tzinfo=None),
-            "merged_at": merged_at.replace(tzinfo=None)}
+            "merged_at": merged_at.replace(tzinfo=None), "merge_dt": merged_at.strftime("%Y-%m-%d")}

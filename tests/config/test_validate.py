@@ -242,3 +242,14 @@ def test_winner_rule_terms_and_dst_zones_are_warned_about(conf: Path) -> None:
     edit(conf, "defaults.yaml", "timezone: America/Chicago", "timezone: UTC")
     _, _, warnings = validate_conf(conf)
     assert not [w for w in warnings if "daylight saving" in w.problem]
+
+
+def test_partition_drift_configured_without_partitioning_is_a_warning(conf: Path) -> None:
+    """Release 4: T1_PARTITION_DRIFT needs partition_column and partition_format; without them it is
+    DID_NOT_RUN / invalid_config at run time, so dre validate says so up front."""
+    edit(conf, "datasets/provider_directory.yaml",
+         "partition_column: merge_dt        # the merge's UTC date\npartition_format: yyyy-MM-dd\n", "")
+    _, errors, warnings = validate_conf(conf)
+    assert errors == []
+    found = [w for w in warnings if Path(w.file).name == "provider_directory.yaml" and w.field == "check_params"]
+    assert len(found) == 1 and "T1_PARTITION_DRIFT" in found[0].problem and "set both" in found[0].fix

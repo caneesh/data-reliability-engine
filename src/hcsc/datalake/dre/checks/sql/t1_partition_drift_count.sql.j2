@@ -1,0 +1,8 @@
+{# Rows per partition: every partition of the table, or only the partitions named by the clauses
+   (one per partition, each a conjunction of its partition columns). #}
+SELECT {% for c in columns %}{{ c }} AS g_{{ loop.index }}, {% endfor %}COUNT(*) AS rows
+FROM {{ table }}
+{% if clauses %}
+WHERE {% for clause in clauses %}({{ clause }}){% if not loop.last %} OR {% endif %}{% endfor %}
+{% endif %}
+GROUP BY {% for c in columns %}{{ c }}{% if not loop.last %}, {% endif %}{% endfor %}

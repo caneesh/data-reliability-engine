@@ -440,6 +440,18 @@ The team is building a temporary in-pipeline audit (a control table, a rejects t
 3. Names in the contract are placeholders (hard constraint 7); the deployed configuration carries the real ones. The sample feed's probe comments point at the contract.
 4. DRE's own run, SLA and watchdog checks stay in place whatever the audit reports: a pipeline cannot report its own non-run.
 
+## Release 4, step 1: T1_PARTITION_DRIFT (2026-10-16)
+
+`docs/design/outside-in-evidence.md`, step 1, agreed by the user (order and the 1 GiB file cap for step 2 on 2026-10-16; the partition-drift evidence decided the same day: file metadata, not statistics).
+
+1. **A parametrised check, not a dataset field.** The plan said `partition_drift: { tolerance_rows }` on the dataset; it is `check_params: { T1_PARTITION_DRIFT: { tolerance_rows } }` instead, the release 3 mechanism for a check that runs only where it is configured, validated by `dre validate` like T1\_FRESHNESS. `dre validate` warns when it is configured on a dataset without `partition_column` and `partition_format`.
+2. **Every changed partition is counted, wherever it is.** The plan counted only rewritten partitions outside the window. A partition written inside the window and rewritten later outside it would then have been compared with a count from before its legitimate writes. So a partition whose files changed, or seen for the first time, is counted in or out of the window; only a change outside the window is a violation. On a healthy day that is the window's own partitions, a few.
+3. **Detection by directory listing.** One `SHOW PARTITIONS`, one `DESCRIBE FORMATTED` for the table's location, and one Hadoop FileSystem listing per partition directory (file count, bytes, latest modification time). A partition whose directory is not under the table's location (added with its own LOCATION) is found through `DESCRIBE FORMATTED ... PARTITION`, whose first Location row is the partition's. Hive statistics are never read or written.
+4. **State in `dq_partition_state`**, append-only through the writer, with `row_count` carried forward when the files did not change and `counted_at` saying when it was counted; `v_latest_partition_state` gives the latest row per dataset and partition. The rows ride on the CheckResult (`partition_state`) and the runner appends them with the run id after the result, like key events; a failed write marks the evaluation evidence\_incomplete like a failed key-event write.
+5. **Once per physical table, never in RERUN or REPLAY**, like T1\_SCHEMA\_DRIFT (`runner.TABLE_CHECKS`).
+6. **Sample config.** The synthetic provider gold table is partitioned by its merge date (`merge_dt`, a test-only column) and drift-checked, so the e2e run records a baseline (DID\_NOT\_RUN / insufficient\_history) and `verify.py` asserts it. The sample member-coverage gold stays unpartitioned: its real partition column is a platform value (spec section 11) and is not invented.
+7. **Retention** for `dq_partition_state` is 13 months, like the file registry.
+
 ## Notes for later steps
 
 - **Step 4:** done: `dre dry-run` parses SQL fragments (`config/fragments.py`).

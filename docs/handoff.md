@@ -9,6 +9,7 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
 - **Release 1** (spec section 10, steps 1 to 11) is done. It was then extended by two code reviews and an architecture review.
 - **Release 2** has started. Derived datasets (join and aggregate hops) are built.
 - **Release 3** (extensibility) is built: the eight-step plan in `docs/design/extensibility.md`, agreed by the user, built in order; each step has a spec amendment and a `docs/decisions.md` entry, and `docs/extending.md` is the how-to.
+- **Release 4** (outside-in evidence, `docs/design/outside-in-evidence.md`) has started: step 1 of 6 is built.
 - **Tests:** 689, all passing (`pytest --collect-only -q | tail -1` gives the exact count). A full local run takes about 20 minutes; CI about 15. Replay scenarios R01 to R13 all pass, plus a three-layer acceptance test.
 
 ## History, in order (each step green in CI)
@@ -41,12 +42,13 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
 | Curated load time format (`yyyy-MM-dd HH:mm:ss:SSSSSS`) and minute granularity | `5fc3365` | #54 |
 | Evidence contract for the team's in-pipeline audit (`docs/evidence-contract.md`) | `e029127` | #56 |
 | Release 4 plan proposed: `docs/design/outside-in-evidence.md` (not built) | `55857bd`, revised in `9719cc4` and `04dcc20` | #58 to #60 |
+| Release 4 step 1: T1_PARTITION_DRIFT, `dq_partition_state` | (this commit) | |
 
 Each row has a section in `docs/decisions.md` saying what was decided and why.
 
 ## What is waiting
 
-**Next action:** the user said that real keys, tables and columns come in later iterations (the first, the curated load time column, arrived on 2026-10-15). Until more arrive, wait for the user. A release 4 plan, `docs/design/outside-in-evidence.md` (five read-only checks that cover what the team's temporary in-pipeline audit sees from inside the jobs), is proposed and waits for the user's go-ahead on its order and its two cost decisions; build it in order, one step at a time, like release 3. When an answer arrives:
+**Next action:** the user said that real keys, tables and columns come in later iterations (the first, the curated load time column, arrived on 2026-10-15). Until more arrive, wait for the user. Release 4, `docs/design/outside-in-evidence.md` (five read-only checks that cover what the team's temporary in-pipeline audit sees from inside the jobs), is agreed and under way: step 1 (T1_PARTITION_DRIFT) is built; next is step 2, T1_FILE_RECORD_COUNT, with the agreed 1 GiB per-file cap. Build it one step at a time, like release 3: spec amendment, check, tests, decisions entry. When an answer arrives:
 
 1. Turn it into configuration, or a small change.
 2. Add tests, and get CI green.
@@ -140,7 +142,7 @@ Production table, column and path names stay null: CLAUDE.md forbids inventing t
   - A window is held (evaluated again next run) after a PLATFORM or BUDGET reason, or when the run that evaluated it did not finish COMPLETED. A hold is released after `max_window_hours`, with a WINDOW_GAP row.
   - Each FAILED result goes to the cause engine. Investigations are counted in `dq_run` (`investigations_expected`, `investigations_done`) and retried by the next run if they don't finish.
 - **Checks.** All check logic is SQL, in `checks/sql/*.j2`.
-  - Tier 1 checks are in `checks/tier1/`, gold rules in `checks/rules/`.
+  - Tier 1 checks are in `checks/tier1/`, gold rules in `checks/rules/`. T1_PARTITION_DRIFT (release 4) runs once per table where `check_params` configures it: it lists each partition's directory, counts only partitions whose files changed, and fails on a changed count outside the window.
   - Hop checks are in `checks/hop/`. Keys are judged at their upstream deadline, plus keys reloaded downstream in the window, plus open keys, with everything on `full_sweep_day`.
   - Key states are MISSING, STALE, UNASSESSABLE (no usable record time) and CURRENT.
   - `observed` counts the keys excluded by `hop_exclusions` and the keys still pending (within `sla_hours`).
@@ -155,8 +157,8 @@ Production table, column and path names stay null: CLAUDE.md forbids inventing t
   - Generic probes: `file_exists`, `file_value_compare`, `log_contains`, `table_contains` and `size_changed`, plus builtins.
   - NO_UPSTREAM_DATA looks at the load's business window (previous slot to deadline) and comes after WRONG_PARTITION in the cause order.
 - **Store** (`store/`). Append-only, written only through `writer.append`.
-  - Tables: `dq_run`, `dq_check_result`, `dq_cause_result`, `dq_key_event` and `dq_file`.
-  - Views: `v_latest_run`, `v_latest_result` (latest window first), `v_open_keys` and `v_file_status`.
+  - Tables: `dq_run`, `dq_check_result`, `dq_cause_result`, `dq_key_event`, `dq_file` and `dq_partition_state` (release 4).
+  - Views: `v_latest_run`, `v_latest_result` (latest window first), `v_open_keys`, `v_file_status` and `v_latest_partition_state`.
   - DDL is applied only by `dre install --apply`. `dre retention [--apply]` runs weekly.
 - **Email, trace and watchdog.**
   - `notify/` builds the digest; the golden files are in `tests/notify/golden/`.
@@ -186,6 +188,6 @@ Production table, column and path names stay null: CLAUDE.md forbids inventing t
 - **End-to-end check by hand:**
   1. In an empty directory, run `python <repo>/tests/e2e/build_synthetic.py`.
   2. Run `dre install --conf conf --apply`, then `dre run --conf conf`.
-  3. Run `python <repo>/tests/e2e/verify.py`. Expect `47 results {'DID_NOT_RUN': 19, 'PASSED': 28}`, run COMPLETED (since curated's load time was confirmed, its windowed checks and gold's hops run). Set `PYSPARK_PYTHON` to the venv's interpreter if the workers pick up another Python.
+  3. Run `python <repo>/tests/e2e/verify.py`. Expect `48 results {'DID_NOT_RUN': 20, 'PASSED': 28}`, run COMPLETED (since curated's load time was confirmed, its windowed checks and gold's hops run; the provider gold table's T1_PARTITION_DRIFT records its baseline). Set `PYSPARK_PYTHON` to the venv's interpreter if the workers pick up another Python.
 - **CI.** Check it with the GitHub MCP `actions_list` tool. After a push, schedule a `send_later` check-in about 15 minutes out instead of polling.
 - **Uploaded review documents.** Check each point against the code before acting; don't follow them blindly. Reproduce a reported defect with a failing test before fixing it.

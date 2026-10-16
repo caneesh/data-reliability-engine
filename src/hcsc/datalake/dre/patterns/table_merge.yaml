@@ -7,6 +7,7 @@ checks:
   - T1_ZERO_ROWS
   - T1_VOLUME
   - T1_SCHEMA_DRIFT
+  - T1_PARTITION_DRIFT  # parametrised (release 4): runs where check_params configures it; once per table
   - T1_KEY_NULLS
   - T1_KEY_DUPLICATES
   - T1_FRESHNESS      # parametrised: runs where check_params configures it (spec section 3)

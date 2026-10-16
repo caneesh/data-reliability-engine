@@ -10,7 +10,7 @@ from jinja2 import Environment, StrictUndefined
 
 from hcsc.datalake.dre.store.names import validate_dq_database
 
-VIEWS = ("v_latest_run", "v_latest_result", "v_open_keys", "v_file_status")
+VIEWS = ("v_latest_run", "v_latest_result", "v_open_keys", "v_file_status", "v_latest_partition_state")
 
 _TABLE = re.compile(
     r"CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+\S+\.(\w+)\s+\((.*)\)\s+PARTITIONED\s+BY\s+\((.*?)\)\s+STORED\s+AS\s+ORC",

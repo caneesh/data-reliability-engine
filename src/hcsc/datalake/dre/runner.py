@@ -12,8 +12,8 @@ Execution types (spec section 4):
   exactly, and each span none of them covers.
 RERUN and REPLAY are idempotent: a result identical to the stored result of the same evaluation
 is not written again, and they neither read nor change the open-key state (no key events) or
-the dq_file registry. They evaluate the windowed checks only (gold rules and T1_SCHEMA_DRIFT
-read the table as it is now, not a window), never move or hold a NORMAL window, and send no email.
+the dq_file registry. They evaluate the windowed checks only (gold rules, T1_SCHEMA_DRIFT and
+T1_PARTITION_DRIFT read the table as it is now, not a window), never move or hold a NORMAL window, and send no email.
 """
 
 from __future__ import annotations
@@ -68,6 +68,8 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 SCHEMA_DRIFT = "T1_SCHEMA_DRIFT"  # runs once per physical table (spec section 6)
+PARTITION_DRIFT = "T1_PARTITION_DRIFT"  # likewise; both read the table as it is now, never a window
+TABLE_CHECKS = (SCHEMA_DRIFT, PARTITION_DRIFT)
 EXECUTION_TYPES = ("NORMAL", "RERUN", "REPLAY")
 _HEX = re.compile(r"^[0-9a-f]{64}$")
 # The columns that make two results of one evaluation the same outcome (idempotent reruns).
@@ -129,7 +131,7 @@ class Evaluation:
 def plan(config: Config, feed_id: str | None = None, per_table: bool = True) -> list[Planned]:
     """Every (feed, dataset, check) to evaluate: feed datasets in config order, then, when no
     feed is named, table-wide datasets (those no feed lists). per_table=False keeps every
-    T1_SCHEMA_DRIFT, for a caller that drops feeds that are not due before choosing one per table."""
+    per-table check (TABLE_CHECKS), for a caller that drops feeds that are not due before choosing one per table."""
     feeds = [config.feeds[feed_id]] if feed_id else list(config.feeds.values())
     work = [
         Planned(feed, config.datasets[ds_id], check)
@@ -145,7 +147,7 @@ def plan(config: Config, feed_id: str | None = None, per_table: bool = True) -> 
             for check in checks_for(ds, None)  # derived datasets are read as upstreams, never checked
         ]
     work += plan_rules(config, feed_id)
-    return once_per_table(work, SCHEMA_DRIFT) if per_table else work
+    return once_per_table_checks(work) if per_table else work
 
 
 def is_rule(planned: Planned) -> bool:
@@ -206,6 +208,13 @@ def is_full_sweep(config: Config, dataset_id: str, event: Event) -> bool:
     day_start = end.replace(hour=0, minute=0, second=0, microsecond=0)
     return (end.strftime("%A").upper() == config.dataset_settings(dataset_id).full_sweep_day
             and event.window_start.astimezone(tz) < day_start)
+
+
+def once_per_table_checks(work: list[Planned]) -> list[Planned]:
+    """once_per_table for every check that reads the table as a whole (TABLE_CHECKS)."""
+    for check_id in TABLE_CHECKS:
+        work = once_per_table(work, check_id)
+    return work
 
 
 def once_per_table(work: list[Planned], check_id: str) -> list[Planned]:
@@ -408,26 +417,32 @@ def incomplete_rows(evaluation: Evaluation, rows: list[dict[str, Any]], now: dat
     carried key events: v_latest_result ranks a (dataset, check) by evaluated_at, so a marker for
     some groups only would hide the evaluation's other groups until the next run. An evaluation
     that carried no key events at all had nothing to lose: no marker."""
-    if all(result.key_events is None for result in evaluation.results):
+    if all(result.key_events is None and not result.partition_state for result in evaluation.results):
         return []
     marked = []
     for row in rows:
         marked.append({**row, "state": "DID_NOT_RUN", "reason_category": "PLATFORM",
                        "reason_code": "evidence_incomplete", "population": None, "violations": None,
-                       "observed": f"{row['state']} result stored; the evaluation's key events were not all stored",
-                       "expected": "the result and its key events stored together", "evaluated_at": now,
+                       "observed": f"{row['state']} result stored; the evaluation's evidence rows (key events, partition states) were not all stored",
+                       "expected": "the result and its evidence rows stored together", "evaluated_at": now,
                        "detail": "the window is held and evaluated again"})
     return marked
 
 
-def write_key_events(db: str, evaluation: Evaluation, rows: list[dict[str, Any]], run: runs.Run) -> None:
-    """Append each result's key events (hop checks) with the result's evaluation id."""
+def write_key_events(spark: SparkSession, db: str, evaluation: Evaluation, rows: list[dict[str, Any]],
+                     run: runs.Run) -> None:
+    """Append each result's evidence rows with the run id: key events (hop checks) and partition
+    states (T1_PARTITION_DRIFT)."""
+    from hcsc.datalake.dre.store.partitions import record_state
 
     for result, row in zip(evaluation.results, rows):
         if result.key_events is not None:
             hop = hop_label(result.group_values.get("upstream") or "", row["dataset"])
             append_key_events(result.key_events, db, run.run_id, row["evaluation_id"], row["dataset"],
                               row["check_id"], hop, row["evaluated_at"], run.run_date)
+        if result.partition_state:
+            record_state(spark, db, row["dataset"], evaluation.planned.dataset.table or "",
+                         list(result.partition_state), run.run_id, row["evaluated_at"], run.run_date)
 
 
 @dataclass
@@ -610,7 +625,7 @@ def normal_jobs(spark: SparkSession, config: Config, planned_all: list[Planned],
     landing = refresh_landing(spark, config, planned_all, run_record, run_record.started_at, changed)
     checks = [p for p in planned_all if not is_rule(p)]
     due = due_feeds(config, checks, events, changed, forced={feed_id} if feed_id else set())
-    work = once_per_table(only_due(checks, due), SCHEMA_DRIFT)  # a due dataset checks each table
+    work = once_per_table_checks(only_due(checks, due))  # a due dataset checks each table
     for skipped in sorted({p.feed.feed for p in checks if p.feed is not None} - due):
         print(f"{skipped}: nothing due (no slot deadline passed, no new files); not evaluated")
     gap_for = {p.dataset.dataset: p for p in work if p.dataset.dataset in gaps}
@@ -623,8 +638,8 @@ def historical_jobs(spark: SparkSession, config: Config, planned_all: list[Plann
                     feed_id: str | None, now: datetime) -> tuple[list[Job], dict[str, CheckResult]]:
     """RERUN and REPLAY: the windowed checks over the named window, or every window of the range,
     per dataset; a feed is evaluated in a window only if something was due in it (or --feed)."""
-    # Gold rules and T1_SCHEMA_DRIFT read the table as it is now, not a window: nothing to re-evaluate.
-    checks = [p for p in planned_all if not is_rule(p) and p.check.check_id != SCHEMA_DRIFT]
+    # Gold rules and the per-table checks read the table as it is now, not a window: nothing to re-evaluate.
+    checks = [p for p in planned_all if not is_rule(p) and p.check.check_id not in TABLE_CHECKS]
     landing = refresh_landing(spark, config, checks, None, now, why_not=selection.execution_type)
     tz = config.defaults.timezone
     datasets = {p.dataset.dataset: p.dataset for p in checks}
@@ -725,9 +740,9 @@ def write_evaluation(spark: SparkSession, db: str, evaluation: Evaluation, rows:
         return [], 0
     try:
         if budget_minutes is not None:
-            within_budget(spark, budget_minutes, lambda: write_key_events(db, evaluation, rows, run_record))
+            within_budget(spark, budget_minutes, lambda: write_key_events(spark, db, evaluation, rows, run_record))
         else:
-            write_key_events(db, evaluation, rows, run_record)
+            write_key_events(spark, db, evaluation, rows, run_record)
     except Exception as exc:
         log.error("could not write the key events of %s for %s: %s", check_id, ds_id, error_detail(exc))
         try:  # say so explicitly; the run is PARTIAL either way, which also holds the window
