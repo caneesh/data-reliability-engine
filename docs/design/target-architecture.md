@@ -13,7 +13,7 @@ Status: proposed on 2026-10-16. **ADR-01 to ADR-05 were approved by the user on 
 
 1. ~~Approve ADR-01, ADR-02 and ADR-05, which resolve the three critical findings.~~ Approved 2026-10-16.
 2. ~~Approve ADR-03 and ADR-04.~~ Approved 2026-10-16.
-3. Build the traceability matrix (P1-12).
+3. ~~Build the traceability matrix (P1-12).~~ Done: `docs/design/traceability-matrix.md`.
 4. Only then write code.
 
 Release 4 (`docs/design/outside-in-evidence.md`) step 1 is built. Steps 2 onward wait with everything else, except step 2 (file record count): the expected results for proof scenario 9 depend on it.
@@ -194,11 +194,11 @@ All of this is in model section 5.
 | # | Criterion | Status |
 | --- | --- | --- |
 | 1 | Every critical finding resolved by an approved ADR | **Met**: ADR-01 (P1-01), ADR-02 (P1-02) and ADR-05 (P1-03) approved on 2026-10-16 |
-| 2 | The contract schema represents each required pipeline topology | Proposed: eight mapping kinds. `fan_out` is explicitly unsupported and visible |
-| 3 | The accounting identities and temporal semantics are unambiguous | Proposed: model sections 2, 3 and 8 |
-| 4 | Observability limits and evidence levels are enforceable | Proposed: ADR-06 (claim ceilings, blind spots in `dre validate`) |
+| 2 | The contract schema represents each required pipeline topology | **Met on paper**: eight mapping kinds (ADR-02, ADR-03, approved). `fan_out` is explicitly unsupported and visible. The member pipeline needs `identity`/`dedup`/`merge` and `union_partition`; whether it needs `join_contribution` is developer question 19 |
+| 3 | The accounting identities and temporal semantics are unambiguous | **Met on paper**: model sections 2, 3 and 8 (ADR-01, ADR-05, approved) |
+| 4 | Observability limits and evidence levels are enforceable | **Open**: ADR-06 (claim ceilings, blind spots in `dre validate`) awaits approval |
 | 5 | Each proof scenario has an expected result | Done on paper: model section 10 |
-| 6 | A traceability matrix separates proposed from implemented and tested behaviour | **Not done**: the next deliverable. For each requirement: documented, coded, unit-tested, integration-tested, operationally proven, with the file and test names |
+| 6 | A traceability matrix separates proposed from implemented and tested behaviour | **Done**: `docs/design/traceability-matrix.md` (2026-10-16). It is kept current by each build step |
 
 ## 6. Decisions needed
 
