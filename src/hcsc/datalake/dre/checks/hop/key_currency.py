@@ -22,7 +22,9 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from hcsc.datalake.dre.checks.base import Check, CheckContext, CheckResult, from_counts, render_sql
-from hcsc.datalake.dre.checks.hop.common import hop_params, not_judged, per_hop, register_key_hash, upstream_pairs
+from hcsc.datalake.dre.checks.hop.common import (
+    exclusion_label, hop_params, not_judged, per_hop, register_key_hash, upstream_pairs,
+)
 from hcsc.datalake.dre.checks.registry import register_check
 
 if TYPE_CHECKING:
@@ -62,7 +64,7 @@ class KeyCurrency(Check):
             judged = judged.localCheckpoint()
             judged.createOrReplaceTempView(view)
         row = ctx.spark.sql(render_sql("hop_key_currency.sql.j2", p=params, mode="summary", source=view)).collect()[0]
-        left_out = not_judged(row.pending, row.excluded, "key")
+        left_out = not_judged(row.pending, row.excluded, "key", excluded_by=exclusion_label(ctx.dataset, up_id, up))
         if row.open_keys:  # how much of the judgement is open keys from earlier runs: growth shows here
             still_open = f"{row.open_keys} key{'s' if row.open_keys != 1 else ''} open from earlier runs"
             left_out = f"{still_open}, {left_out}" if left_out else still_open

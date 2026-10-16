@@ -96,6 +96,10 @@ def validate(conf: str) -> int:
 
     for record in loaded():
         print(f"extensions: {record.summary()}")
+    from hcsc.datalake.dre.config.contracts import contract_report
+
+    for line in contract_report(config):
+        print(line)
     return 0
 
 

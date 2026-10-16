@@ -84,10 +84,10 @@ Each dataset declares its grain:
 
 ```yaml
 grain:
-  key: [subscriberidnumber, membernumber, effectivedate, qualifiedhealthplanid]   # one business record
-  version: { order_by: ["src_upd_ts DESC"], formats: { src_upd_ts: "yyyy-MM-dd HH:mm:ss:SSSSSS" } }
   history: append_only            # append_only | mutable | snapshot_partitioned (section 8)
 ```
+
+As built (step 1): the grain's key is the dataset's `key`, and its version is the dataset's `record_time`, with ties ordered by a hop's `winner_rule`. Neither is repeated under `grain`. Each edge's contract sits under the dataset's `contracts`, keyed by upstream (spec section 3).
 
 Each edge declares exactly one **mapping kind**. An edge without a supported kind is DID_NOT_RUN / `unsupported_mapping` (CONFIGURATION) on every run. It is never passed, and `dre validate` lists it as a blind spot.
 
@@ -115,7 +115,7 @@ exclusions:
   - id: drop_test_members
     version: 2
     condition: "status = 'TEST'"
-    effective: { from: 2026-09-01 }          # judged against the record's U load time
+    effective: { from: 2026-09-01 }          # midnight in defaults.yaml timezone; `to` is exclusive; judged against the record's U load time
     approved_by: CHG-0000                    # placeholder for the change record that approved it
     code_ref: "gcf_build.scala:212"          # placeholder
     max_share: 0.05                          # volume guard: more than 5% of due records excluded is FAILED
@@ -128,7 +128,7 @@ exclusions:
 **Rejects** need lineage and a policy:
 
 - The rejects evidence must give the source key (or its HMAC), the version or batch, the reason code, the rule id and the rule version. A reject row without key lineage cannot account for any record: the record stays `missing`, and the reject count appears only as a cause line.
-- `reject_policy` classes each reason code as `authorised` or `defect`. **The default is defect**, and an unknown code is a defect. For example: `{ INVALID_CODE: authorised, KEY_NULL: authorised, PARSE_ERROR: defect, JOIN_UNMATCHED: defect }`.
+- `reject_policy` classes each reason code as `authorised` or `defect`. **The default is defect**, and an unknown code is a defect. For example: `{ INVALID_CODE: { disposition: authorised, max_share: 0.02 }, PARSE_ERROR: { disposition: defect } }`.
 - Authorised reasons carry a `max_share` like exclusions.
 - So a reject never automatically counts as success.
 
@@ -136,10 +136,12 @@ exclusions:
 
 ```yaml
 deletion:
-  tombstone: "enddate = effectivedate"          # SQL over U: the version that voids the record
-  applied_as: { soft: "mbr_mbrshp_covrg_end_dt = mbr_mbrshp_covrg_eff_dt" }   # SQL over D; or `hard` (absent in D)
-  formats: { enddate: yyyy-MM-dd, effectivedate: yyyy-MM-dd }   # dates are parsed, never compared as strings
+  tombstone: "to_date(enddate, 'yyyy-MM-dd') = to_date(effectivedate, 'yyyy-MM-dd')"   # SQL over U
+  applied_as: soft                                # or hard (absent in D)
+  soft_when: "to_date(mbr_mbrshp_covrg_end_dt, 'yyyy-MM-dd') = to_date(mbr_mbrshp_covrg_eff_dt, 'yyyy-MM-dd')"  # SQL over D
 ```
+
+Dates held as strings are parsed in the condition itself (`to_date`), so they are never compared as strings.
 
 **How the member pipeline expresses a deletion (developer, 2026-10-16; handoff question 18).**
 - **There is no delete operation.** A coverage is voided by a new version whose end date equals its effective date.

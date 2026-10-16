@@ -505,6 +505,34 @@ The traceability matrix comes before code (exit criterion 6).
    - **Backpressure:** at 80% of the budget the next run defers the full sweep.
    - **Load test:** on a representative cluster, which needs the platform team.
 
+## Phase 1 build step 1: the contract schema and its validation (2026-10-16)
+
+`docs/design/target-architecture.md` section 7, step 1. The user asked for it to be "an architectural checkpoint, a controlled implementation phase": `docs/design/checkpoints.md` is the checkpoint report, and step 2 waits for the user's review.
+
+1. **What was built.**
+   - On a dataset: `grain` (only `history`) and `contracts` (per upstream: `mapping`, `exclusions`, `reject_policy`, `deletion`, `tolerance`, `reference`, `precedence`).
+   - In `defaults.yaml`: `yarn_queue` and `protected_queues`.
+   - Validation of every rule in spec section 3, "The reconciliation contract".
+   - The hop resolution in `config/contracts.py`.
+   - `dre validate`'s per-hop report of kinds and blind spots.
+   - `dre dry-run` resolving a contract's conditions.
+2. **Hop checks read exclusions through the contract.** Otherwise a team that wrote its exclusions in the new form would get every excluded record reported MISSING. A legacy `hop_exclusions` entry is used exactly as written. A contract exclusion matches rows whose upstream load time falls in its effective span, and the conditions are joined with OR. The `observed` text names the source: "excluded by hop_exclusions", or "excluded by exclusions drop_x@1". Nothing else in the checks changed.
+3. **Deviations from the reconciliation model as written.** The model document was aligned to what was built:
+   - `grain` does not repeat the key or the version. They are the dataset's `key` and `record_time`, with a hop's `winner_rule` for ties: one source of truth.
+   - `deletion` has no `formats` map. Conditions are SQL and parse their own dates with `to_date`, like every other configuration fragment.
+   - `applied_as` is `hard` or `soft`, with `soft_when` beside it.
+   - `reject_policy` values are `{disposition, max_share}`, not a bare word, so that an authorised reason carries its volume guard.
+   - A union partition's attribution is the dataset's `feed_filter`, which already partitions a shared gold table among per-source datasets, not a second field.
+   - The default kind of a hop with no contract is `dedup` (what HOP_KEY_CURRENCY judges: the latest upstream version per key), or `aggregate` for a derived upstream.
+4. **What waits, and where.** Each item waits for the build step named:
+   - `max_share`, the reject policy, the deletion state and the tolerance: the ledger (step 3). Until then the blind-spot report says so.
+   - DID_NOT_RUN / `unsupported_mapping` at run time: step 3. Today a `fan_out` or `join_contribution` hop is a warning, and an error if keyed, so it is never judged one-to-one.
+   - The protected-queue check at run start: step 8.
+5. **Sample configuration.**
+   - The synthetic gold member coverage declares its contract: `union_partition` (each source's rows side by side, equal priority) and the soft void as `deletion`. It declares `grain.history: mutable` (merged in place).
+   - Curated's history stays null. Whether it is append-only is a platform fact, and it is not invented.
+   - The synthetic provider feed declares raw `append_only` and gold `mutable`.
+
 ## Developer answers on the reconciliation model (2026-10-16)
 
 Three facts for the proposed reconciliation model (`docs/design/reconciliation-model.md`), given by the user on 2026-10-16. Nothing is built from them yet; they settle the model's open points for the member pipeline.

@@ -268,6 +268,11 @@ class Defaults(SettingsOverride):
     # With a throughput figure, a check whose table's estimated scan would take longer than its
     # budget is refused before running (DID_NOT_RUN / budget_exceeded); null: never refused up front.
     scan_mb_per_minute: float | None = Field(default=None, gt=0)
+    # Isolation (ADR-08): the YARN queue DRE runs in (a platform value; null until confirmed), and the
+    # deployment's queues DRE must never use (the production pipelines'). Names are production values:
+    # they live in the deployed configuration only.
+    yarn_queue: NonEmptyStr | None = None
+    protected_queues: list[NonEmptyStr] = []
 
     @model_validator(mode="after")
     def _check(self) -> Defaults:
@@ -417,6 +422,124 @@ DERIVED_RECORD = TimeColumn(column="record_ts", timezone="UTC")
 DERIVED_LOAD = TimeColumn(column="load_ts", granularity="minute", timezone="UTC")
 
 
+# --- the reconciliation contract (Phase 1 design, ADR-01 to ADR-05; docs/design/reconciliation-model.md) ---
+
+History = Literal["append_only", "mutable", "snapshot_partitioned"]
+# Mapping kinds of a hop (ADR-02, ADR-03; reconciliation model section 4).
+MappingKind = Literal["identity", "dedup", "merge", "union_partition", "join_contribution", "survivorship",
+                      "aggregate", "fan_out"]
+MAPPING_KINDS: tuple[str, ...] = MappingKind.__args__  # type: ignore[attr-defined]
+TOLERATED = ("missing", "stale", "divergent")  # the only deficits a tolerance may cover (ADR-01)
+
+
+class Grain(Model):
+    """What one record of a dataset is (ADR-02, ADR-05). Its key is the dataset's `key` and its version
+    the dataset's `record_time` (ties ordered by a hop's `winner_rule`); `history` says whether the
+    table keeps what it held at a past cutoff. null: not declared, so no as-of replay."""
+
+    history: History | None = None
+
+
+class Effective(Model):
+    """When an exclusion applies, judged against the upstream record's load time: from (inclusive)
+    and to (exclusive) are dates at midnight in defaults.yaml `timezone`. null: unbounded."""
+
+    from_: date | None = Field(default=None, alias="from")
+    to: date | None = None
+
+    @model_validator(mode="after")
+    def _order(self) -> Effective:
+        if self.from_ is not None and self.to is not None and self.to <= self.from_:
+            raise invalid(f"effective.to ({self.to}) is not after effective.from ({self.from_})",
+                          "set `to` after `from`, or leave it null for an open end")
+        return self
+
+
+class Exclusion(Model):
+    """An approved, versioned rule that legitimately keeps upstream rows out of this dataset (ADR-04).
+    A changed condition is a new version. `max_share`: more than this share of due records excluded
+    fails the hop (the volume guard against an over-broad condition)."""
+
+    id: Identifier
+    version: int = Field(ge=1)
+    condition: SqlFragment  # over the upstream's columns
+    effective: Effective = Effective()
+    approved_by: NonEmptyStr  # the change record or approver that authorised the rule
+    code_ref: NonEmptyStr | None = None
+    max_share: float = Field(gt=0, le=1)
+
+    @property
+    def label(self) -> str:
+        return f"{self.id}@{self.version}"
+
+
+class RejectReason(Model):
+    """How the ledger treats a reject reason code (ADR-04). Unlisted codes are defects."""
+
+    disposition: Literal["authorised", "defect"]
+    max_share: float | None = Field(default=None, gt=0, le=1)  # an authorised reason's volume guard
+
+    @model_validator(mode="after")
+    def _guard(self) -> RejectReason:
+        if self.disposition == "authorised" and self.max_share is None:
+            raise invalid("an authorised reject reason needs max_share",
+                          "set max_share (for example 0.02): above it the authorised rejects fail the hop")
+        if self.disposition == "defect" and self.max_share is not None:
+            raise invalid("max_share applies to authorised reasons only", "remove max_share from a defect")
+        return self
+
+
+class Deletion(Model):
+    """How the upstream expresses a deletion, and what the downstream shows for it (ADR-04).
+    `tombstone`: SQL over the upstream's columns marking the version that deletes the record.
+    `applied_as`: hard (absent downstream) or soft (present, matching `soft_when`, SQL over this
+    dataset's columns). Dates held as strings are compared through to_date(column, 'pattern')."""
+
+    tombstone: SqlFragment
+    applied_as: Literal["hard", "soft"]
+    soft_when: SqlFragment | None = None
+
+    @model_validator(mode="after")
+    def _soft(self) -> Deletion:
+        if (self.applied_as == "soft") != (self.soft_when is not None):
+            raise invalid("soft_when goes with applied_as: soft, and only with it",
+                          "for a soft delete set soft_when (SQL over this dataset); for a hard delete remove it")
+        return self
+
+
+class Tolerance(Model):
+    """Deficits a hop may carry and still pass, as absolute counts per hop per window (ADR-01)."""
+
+    missing: int = Field(default=0, ge=0)
+    stale: int = Field(default=0, ge=0)
+    divergent: int = Field(default=0, ge=0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _only_deficits(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            other = [k for k in data if k not in TOLERATED]
+            if other:
+                raise invalid(f"tolerance cannot cover {other}",
+                              f"tolerate only {list(TOLERATED)}: unassessable records, breaches and defect rejects "
+                              "always fail (ADR-01)")
+        return data
+
+
+class EdgeContract(Model):
+    """The reconciliation contract of one hop (this dataset, one upstream): reconciliation model
+    sections 3 to 6. `reference` (join_contribution): this dataset's column -> the contributor's key
+    column. `precedence` (survivorship): the upstreams in order, the winner first."""
+
+    mapping: MappingKind
+    exclusions: list[Exclusion] = []
+    reject_policy: dict[Identifier, RejectReason] = {}
+    deletion: Deletion | None = None
+    tolerance: Tolerance = Tolerance()
+    reference: dict[Identifier, Identifier] = {}
+    precedence: list[Identifier] = []
+
+
 class Dataset(SettingsOverride):
     dataset: Identifier
     table: TableName | None = None    # a real table; or
@@ -445,6 +568,10 @@ class Dataset(SettingsOverride):
     # leave those rows out of what they expect.
     hop_exclusions: dict[Identifier, SqlFragment] = {}
     winner_rule: WinnerRule | None = None
+    grain: Grain = Grain()
+    # The reconciliation contract per upstream (Phase 1 design). A hop with none takes its kind from
+    # the fields above: aggregate for a derived upstream, dedup otherwise (config/contracts.py).
+    contracts: dict[Identifier, EdgeContract] = {}
     # Parameters of parametrised checks (T1_FRESHNESS, T1_COLUMN_RANGE, ...), by check id. A
     # parametrised check runs only where its pattern, feed or dataset configures it.
     check_params: dict[Identifier, dict[str, Any]] = {}

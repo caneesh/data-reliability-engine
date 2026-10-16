@@ -39,7 +39,7 @@ Every criterion below is met **per hop**: one dataset against one upstream, for 
 | AC1 | Onboard without editing or restarting jobs | U, I | `guard/*`; `replay/test_second_feed.py` (a second feed onboarded by YAML alone); the `e2e` job runs two feeds from configuration | O: needs onboarding a real feed |
 | AC2 | Missing data at the earliest observable layer, over three or more stages | U | `replay/test_acceptance_three_layers.py::test_missing_data_is_found_at_the_earliest_layer_across_three_stages`; `test_trace.py::test_the_cause_line_is_the_gap_hop_s_own` | It names the **first observed** gap, not the origin. There is no chain result: that is CHAIN_COMPLETENESS (section 5) |
 | AC3 | Two upstreams feeding one gold target | U | `checks/test_hop.py::test_open_keys_are_kept_per_hop`, `::test_a_synthetic_pipeline_with_two_upstreams_exclusions_late_data_and_a_missing_key`, `::test_one_broken_hop_does_not_hide_the_others` | Each hop is judged alone. Union attribution (no row unattributed or double-counted) is not checked: T1_SOURCE_ATTRIBUTION |
-| AC4 | Legitimate exclusions without false data-loss alerts | U | The same scenario test; `checks/test_hop.py::test_file_completeness_reports_what_it_excluded_and_what_is_pending`; `checks/test_derived.py::test_an_inner_join_makes_unmatched_rows_not_expected` | Exclusions are unversioned and unapproved, with no volume guard, so an over-broad condition passes silently (P1-05; ADR-04 not built) |
+| AC4 | Legitimate exclusions without false data-loss alerts | U | The same scenario test; `checks/test_hop.py::test_file_completeness_reports_what_it_excluded_and_what_is_pending`; `checks/test_derived.py::test_an_inner_join_makes_unmatched_rows_not_expected`; `checks/test_hop_contracts.py` (approved, versioned exclusions with effective dates) | The volume guard (`max_share`) is configured but not applied until build step 3, so an over-broad condition still passes; `hop_exclusions` is a warning |
 | AC5 | Silent success, skipped processing and delayed loads, independent of job status | U | `replay/test_r02_r03_r08.py::test_r02_no_loads_for_longer_than_the_sla_is_on_time_failed`, `::test_r03_gold_wrote_zero_rows_while_upstream_had_rows_is_zero_rows_failed`; `replay/test_r01_file_not_loaded.py::test_r01_landed_file_without_raw_rows_while_later_files_loaded`; `replay/test_r11a_empty_no_load_due.py`, `replay/test_r11b_empty_load_due.py` | The expected volume comes from the cadence and `min_rows_per_load`, not from the source. A source file with records against zero rows loaded needs release 4 step 2 |
 | AC6 | Recovery from partial DRE writes without duplicate active findings | U, partly | `test_recovery.py::test_a_result_stored_without_its_key_events_is_recovered_by_the_next_run`, `::test_every_row_of_an_evaluation_is_marked_incomplete_together`; `test_runner.py::test_a_failed_key_event_write_makes_the_run_partial_and_the_result_is_still_explained` | **The tests cover a failed write in a live process, not a process that dies.** If the process dies after the result row and before its key events, the result is visible without them until the next run (P1-09). ADR-07 is not built |
 | AC7 | A DRE outage or heavy load does not affect source processing | D, C partly | `checks/test_budget.py::test_a_slow_check_is_cancelled_as_budget_exceeded`, `::test_a_spent_dataset_budget_or_a_too_large_scan_is_not_run` | Per-check budgets only. No run budget, queue, kill switch or load test (ADR-08). O needed |
@@ -65,7 +65,7 @@ Each will become a replay test, R14 to R23. The "today" column says what the cur
 | # | Scenario | Level | Today | Test to add |
 | --- | --- | --- | --- | --- |
 | PS1 | Equal counts with a substituted key must fail | C, untested as stated | HOP_KEY_CURRENCY compares keys, not counts, so the dropped key is MISSING. The substitute is not reported (no orphans) | R14: equal counts, one key swapped, so FAILED with 1 missing and 1 orphan |
-| PS2 | An approved filter is accounted for; an unapproved one fails | C partly, U partly | An exclusion's keys are counted, and a key not covered is MISSING. There are no approval, version or effective dates | R15 |
+| PS2 | An approved filter is accounted for; an unapproved one fails | U partly | An approved, versioned exclusion is honoured only from its effective date; a record it does not cover is MISSING (`checks/test_hop_contracts.py::test_a_contract_exclusion_counts_only_rows_loaded_while_it_is_effective`). The cause line naming an unapproved, reported rule waits for the ledger | R15 |
 | PS3 | A rejected record with a defect reason must not pass | C partly | The key is MISSING (FAILED), with the REJECTED cause when a rejects table is configured. That is correct by accident: there is no reject disposition yet | R16 |
 | PS4 | Two sources into one gold row, without double counting | U partly | Per-hop key state (AC3) | R17: union attribution; join contribution |
 | PS5 | Aggregation: group and contribution level, or a declared limit | U at group level | `checks/test_derived.py::test_an_aggregate_upstream_is_judged_at_its_grain`, `::test_an_aggregate_upstream_passes_when_gold_agrees` | R18: the contribution limit in the scope. Not needed by the member pipeline (no gold aggregates) |
@@ -73,28 +73,31 @@ Each will become a replay test, R14 to R23. The "today" column says what the cur
 | PS7 | A historical rerun after a later load never claims a historical PASS | C partly | A printed note only | R20: the evaluation mode label; AS_OF_REPLAY refused on a mutable dataset |
 | PS8 | A crash between the result and evidence writes never publishes a complete PASS | **Not met** | See AC6 | R21: failure injection at each write boundary (ADR-07) |
 | PS9 | A legitimate empty batch is told apart from a silent zero | U partly | `replay/test_r11a_empty_no_load_due.py` (no load due: DID_NOT_RUN), `replay/test_r11b_empty_load_due.py` (load due, nothing loaded: FAILED); calendars (`checks/test_calendars.py`) | R22: the source's file record count (release 4 step 2) |
-| PS10 | An unsupported one-to-many mapping is visibly unsupported | D | `key_map` cannot express it, so it simply is not configured, which is silent | R23: DID_NOT_RUN / `unsupported_mapping`, and `dre validate` listing it |
+| PS10 | An unsupported one-to-many mapping is visibly unsupported | U partly | `mapping: fan_out` is a `dre validate` warning and a listed blind spot, and an error if the hop is keyed (`config/test_contracts.py::test_kinds_judged_later_or_never_are_warnings_never_silent`) | R23: DID_NOT_RUN / `unsupported_mapping` at run time (build step 3) |
 
-## 5. Approved design elements (ADR-01 to ADR-05), not built
+## 5. Approved design elements (ADR-01 to ADR-05)
 
-All are at level D. Each row names the build step (`docs/design/target-architecture.md`, section 7) that takes it to C and U.
+Level D unless the row says otherwise. Each row names the build step (`docs/design/target-architecture.md`, section 7) that takes it further. Build step 1 (2026-10-16) took the contract schema to C and U.
 
-| Element | ADR | Build step |
-| --- | --- | --- |
-| Candidate, due and pending populations; eleven dispositions; the asserted identity; `ledger_unbalanced` | 01 | 3 (HOP_LEDGER) |
-| Tolerance on deficits only, as an absolute count | 01 | 1 (validation), 3 |
-| Scope columns on results; `dq_reconciliation` | 01 | 3 |
-| No chain claim before CHAIN_COMPLETENESS | 01 | Docs: `docs/architecture.md` scope note (done); 6 |
-| The `grain` block; mapping kinds; `unsupported_mapping`; aliases for today's fields | 02 | 1 |
-| Run-time key collision detection | 02 | 3 |
-| One-directional transforms with expressions | 02 | 3 |
-| Union attribution (T1_SOURCE_ATTRIBUTION) | 03 | 5 |
-| Join contribution (HOP_CONTRIBUTION); survivorship (unused by the member pipeline) | 03 | 5 |
-| CHAIN_COMPLETENESS, `partial_chain`, exception keys only | 03 | 6 |
-| Approved, versioned exclusions with `max_share` | 04 | 1, 3 |
-| `reject_policy`, default defect; reject key lineage | 04 | 1, 3 |
-| Soft-void deletion (end date = effective date), `deleted_not_applied` | 04 | 1, 3 |
-| The `history` class; the `evaluation_mode` column; CURRENT_RECHECK labels; AS_OF_REPLAY | 05 | 4 |
+| Element | ADR | Level | Evidence | Build step |
+| --- | --- | --- | --- | --- |
+| Candidate, due and pending populations; eleven dispositions; the asserted identity; `ledger_unbalanced` | 01 | D | | 3 (HOP_LEDGER) |
+| Tolerance on deficits only, as an absolute count | 01 | **U** (validation) | `config/test_contracts.py::test_contract_errors_name_file_line_field_and_fix[tolerance-on-unknown]`, `[tolerance-negative]` | 3 (applied by the ledger) |
+| Scope columns on results; `dq_reconciliation` | 01 | D | | 3 |
+| No chain claim before CHAIN_COMPLETENESS | 01 | D | `docs/architecture.md` scope note | 6 |
+| The `grain` block; mapping kinds and their rules; aliases for today's fields; each hop's blind spots in `dre validate` | 02 | **U** | `config/test_contracts.py` (every case), `::test_a_hop_without_a_contract_resolves_from_the_release_1_fields`, `::test_validate_prints_each_hop_its_kind_and_its_blind_spots`; `checks/test_hop_contracts.py::test_the_alias_and_an_equivalent_contract_judge_alike`; the `e2e` job (sample with a declared contract, results unchanged) | 1 (done) |
+| DID_NOT_RUN / `unsupported_mapping` at run time | 02 | D (today a `dre validate` warning, and an error if such a hop is keyed) | `config/test_contracts.py::test_kinds_judged_later_or_never_are_warnings_never_silent` | 3 |
+| Run-time key collision detection | 02 | D | | 3 |
+| One-directional transforms with expressions | 02 | D | | 3 |
+| Union attribution (T1_SOURCE_ATTRIBUTION) | 03 | D (the attribution, `feed_filter`, is required by validation) | `config/test_contracts.py::...[union-needs-attribution]` | 5 |
+| Join contribution (HOP_CONTRIBUTION); survivorship (unused by the member pipeline) | 03 | D (schema validated) | `config/test_contracts.py::test_kinds_judged_later_or_never_are_warnings_never_silent`, `::test_survivorship_hops_share_one_precedence` | 5 |
+| CHAIN_COMPLETENESS, `partial_chain`, exception keys only | 03 | D | | 6 |
+| Approved, versioned exclusions: id, version, approval, effective dates | 04 | **U** | `checks/test_hop_contracts.py::test_a_contract_exclusion_counts_only_rows_loaded_while_it_is_effective`, `::test_file_completeness_reads_the_contract_exclusions_too`; `config/test_contracts.py::...[exclusion-*]` | 1 (done) |
+| The exclusion volume guard (`max_share`) | 04 | C (schema, required) | `config/test_contracts.py::...[exclusion-needs-volume-guard]` | 3 |
+| `reject_policy`, default defect; reject key lineage | 04 | C (schema; validated) | `config/test_contracts.py::...[authorised-reject-needs-guard]`, `::test_the_sample_contract_resolves` | 3 |
+| Soft-void deletion (end date = effective date), `deleted_not_applied` | 04 | C (schema; conditions parsed by `dre dry-run`) | `config/test_contracts.py::...[soft-without-soft-when]`; `test_runner.py::test_fragment_checks_resolve_a_contract_s_conditions` | 3 |
+| The `history` class | 05 | **U** (declared; reported as a blind spot) | `config/test_contracts.py::...[bad-history]`, `::test_validate_prints_each_hop_its_kind_and_its_blind_spots` | 1 (done) |
+| The `evaluation_mode` column; CURRENT_RECHECK labels; AS_OF_REPLAY | 05 | D | | 4 |
 
 ## 6. Approved, not built (ADR-06 to ADR-08)
 
@@ -102,7 +105,8 @@ All are at level D. Each row names the build step (`docs/design/target-architect
 | --- | --- | --- |
 | Five evidence levels and claim ceilings on dispositions and results | 06 | D. Build steps 3 and 6 |
 | `dq_commit` (per batch of evaluations) and committed-only views | 07 | D. Build step 2 |
-| Run budget (40 minutes), queue (never the high-priority one), concurrency cap, kill switch, backpressure, load test | 08 | D. Build step 8; the load test is O |
+| The protected-queue rule (`yarn_queue` never in `protected_queues`) | 08 | U (static) | `config/test_contracts.py::...[queue-is-protected]` | 8 (checked at run start) |
+| Run budget (40 minutes), concurrency cap, kill switch, backpressure, load test | 08 | D. Build step 8; the load test is O |
 
 ## 7. What the matrix says
 

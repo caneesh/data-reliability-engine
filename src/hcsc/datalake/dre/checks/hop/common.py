@@ -79,14 +79,15 @@ def hop_params(ctx: CheckContext, event: Event, up_id: str, up: Dataset | None) 
             return did_not_run("table_missing", detail=f"table {up.table} not found", group_values={"upstream": up_id})
     sla = timedelta(hours=ctx.settings.sla_hours)
     owned = [{"up": column_expr(up, u), "dn": column_expr(ds, d)} for u, d in ds.owned_columns.items()]
+    exclusion = exclusion_condition(ds, up_id, up, tz)
     filters = [f"({up.feed_filter})" if up.feed_filter else None,
-               f"NOT coalesce(({ds.hop_exclusions[up_id]}), FALSE)" if up_id in ds.hop_exclusions else None,
+               f"NOT coalesce(({exclusion}), FALSE)" if exclusion else None,
                has_a_key([mapping[c] for c in ds.key])]
     dn_filters = [f"({ds.feed_filter})" if ds.feed_filter else None, has_a_key(list(ds.key))]
     return {
         "up_table": up_source, "up_filter": " AND ".join(f for f in filters if f) or None,
         # for counting what the exclusions keep out: the upstream's own filter, and the exclusion
-        "up_base_filter": up.feed_filter, "up_exclusion": ds.hop_exclusions.get(up_id),
+        "up_base_filter": up.feed_filter, "up_exclusion": exclusion,
         "up_key": key_string([column_expr(up, mapping[c]) for c in ds.key]),
         "up_record": utc_expr(up.record_time, tz), "up_load": utc_expr(up.load_time, tz),
         "up_file": up.file_name_column,
@@ -109,20 +110,58 @@ def hop_params(ctx: CheckContext, event: Event, up_id: str, up: Dataset | None) 
     }
 
 
+def exclusion_condition(ds: Dataset, up_id: str, up: Dataset, default_timezone: str) -> str | None:
+    """The SQL condition, over the upstream's rows, of what the hop's exclusions keep out; None
+    without exclusions. The release 1 `hop_exclusions` entry is used as written. Each contract
+    exclusion matches only rows whose upstream load time falls in its effective span (dates at
+    midnight in defaults.yaml `timezone`), and the conditions are joined with OR."""
+    from datetime import datetime, time
+    from zoneinfo import ZoneInfo
+
+    from hcsc.datalake.dre.config.contracts import hop_contract
+
+    hop = hop_contract({up_id: up}, ds, up_id)
+    if hop.legacy_exclusion is not None:
+        return hop.legacy_exclusion
+    if not hop.exclusions:
+        return None
+    zone = ZoneInfo(default_timezone)
+    parts = []
+    for e in hop.exclusions:
+        terms = [f"({e.condition})"]
+        bounds = ((e.effective.from_, ">="), (e.effective.to, "<"))
+        if any(day is not None for day, _ in bounds) and up.load_time is None:
+            raise ValueError(f"exclusion {e.label} has effective dates and upstream {up_id} has no load_time")
+        for day, op in bounds:
+            if day is not None:
+                instant = datetime.combine(day, time.min, zone)
+                terms.append(f"{utc_expr(up.load_time, default_timezone)} {op} {utc_literal(instant)}")
+        parts.append("(" + " AND ".join(terms) + ")")
+    return " OR ".join(parts)
+
+
+def exclusion_label(ds: Dataset, up_id: str, up: Dataset | None) -> str:
+    """How a hop result names what its exclusions kept out (`hop_exclusions`, or the contract's ids)."""
+    from hcsc.datalake.dre.config.contracts import exclusion_text, hop_contract
+
+    return exclusion_text(hop_contract({up_id: up} if up is not None else {}, ds, up_id))
+
+
 def has_a_key(columns: list[str]) -> str:
     """A row whose every key column is null has no key: it is not a version of anything and is
     never judged (T1_KEY_NULLS counts it). A partly null key is still a key."""
     return "NOT (" + " AND ".join(f"{c} IS NULL" for c in columns) + ")"
 
 
-def not_judged(pending: int | None, excluded: int | None, unit: str, excluded_unit: str | None = None) -> str:
+def not_judged(pending: int | None, excluded: int | None, unit: str, excluded_unit: str | None = None,
+               excluded_by: str = "hop_exclusions") -> str:
     """What a hop result did not judge and why, e.g. `1 key excluded by hop_exclusions, 2 keys pending
-    (within sla_hours)`; empty when nothing was left out."""
+    (within sla_hours)`; empty when nothing was left out. `excluded_by` names the exclusions."""
     def counted(n: int, what: str) -> str:
         return f"{n} {what}{'' if n == 1 else 's'}"
     parts = []
     if excluded:
-        parts.append(f"{counted(excluded, excluded_unit or unit)} excluded by hop_exclusions")
+        parts.append(f"{counted(excluded, excluded_unit or unit)} excluded by {excluded_by}")
     if pending:
         parts.append(f"{counted(pending, unit)} pending (within sla_hours)")
     return ", ".join(parts)

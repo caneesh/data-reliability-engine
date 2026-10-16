@@ -85,6 +85,7 @@ def cross_check(config: Config, feeds_complete: bool = True) -> list[ConfigError
         _check_ownership(r, ds_id, member_of, feeds_complete)
         _check_upstreams(r, ds_id)
         _check_dataset_fields(r, ds_id, broken_patterns)
+        _check_contracts(r, ds_id)
         _check_settings_resolve(r, ds_id)
     r.errors.extend(_upstream_cycles(config))
     _check_rules(r)
@@ -118,6 +119,9 @@ def _check_defaults(r: _Reporter) -> None:
             "fall-back hour is read as the first offset (spec section 4)",
             "nothing to fix in configuration; know that rows stamped in the second 01:xx of the fall-back day "
             "read an hour early", level="warning")
+    if defaults is not None and defaults.yarn_queue is not None and defaults.yarn_queue in defaults.protected_queues:
+        r.err("defaults", "defaults", ("yarn_queue",), "yarn_queue is one of protected_queues: DRE would compete "
+            "with the production pipelines (ADR-08)", "set yarn_queue to DRE's own queue, which the platform team names")
     if defaults is not None and defaults.watchdog_owner is not None and defaults.watchdog_owner not in defaults.recipients:
         r.err("defaults", "defaults", ("watchdog_owner",), f"watchdog_owner {defaults.watchdog_owner!r} has no recipients",
             f"add `{defaults.watchdog_owner}: [address]` under recipients, or set watchdog_owner: null")
@@ -194,9 +198,9 @@ def _check_derived(r: _Reporter, ds_id: str, member_of: dict[str, str], feeds_co
         if getattr(ds, what) is not None:
             r.err("dataset", ds_id, (what,), f"a derived dataset has no {what}",
                 "filter with derived.where; derived datasets have no files or partitions")
-    if ds.key_map or ds.upstream or ds.owned_columns:
-        r.err("dataset", ds_id, ("key_map",), "a derived dataset cannot be a downstream (no key_map, upstream or "
-            "owned_columns)", "derive it as an upstream of the dataset that compares against it")
+    if ds.key_map or ds.upstream or ds.owned_columns or ds.contracts:
+        r.err("dataset", ds_id, ("key_map",), "a derived dataset cannot be a downstream (no key_map, upstream, "
+            "owned_columns or contracts)", "derive it as an upstream of the dataset that compares against it")
     if feeds_complete and not any(ds_id in other.upstream for other in datasets.values()):
         r.err("dataset", ds_id, ("dataset",), "no dataset names this derived dataset as an upstream",
             "add it to the upstream and key_map of the dataset it feeds, or remove it", level="warning")
@@ -319,6 +323,101 @@ def _check_dataset_fields(r: _Reporter, ds_id: str, broken_patterns: set[str]) -
         r.err("dataset", ds_id, ("owned_columns",), "owned_columns needs a key_map",
             "add key_map for the upstream dataset, or remove owned_columns")
     _check_partitioning(r, ds_id)
+
+
+def _check_contracts(r: _Reporter, ds_id: str) -> None:
+    """Each `contracts` entry against the hop it describes (ADR-01 to ADR-04; reconciliation model
+    sections 3 to 6), and the release 1 alias `hop_exclusions`."""
+    from hcsc.datalake.dre.config.contracts import KEYED, LATER, UNSUPPORTED
+
+    datasets = r.config.datasets
+    ds = datasets[ds_id]
+    for up_id in ds.hop_exclusions:
+        if up_id in ds.contracts and ds.contracts[up_id].exclusions:
+            r.err("dataset", ds_id, ("hop_exclusions", up_id), f"exclusions for {up_id!r} are set twice: here and "
+                "under contracts", f"keep contracts.{up_id}.exclusions and remove this entry")
+        elif up_id in ds.key_map:
+            r.err("dataset", ds_id, ("hop_exclusions", up_id), "hop_exclusions has no id, version, approval or "
+                "volume guard (ADR-04)", f"move it to contracts.{up_id}.exclusions as {{id, version, condition, "
+                "approved_by, max_share}}", level="warning")
+    survivors = {up: c.precedence for up, c in ds.contracts.items() if c.mapping == "survivorship"}
+    for up_id, c in ds.contracts.items():
+        loc = ("contracts", up_id)
+        up = datasets.get(up_id)
+        if up_id not in ds.upstream:
+            r.err("dataset", ds_id, loc, f"contracts names {up_id!r}, which is not in upstream",
+                f"add {up_id} to upstream, or remove this contract")
+            continue
+        keyed = up_id in ds.key_map
+        if c.mapping in KEYED and not keyed:
+            r.err("dataset", ds_id, loc + ("mapping",), f"mapping {c.mapping} compares keys, but key_map has no "
+                f"entry for {up_id!r}", f"add key_map.{up_id}, mapping every key column")
+        if c.mapping in ("join_contribution", *UNSUPPORTED) and keyed:
+            r.err("dataset", ds_id, loc + ("mapping",), f"mapping {c.mapping} cannot be judged through key_map: "
+                "the hop checks would compare it as one record to one record", f"remove key_map.{up_id}")
+        if up is not None:
+            derived = up.derived is not None
+            if derived and c.mapping != "aggregate":
+                r.err("dataset", ds_id, loc + ("mapping",), f"{up_id!r} is derived: the hop is judged at its grain",
+                    "set mapping: aggregate")
+            elif c.mapping == "aggregate" and not derived:
+                r.err("dataset", ds_id, loc + ("mapping",), f"mapping aggregate needs a derived upstream; "
+                    f"{up_id!r} is a table", "name a derived dataset (derived: {from, group_by, ...}) as the upstream")
+        if c.mapping == "union_partition" and ds.feed_filter is None:
+            r.err("dataset", ds_id, loc + ("mapping",), "a union_partition hop reads this table through its "
+                "attribution, which is the dataset's feed_filter, and none is set",
+                "set feed_filter to the rows this source owns (for example \"src_sys_nm = 'SRC_A'\")")
+        if c.mapping == "join_contribution":
+            if not c.reference:
+                r.err("dataset", ds_id, loc + ("reference",), "a join_contribution hop needs reference",
+                    f"map this dataset's referencing column(s) to {up_id}'s key column(s)")
+            elif up is not None:
+                not_key = [u for u in c.reference.values() if u not in up.key]
+                if not_key or set(c.reference.values()) != set(up.key):
+                    r.err("dataset", ds_id, loc + ("reference",), f"reference must map to all of {up_id}'s key "
+                        f"{up.key}", "map one column of this dataset to each key column of the contributor")
+        elif c.reference:
+            r.err("dataset", ds_id, loc + ("reference",), "reference goes with mapping join_contribution only",
+                "remove it")
+        if c.mapping == "survivorship":
+            if up_id not in c.precedence:
+                r.err("dataset", ds_id, loc + ("precedence",), f"precedence must list {up_id!r} among the "
+                    "survivorship upstreams, the winner first", "list every survivorship upstream in order")
+            elif any(p != c.precedence for p in survivors.values()):
+                r.err("dataset", ds_id, loc + ("precedence",), "the survivorship hops of one dataset give different "
+                    "precedence lists", "give every survivorship hop the same precedence list")
+        elif c.precedence:
+            r.err("dataset", ds_id, loc + ("precedence",), "precedence goes with mapping survivorship only",
+                "remove it")
+        if c.mapping in LATER:
+            r.err("dataset", ds_id, loc + ("mapping",), f"mapping {c.mapping} is not judged until build step "
+                f"{LATER[c.mapping]}: this hop is a blind spot until then", "nothing to fix; see dre validate's "
+                "contracts report", level="warning")
+        if c.mapping in UNSUPPORTED:
+            r.err("dataset", ds_id, loc + ("mapping",), f"mapping {c.mapping} cannot be judged by the engine: "
+                "this hop is a blind spot (unsupported_mapping)", "nothing to fix in configuration; it is "
+                "reported as unsupported, never passed", level="warning")
+        seen: dict[tuple[str, int], int] = {}
+        for i, e in enumerate(c.exclusions):
+            if (e.id, e.version) in seen:
+                r.err("dataset", ds_id, loc + ("exclusions", i), f"exclusion {e.label} is listed twice",
+                    "give a changed rule a new version")
+            seen[(e.id, e.version)] = i
+            for j, other in enumerate(c.exclusions[:i]):
+                if other.id == e.id and other.version != e.version and _overlap(other, e):
+                    r.err("dataset", ds_id, loc + ("exclusions", i, "effective"), f"versions {other.version} and "
+                        f"{e.version} of exclusion {e.id!r} are effective at the same time",
+                        "end the older version (effective.to) where the newer one starts")
+
+
+def _overlap(a: Any, b: Any) -> bool:
+    """Whether two exclusions' effective spans share a day (null ends are open)."""
+    from datetime import date
+
+    lo, hi = date.min, date.max
+    a_from, a_to = a.effective.from_ or lo, a.effective.to or hi
+    b_from, b_to = b.effective.from_ or lo, b.effective.to or hi
+    return a_from < b_to and b_from < a_to
 
 
 def _check_partitioning(r: _Reporter, ds_id: str) -> None:

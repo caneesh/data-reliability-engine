@@ -236,7 +236,9 @@ Answered on 2026-10-16 (`docs/decisions.md`, "Developer answers on the reconcili
 
 ## 7. After approval: the build order
 
-1. **Contract schema and validation.** `grain`, mapping kinds, the versioned exclusions, `reject_policy`, `deletion`, `history`, and the aliases for today's fields. `dre validate` lists unsupported edges and blind spots.
+Each step ends at an architectural checkpoint (`docs/design/checkpoints.md`) that the user reviews before the next step starts.
+
+1. **Contract schema and validation.** `grain`, mapping kinds, the versioned exclusions, `reject_policy`, `deletion`, `history`, and the aliases for today's fields. `dre validate` lists unsupported edges and blind spots. **Built 2026-10-16; checkpoint 1.**
 2. **Commit rows and committed-only views (ADR-07).** These go first among the store changes because every later result depends on them.
 3. **HOP_LEDGER and `dq_reconciliation`.** The identity, the scope columns, orphans and key collisions.
 4. **Evaluation modes**, and AS_OF_REPLAY for append-only datasets.

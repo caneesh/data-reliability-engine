@@ -132,6 +132,24 @@ def test_fragment_checks_cover_open_when_and_filter_rule_syntax(spark, tmp_path)
     assert "ParseException" in problems["probes.filter_rules[0].condition"].problem
 
 
+def test_fragment_checks_resolve_a_contract_s_conditions(spark, tmp_path) -> None:
+    """dre dry-run resolves a contract's tombstone against the upstream's table and soft_when against
+    the dataset's own; the sample's (a soft void) resolve, a misspelt column does not."""
+    from hcsc.datalake.dre.config.fragments import check_fragments
+    from hcsc.datalake.dre.config.validate import validate_conf
+
+    replay = replay_conf(spark, tmp_path, "runner_contract", {
+        GOLD: [("to_date(enddate, 'yyyy-MM-dd')", "to_date(end_dt, 'yyyy-MM-dd')")],
+    })
+    create_table(spark, replay.gold, GOLD_COLUMNS, [gold_row()])
+    create_table(spark, replay.curated, CURATED_COLUMNS, [curated_row()])
+    config, errors, _ = validate_conf(replay.conf)
+    assert errors == []
+    problems = {p.field: p for p in check_fragments(spark, config, "example_realtime")}
+    assert set(problems) == {"contracts.example_curated_enrollment.deletion.tombstone"}
+    assert "UNRESOLVED_COLUMN" in problems["contracts.example_curated_enrollment.deletion.tombstone"].problem
+
+
 def test_schema_drift_runs_once_per_physical_table(spark, tmp_path) -> None:
     from hcsc.datalake.dre.config.validate import validate_conf
     from hcsc.datalake.dre.runner import plan

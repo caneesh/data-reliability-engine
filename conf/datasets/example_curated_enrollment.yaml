@@ -10,3 +10,5 @@ partition_column: null
 partition_format: null            # how the partition value is written (e.g. yyyy-MM-dd); with it, windowed checks read only the window's partitions
 file_name_column: null
 key_unique: false             # keeps several versions per key
+grain:
+  history: null                 # whether curated keeps every version as loaded is not yet confirmed (platform)

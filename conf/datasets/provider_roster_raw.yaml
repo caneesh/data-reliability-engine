@@ -7,3 +7,5 @@ record_time: { column: roster_effective_ts, timezone: UTC }
 load_time: { column: loaded_at, granularity: second, timezone: UTC }
 file_name_column: source_file
 key_unique: true
+grain:
+  history: append_only          # each monthly file's rows are added, never rewritten
