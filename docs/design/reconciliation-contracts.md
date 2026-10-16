@@ -1,6 +1,6 @@
 # Design: reconciliation contracts (release 5, proposed)
 
-Status: proposed on 2026-10-16, not built. It answers the question "does a passing check establish that every expected business record reached gold?", and today the honest answer is: only for what the hop contract names. This plan makes the contract name everything, and makes the engine prove the ledger balances.
+Status: **superseded** on 2026-10-16 by `docs/design/reconciliation-model.md` and `docs/design/target-architecture.md`, after the Phase 1 architecture assessment found this ledger inconsistent (pending and exclusions inside the identity, a tolerance that could cover unassessable keys) and the chain unbuildable from stored key events (they hold failing keys only). Kept for the record. Originally: proposed on 2026-10-16, not built. It answers the question "does a passing check establish that every expected business record reached gold?", and today the honest answer is: only for what the hop contract names. This plan makes the contract name everything, and makes the engine prove the ledger balances.
 
 ## What a PASS proves today, and what it does not
 

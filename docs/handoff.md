@@ -10,7 +10,7 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
 - **Release 2** has started. Derived datasets (join and aggregate hops) are built.
 - **Release 3** (extensibility) is built: the eight-step plan in `docs/design/extensibility.md`, agreed by the user, built in order; each step has a spec amendment and a `docs/decisions.md` entry, and `docs/extending.md` is the how-to.
 - **Release 4** (outside-in evidence, `docs/design/outside-in-evidence.md`) is agreed and has started: step 1 of 6 (T1_PARTITION_DRIFT) is built; step 2 (T1_FILE_RECORD_COUNT, 1 GiB per-file cap agreed) is next.
-- **Release 5** (reconciliation contracts, `docs/design/reconciliation-contracts.md`) is proposed, not built: it waits for the four decisions in its "Decide before step 1" table.
+- **Phase 1 architecture assessment (2026-10-16).** An external static review found the design not ready to freeze: 12 findings, 3 critical (completeness claim beyond the contract, identity and grain, historical replay). The answer is `docs/design/target-architecture.md` (finding-by-finding verdicts checked against the repo, invariants, ADR-01 to ADR-08, exit criteria) and `docs/design/reconciliation-model.md` (populations, dispositions and their identity, mapping kinds, exclusions, rejects, deletions, multi-source shapes, lineage and chain, time modes, five worked examples, expected results for the ten proof scenarios). Both proposed, nothing built; they supersede the release 5 plan `docs/design/reconciliation-contracts.md`.
 - **Context from 2026-10-15 and 16.** The user's team is building a temporary in-pipeline audit (control table, rejects table, filter rule ids, audit log lines) that modifies the jobs; DRE stays outside the jobs. `docs/evidence-contract.md` fixes what that audit writes so DRE's probes read it by configuration (also a Claude Doc, "DRE Evidence Contract"). A feature catalogue of the engine is a Claude Doc, "DRE: Feature Catalogue" (https://claude.ai/code/artifact/4831d1d5-a7fd-427e-9a49-e67b4dc62e39). The real flow: a scheduled process loads HDFS files up to a hand-off layer (merge or gcf), a continuous process moves them into gold temp, and gold main merges on its own schedule; whether the hand-off table is written by insert-overwrite per batch partition is still unknown (it decides where partition drift matters first).
 - **Tests:** 702, all passing (`pytest --collect-only -q | tail -1` gives the exact count). A full local run takes about 20 minutes; CI about 15. Replay scenarios R01 to R13 all pass, plus a three-layer acceptance test.
 
@@ -46,6 +46,7 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
 | Release 4 plan proposed: `docs/design/outside-in-evidence.md` (not built) | `55857bd`, revised in `9719cc4` and `04dcc20` | #58 to #60 |
 | Release 4 step 1: T1_PARTITION_DRIFT, `dq_partition_state` | `bc52b11` | #62 |
 | Release 5 plan proposed: `docs/design/reconciliation-contracts.md` (not built) | `802a274`, handoff in `701c513` and `1376ff0` | #64 to #66 |
+| Phase 1 assessment answered: `docs/design/target-architecture.md`, `docs/design/reconciliation-model.md` (proposed; release 5 plan superseded) | (this commit) | |
 
 Each row has a section in `docs/decisions.md` saying what was decided and why.
 
@@ -53,9 +54,10 @@ Each row has a section in `docs/decisions.md` saying what was decided and why.
 
 **Next action**, in this order unless the user says otherwise:
 
-1. **Release 4 step 2, T1_FILE_RECORD_COUNT**, on the user's word: records inside a landed file (lines, delimited rows, an XML record tag by line scan, Spark's reader for sequence, parquet and ORC) against the raw rows per file, counted once per file into a new `dq_file_count` table, 1 GiB per file. Build it like step 1: spec amendment first (sections 1, 3, 5, 6, 8), the check as a parametrised check under `landing.record_count`, tests for FAIL, PASS and every DID_NOT_RUN path, a decisions entry, the e2e synthetic landing (sequence files with a known record count) giving PASSED.
+0. **The ADRs first.** No engine change until the user approves ADR-01, ADR-02 and ADR-05 (the critical findings), then ADR-03 and ADR-04 (`docs/design/target-architecture.md`, section 6 lists every decision and fact needed). The next document deliverable is the traceability matrix (exit criterion 6): per requirement, documented / coded / unit-tested / integration-tested / operationally proven, with file and test names. After approval, build in the order of that document's section 7.
+1. **Release 4 step 2, T1_FILE_RECORD_COUNT**, on the user's word (it supplies proof scenario 9's evidence): records inside a landed file (lines, delimited rows, an XML record tag by line scan, Spark's reader for sequence, parquet and ORC) against the raw rows per file, counted once per file into a new `dq_file_count` table, 1 GiB per file. Build it like step 1: spec amendment first (sections 1, 3, 5, 6, 8), the check as a parametrised check under `landing.record_count`, tests for FAIL, PASS and every DID_NOT_RUN path, a decisions entry, the e2e synthetic landing (sequence files with a known record count) giving PASSED.
 2. **Release 4 step 3, T1_SEQUENCE_GAP**, then steps 4 and 5.
-3. **Release 5** once the user answers its four decisions (aliases for the old fields; where deletions are expressed in the real pipeline; ledger grain for derived upstreams; tolerance as an absolute count).
+3. **Release 5 is replaced** by the target architecture's build order (section 7), once the ADRs are approved.
 
 Real keys, tables and columns come from the user in later iterations (the first, the curated load time column, arrived on 2026-10-15). When an answer arrives:
 

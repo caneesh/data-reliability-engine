@@ -13,7 +13,7 @@ Before doing anything else, read these files in order:
 3. `docs/spec.md`: the source of truth, including release 2 (derived datasets).
 4. `docs/decisions.md`: every assumption and decision, with its reason.
 5. `docs/architecture.md`: the guarantees, the limits, and what is deliberately open.
-6. `docs/design/outside-in-evidence.md` (release 4, in progress) and `docs/design/reconciliation-contracts.md` (release 5, proposed): the current plans.
+6. `docs/design/outside-in-evidence.md` (release 4, in progress) and `docs/design/target-architecture.md` with `docs/design/reconciliation-model.md` (the Phase 1 answer, proposed, awaiting ADR approval; it supersedes the release 5 plan): the current plans.
 
 Then tell me in a few lines where things stand and what you think is next, and wait for my instruction.
 

@@ -2,6 +2,8 @@
 
 This page answers the architecture concerns of the October 2026 code review. For each one it gives what the engine guarantees, how it does so, and what is still open. The build rules are in `docs/spec.md`, and the decisions and their reasons are in `docs/decisions.md`.
 
+**Scope of these guarantees (2026-10-16).** Every guarantee below is per hop: one dataset against one upstream, for the keys due in a window, read as the data stands at the run. None of them is an end-to-end claim that every business record reached gold, and the "Met" rows in the acceptance table are met at hop scope. The Phase 1 architecture assessment set out what a chain-level claim needs; `docs/design/target-architecture.md` (ADR-01 to ADR-08) and `docs/design/reconciliation-model.md` are the proposed answer, not built.
+
 ## Zero-touch isolation
 
 **Guarantee.** Onboarding a feed changes no pipeline code, job configuration, schedule or runtime. A failure in DRE can never block a production pipeline.
