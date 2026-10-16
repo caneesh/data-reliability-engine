@@ -1,6 +1,6 @@
 # Design: target architecture after the Phase 1 assessment (proposed)
 
-Status: proposed on 2026-10-16. **ADR-01, ADR-02 and ADR-05 were approved by the user on 2026-10-16**, together with section 3 (result states stay at three), on which ADR-01 relies. ADR-03, ADR-04 and ADR-06 to ADR-08 are still proposed. Nothing here is built, and the design is **not frozen**. This document answers the Phase 1 foundational architecture assessment (16 October 2026, a static review; verdict "conditional, not ready for design freeze"). It has four parts:
+Status: proposed on 2026-10-16. **ADR-01 to ADR-05 were approved by the user on 2026-10-16**, together with section 3 (result states stay at three), on which ADR-01 relies. ADR-06 to ADR-08 are still proposed. Nothing here is built, and the design is **not frozen**. This document answers the Phase 1 foundational architecture assessment (16 October 2026, a static review; verdict "conditional, not ready for design freeze"). It has four parts:
 
 - a verdict on each finding, checked against the repository;
 - the invariants;
@@ -12,7 +12,7 @@ Status: proposed on 2026-10-16. **ADR-01, ADR-02 and ADR-05 were approved by the
 **Recommended order:**
 
 1. ~~Approve ADR-01, ADR-02 and ADR-05, which resolve the three critical findings.~~ Approved 2026-10-16.
-2. Approve ADR-03 and ADR-04.
+2. ~~Approve ADR-03 and ADR-04.~~ Approved 2026-10-16.
 3. Build the traceability matrix (P1-12).
 4. Only then write code.
 
@@ -101,6 +101,8 @@ The trade-off: a dashboard that counts states alone will put an unsupported edge
 
 ### ADR-03: union ownership, joins, aggregation and fan-out lineage
 
+**Status: approved by the user, 2026-10-16.**
+
 **Decision.** There are three multi-source shapes, never mixed on one edge (model section 6):
 
 - **Union partition.** Exhaustive, disjoint attribution, proven by T1_SOURCE_ATTRIBUTION.
@@ -113,6 +115,8 @@ The trade-off: a dashboard that counts states alone will put an unsupported edge
 - **The chain.** It follows records edge by edge, reading the layers directly over the due source keys, not from stored key events. A loss proven on observable segments is FAILED. An unobservable segment without a loss is `partial_chain`.
 
 ### ADR-04: approved exclusions, reject policies, deletions
+
+**Status: approved by the user, 2026-10-16.**
 
 **Decision.**
 
@@ -204,7 +208,7 @@ All of this is in model section 5.
 - the tolerance is an absolute count on deficits only (ADR-01);
 - today's RERUN and REPLAY are relabelled as current rechecks (ADR-05).
 
-Still to approve: ADR-03 and ADR-04 (among them, that the reject policy defaults to defect), then ADR-06 to ADR-08.
+Then approved, the same day: ADR-03 and ADR-04, including that the reject policy defaults to defect. Still to approve: ADR-06 to ADR-08.
 
 **From the developer:**
 

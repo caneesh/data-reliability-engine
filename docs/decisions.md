@@ -474,7 +474,25 @@ The user approved the three decisions that resolve the assessment's critical fin
    - Three evaluation modes: NORMAL; CURRENT_RECHECK, which today's RERUN and REPLAY become (labelled in the digest and the CLI); AS_OF_REPLAY, only on append-only or snapshot datasets with no partition drift since the cutoff.
    - `execution_type` keeps its stored values, and a new `evaluation_mode` column carries the mode.
 
-Not built yet. Exit criterion 1 is met. Code waits for ADR-03 and ADR-04, and the traceability matrix comes before code (exit criterion 6). ADR-03, ADR-04 and ADR-06 to ADR-08 are still proposed.
+Not built yet. Exit criterion 1 is met.
+
+**Then ADR-03 and ADR-04, approved the same day**, as written:
+
+4. **ADR-03 (P1-06, P1-08).** Three multi-source shapes, never mixed on one edge:
+   - **Union partition:** attribution must be disjoint and complete, proven by T1_SOURCE_ATTRIBUTION. This is the member pipeline's shape (the developer's answers below).
+   - **Join contribution:** the primary source owns the population; contributors are checked by HOP_CONTRIBUTION for resolution and value agreement.
+   - **Survivorship:** by precedence. It is not used here.
+
+   Lineage rules:
+   - Aggregate membership is reconstructed; contribution is unavailable without a member-grain table.
+   - The chain reads the layers directly. A proven loss is FAILED, and an unobservable segment is `partial_chain`.
+5. **ADR-04 (P1-05).**
+   - **Exclusions** are approved, versioned rules with effective dates and a `max_share` volume guard.
+   - **Rejects** count only with key lineage, under a `reject_policy` whose **default is defect**.
+   - **Deletions** are a declared tombstone rule. For the member pipeline that is the soft void below.
+   - The pipeline's own filter registry never authorises an exclusion.
+
+The traceability matrix comes before code (exit criterion 6). ADR-06 to ADR-08 are still proposed.
 
 ## Developer answers on the reconciliation model (2026-10-16)
 
