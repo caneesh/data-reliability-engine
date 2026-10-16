@@ -95,7 +95,8 @@ Real keys, tables and columns come from the user in later iterations (the first,
 15. Query 4.
 16. Queries 5 to 7.
 17. (new, 2026-10-16) Is the hand-off table (merge or gcf) written by insert-overwrite per batch partition, and what is its partition column and format? Needed to configure T1_PARTITION_DRIFT on a real table.
-18. (new, 2026-10-16) Where are source deletions expressed (an operation code on the CDC or incremental layer)? Needed for the `deletions` disposition in release 5.
+18. ~~Where are source deletions expressed?~~ Answered 2026-10-16: a soft void, with the end date set equal to the effective date and the row kept at every layer. Also answered: no gold table holds counts or totals; all sources have equal priority, so there is no survivorship (`docs/decisions.md`, "Developer answers on the reconciliation model").
+19. (new, 2026-10-16) Is any gold row built by joining columns from two sources, rather than stacked by source? And does a void ever have an end date other than its effective date?
 
     Questions 12 to 14 are answered by shape, not yet by name: `docs/evidence-contract.md` (2026-10-16) fixes the control table, rejects table, filter rule registry and log line that the team's in-pipeline audit writes; the deployed configuration fills `probes.load_log`, `probes.filter_rules` and `probes.rejects` with the real names once the first batch writes them.
 

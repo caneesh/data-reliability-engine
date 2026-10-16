@@ -119,7 +119,7 @@ The trade-off: a dashboard that counts states alone will put an unsupported edge
 
 All of this is in model section 5.
 
-**Open fact.** Where deletions are expressed in the real pipeline (handoff question 18). Until it is answered, `deletion` stays unset and every result's scope says `deletions: not modelled`.
+**Answered (2026-10-16).** Deletions are soft voids: a new version whose end date equals its effective date, with the row kept (model section 5). Hard deletes are not used by the member pipeline.
 
 ### ADR-05: event time, ingestion time, cutoff, SLA and replay modes
 
@@ -201,10 +201,14 @@ All of this is in model section 5.
 
 **From the developer:**
 
-- where deletions are expressed (question 18);
 - whether the hand-off table is overwritten per batch partition (question 17);
-- whether any gold aggregate has a member-grain table beside it;
-- which multi-source gold tables are union, join or survivorship.
+- whether any gold row is built by joining columns from two sources (a contributor, 6.2 of the model), as opposed to rows stacked by source;
+- whether a void ever has an end date other than its effective date.
+
+Answered on 2026-10-16 (`docs/decisions.md`, "Developer answers on the reconciliation model"):
+- **Deletions** are soft voids: end date set equal to effective date, and the row is kept.
+- **No gold table holds counts or totals.**
+- **All sources have equal priority.** A member with group and retail coverage appears in every associated table, so there is no survivorship, and multi-source tables are union partitions by source.
 
 **From the platform team:**
 

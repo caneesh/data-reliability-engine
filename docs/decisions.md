@@ -452,6 +452,14 @@ The team is building a temporary in-pipeline audit (a control table, a rejects t
 6. **Sample config.** The synthetic provider gold table is partitioned by its merge date (`merge_dt`, a test-only column) and drift-checked, so the e2e run records a baseline (DID\_NOT\_RUN / insufficient\_history) and `verify.py` asserts it. The sample member-coverage gold stays unpartitioned: its real partition column is a platform value (spec section 11) and is not invented.
 7. **Retention** for `dq_partition_state` is 13 months, like the file registry.
 
+## Developer answers on the reconciliation model (2026-10-16)
+
+Three facts for the proposed reconciliation model (`docs/design/reconciliation-model.md`), given by the user on 2026-10-16. Nothing is built from them yet; they settle the model's open points for the member pipeline.
+
+1. **Deletions are soft voids.** RMS voids a coverage with a new version whose end date equals its effective date; the record (whose key includes the effective date) stays at every layer, and gold keeps it with the voided end date. In the model: `deletion.tombstone` is end date = effective date on the upstream, `applied_as` is `soft` (gold end date = gold effective date), dates parsed with their formats. Today's engine already sees an unapplied void as STALE or as an end-date disagreement, because the void is a newer version and the end date is an owned column; the model adds the `deleted` and `deleted_not_applied` labels. The gold rule `end_not_before_start` (`column_order`, failing only when upper < lower) passes a void. "Usually" was the developer's word; other void shapes are question 19.
+2. **No gold aggregates.** No gold table holds counts or totals, so the `aggregate` mapping and its contribution limit do not apply to the member pipeline. The kind stays in the model for proof scenario 5 and other feeds.
+3. **Equal priority, no survivorship.** A member with group and retail coverage appears in every associated table as separate records keyed by coverage (and by source system in a table shared across sources, as the sample `gold_member_coverage_all` is keyed). Multi-source gold tables are union partitions by source; `superseded` never occurs here. Whether any gold row joins columns from two sources is question 19.
+
 ## Notes for later steps
 
 - **Step 4:** done: `dre dry-run` parses SQL fragments (`config/fragments.py`).

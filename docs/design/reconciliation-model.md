@@ -135,10 +135,21 @@ exclusions:
 **Deletions:**
 
 ```yaml
-deletion: { tombstone: "op_code = 'D'", applied_as: hard }     # hard: absent in D | soft: { column: del_ind, value: 'Y' }
+deletion:
+  tombstone: "enddate = effectivedate"          # SQL over U: the version that voids the record
+  applied_as: { soft: "mbr_mbrshp_covrg_end_dt = mbr_mbrshp_covrg_eff_dt" }   # SQL over D; or `hard` (absent in D)
+  formats: { enddate: yyyy-MM-dd, effectivedate: yyyy-MM-dd }   # dates are parsed, never compared as strings
 ```
 
-Until the developer confirms where deletions are expressed (handoff question 18), `deletion` stays unset and a tombstoned record is judged like any other. Where D no longer holds it, it is `missing`, and the result's scope says `deletions: not modelled`.
+**How the member pipeline expresses a deletion (developer, 2026-10-16; handoff question 18).**
+- **There is no delete operation.** A coverage is voided by a new version whose end date equals its effective date.
+- **The record stays, at every layer.** Its key (which includes the effective date) does not change, and gold keeps the row with the voided end date. So `applied_as` is `soft`, and the expected D state is "present, with end date equal to effective date".
+- **Today's engine already catches an unapplied void.** The void is a newer version, so gold still holding the old end date is STALE (HOP_KEY_CURRENCY), or a disagreement on the owned end-date column (HOP_VALUE_AGREEMENT). The model adds only the label: a void that arrived is counted as `deleted`, not lost among `delivered`, and a void not applied is `deleted_not_applied`.
+- **The gold rule `end_not_before_start` lets a void pass.** It fails only when the end date is *before* the effective date.
+
+"Usually" was the developer's word, so other void shapes may exist (for example an end date before the effective date). Until they are confirmed, `tombstone` covers equality only. Any other shape is judged as an ordinary version, and the gold rule reports an end date before the effective date.
+
+Hard deletes (a record absent from D) are not used by this pipeline. `applied_as: hard` stays in the model for other feeds.
 
 ## 6. Multi-source targets (ADR-03)
 
@@ -159,6 +170,8 @@ A D row is therefore counted once, by its primary, and its contributors are chec
 - **SRC_B's edge** classes it `superseded[SRC_A]`, but only if SRC_A's edge, in the same evaluation, has it `delivered`. Otherwise SRC_B's edge judges it normally, because the survivor is missing too.
 
 A target row is counted once: by the edge whose source won.
+
+**Not used by the member pipeline (developer, 2026-10-16).** All sources have equal priority. A member with both group and retail coverage appears in every table associated with each coverage, as separate records whose key includes the coverage (and, in a table shared across sources, the source system). No source's record replaces another's. Every multi-source gold table is therefore a **union partition** (6.1) by source, and `superseded` never occurs. Survivorship stays in the model, unconfigured, for other feeds.
 
 ## 7. Lineage and the chain
 
@@ -280,6 +293,8 @@ Due = 5 = 1 + 1 + 1 + 1 + 1. **FAILED** (2 violations).
 - If gold held SRC_B's version instead, SRC_A's edge would be `stale` or `divergent` for M, and SRC_B's would not count it as superseded.
 
 ### 9.3 Aggregation
+
+No gold table in the member pipeline holds counts or totals (developer, 2026-10-16), so the `aggregate` kind is not configured for it today. The example stays because the assessment's proof scenario 5 requires it, and other feeds may need it.
 
 Gold holds members per plan per month: the group g = (`qualifiedhealthplanid`, month of `effectivedate`), with measure `member_count`. The edge is `aggregate`; the expected groups and measures are computed from the curated rows by g.
 
