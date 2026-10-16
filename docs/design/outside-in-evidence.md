@@ -1,6 +1,6 @@
 # Design: outside-in evidence (release 4)
 
-Status: proposed on 2026-10-16, waiting for the user's go-ahead on the order and on the two cost decisions in "Decide before step 1". Nothing in it is built.
+Status: proposed on 2026-10-16, waiting for the user's go-ahead on the order and on the file read cap in "Decide before step 1"; the partition-drift evidence question was decided the same day (file metadata plus a bounded count). Nothing in it is built.
 
 ## Why
 
@@ -39,12 +39,13 @@ Each step is one PR-sized change: spec amendment first, then the check, its SQL,
 
 The strongest addition: it catches an insert-overwrite that reached the wrong partition, or re-wrote an old one, which nothing observes today.
 
-- **Configuration.** A dataset with `partition_column` and `partition_format` (already needed for pruning) may set `partition_drift: { source: statistics | count, tolerance_rows: 0 }`. `statistics` (the default) reads each partition's row count from the metastore (`DESCRIBE FORMATTED ... PARTITION`, `numRows`); `count` runs one `COUNT(*) ... GROUP BY partition_column` scan, inside the compute budget, for tables whose statistics the pipeline does not maintain. DRE never runs `ANALYZE TABLE`: that writes statistics, and the engine is read-only.
-- **Store.** New table `dq_partition_count` (dataset, table, partition_value, row_count, source, observed_at, run_id, run_date), append-only, partitioned by `run_date`; view `v_latest_partition_count`, the latest row per dataset and partition. DDL in `store/ddl.sql`, created by `dre install --apply`.
-- **Logic.** Each NORMAL run records every partition's count for the dataset and compares it with the latest earlier count. The partitions the window could touch (`partitions.partition_values`, widened by one granule each side, as pruning does) are *expected* to change. A partition outside that set whose count changed by more than `tolerance_rows`, or that disappeared, is a violation. Population: partitions with an earlier count. `detail` lists up to 100 changed partitions with before and after counts; `observed` carries the counts of expected, unchanged and changed partitions.
-- **DID_NOT_RUN.** No earlier count: BASELINE / insufficient_history (the first run only records). No statistics with `source: statistics`: DATA_UNAVAILABLE / partition_stats_missing, naming `source: count` in the fix. More than 1000 partitions: the same bound as pruning, DID_NOT_RUN / invalid_config naming the count. RERUN and REPLAY: not run (it reads the table as it is now).
-- **Cost.** Metadata reads only by default; one scan per run with `count`. Candidates are read in one `SHOW PARTITIONS`.
-- **Tests.** A partition outside the window shrinks: FAILED, detail names it. Only the window's partitions change: PASSED. First run: insufficient_history. Statistics absent with the default source: partition_stats_missing. The `count` source on a table without statistics: PASSED or FAILED as above. Replay R12-style: the record in `dq_partition_count` is append-only (guard).
+- **Why not statistics.** Hive's partition `numRows` is written only when something computes it (`ANALYZE TABLE`, or Hive-side auto-gathering); Spark writes through `insertInto` leave it stale, and an overwrite that lands in the wrong partition is the write most likely to leave the old number behind. DRE cannot refresh it (`ANALYZE TABLE` is a metastore write). A full `COUNT(*)` of every partition every hour is exact but is one table scan per dataset per run. So the check detects by file metadata and confirms by counting only what changed.
+- **Configuration.** A dataset with `partition_column` and `partition_format` (already needed for pruning) may set `partition_drift: { tolerance_rows: 0 }`; the check applies only where it is set.
+- **Store.** New table `dq_partition_state` (dataset, table, partition_value, file_count, total_bytes, latest_modified_at, row_count, observed_at, run_id, run_date), append-only, partitioned by `run_date`; `row_count` is null unless the partition was counted this run. View `v_latest_partition_state`, the latest row per dataset and partition. DDL in `store/ddl.sql`, created by `dre install --apply`.
+- **Logic.** Each NORMAL run lists the dataset's partitions (`SHOW PARTITIONS`), reads each one's location (`DESCRIBE FORMATTED ... PARTITION`) and lists its directory through the Hadoop FileSystem API: file count, total bytes, latest modification time, no data read. The partitions the window could touch (`partitions.partition_values`, widened by one granule each side, as pruning does) are *expected* to change. A partition outside that set whose three values differ from the previous run's, or that disappeared, was rewritten: it is counted with one `COUNT(*)` on that partition alone and compared with its last stored `row_count` (counted when it was last flagged, or on its first sighting). A count that differs by more than `tolerance_rows` is a violation; an equal count is reported in `observed` as "rewritten, same rows" (a compaction, or an idempotent re-run). Population: partitions outside the window with an earlier state. `detail` lists up to 100 changed partitions with before and after counts; `observed` carries the counts of expected, unchanged, rewritten-same and changed partitions.
+- **DID_NOT_RUN.** No earlier state: BASELINE / insufficient_history (the first run records state and counts every partition once, inside the compute budget; a table too large to count on its first run is DID_NOT_RUN / budget_exceeded and tries again). More than 1000 partitions: the same bound as pruning, DID_NOT_RUN / invalid_config naming the count. A partition location that cannot be listed: DATA_UNAVAILABLE / hdfs_unavailable. A table that is not file-backed (a view): CONFIGURATION / invalid_config. RERUN and REPLAY: not run (it reads the table as it is now).
+- **Cost.** One listing per partition per run (metadata only) and one count per rewritten partition outside the window, which on a healthy day is none. The first run counts every partition once.
+- **Tests.** A partition outside the window rewritten with fewer rows: FAILED, detail names it with both counts. Rewritten with the same rows: PASSED, `observed` says rewritten-same. Only the window's partitions change: PASSED. First run: insufficient_history, and the state and counts are stored. A location that cannot be listed: hdfs_unavailable. Replay R12-style: the rows in `dq_partition_state` are append-only (guard).
 - **Done when:** the e2e synthetic gold table, partitioned by a load date in the next step's fixture, reports PASSED on the second run, and the FAILED test's detail names the partition and both counts.
 
 ### Step 2. T1_FILE_RECORD_COUNT: records in the file versus rows in raw
@@ -94,8 +95,8 @@ For hops the configuration declares as copies ("raw and incr are identical copie
 
 - Section 1: a "Release 4: outside-in evidence" paragraph, and the gap it leaves (in-job reject reasons; the merge split).
 - Section 3: `partition_drift`, `landing.record_count`, `landing.sequence`, `parity`, `cardinality`, with their validation rules.
-- Section 4: a new reason code, `partition_stats_missing` under DATA_UNAVAILABLE.
-- Section 5: the two tables and the view; retention for both (`dq_partition_count` 13 months like the file registry; `dq_file_count` the same).
+- Section 4: no new reason code (the drift check uses insufficient_history, budget_exceeded, hdfs_unavailable and invalid_config).
+- Section 5: the two tables and the view; retention for both (`dq_partition_state` 13 months like the file registry; `dq_file_count` the same).
 - Section 6: five rows in the check catalogue; the pattern YAMLs list the three Tier 1 checks for file patterns and all datasets with the configuration, like the parametrised checks.
 - Section 7: no new causes. A FAILED partition drift gets the "load wrote nothing" cause list's WRONG_PARTITION first, since that is the most likely explanation; the other three new checks get the hop list.
 - Section 8: the compute budget paragraph covers file reads and partition scans.
@@ -105,7 +106,7 @@ For hops the configuration declares as copies ("raw and incr are identical copie
 
 | Decision | Proposal | Who confirms |
 | --- | --- | --- |
-| Partition counts from statistics or from a scan | Default `statistics`; `count` per dataset where the pipeline keeps no statistics. The cluster's tables need `numRows` maintained by the pipeline for the default to work | Developer, platform team |
+| Partition drift evidence | Decided 2026-10-16: file metadata detects a rewrite, a count of the rewritten partition alone confirms it; no metastore statistics, no full scan (step 1) | User |
 | File read cap | `max_bytes` 1 GiB per file, `landing.max_files` overall; a sequence file's record count through Spark's reader | User |
 | Order | 1 partition drift, 2 file record count, 3 sequence gap, 4 row parity, 5 cardinality | User |
 
@@ -121,7 +122,7 @@ For hops the configuration declares as copies ("raw and incr are identical copie
 
 | Step | Size | Why this order |
 | --- | --- | --- |
-| 1. T1_PARTITION_DRIFT | M | The only check that sees an overwrite hit the wrong partition; needs a new store table, so it settles the pattern for step 2 |
+| 1. T1_PARTITION_DRIFT | M | The only check that sees an overwrite hit the wrong partition, even when the row count is unchanged; needs a new store table, so it settles the pattern for step 2 |
 | 2. T1_FILE_RECORD_COUNT | M | The largest in-job fact DRE lacks; the one real cost decision |
 | 3. T1_SEQUENCE_GAP | S | `dq_file` already holds the evidence |
 | 4. HOP_ROW_PARITY | S | A hop check in the existing shape |
