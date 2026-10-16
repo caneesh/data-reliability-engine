@@ -74,7 +74,7 @@ Real keys, tables and columns come from the user in later iterations (the first,
 7. Section 6: T1_KEY_DUPLICATES per window (keys loaded in it) or whole table (P13)?
 8. Section 11: record the platform prerequisites explicitly: service-account grants (SELECT on sources, read on landing and log paths, INSERT on dq only, no HDFS write), the Spark settings for secret and key-string exposure on executors (`spark.authenticate`, `spark.network.crypto.enabled`, `spark.io.encryption.enabled`), plan redaction (`spark.sql.redaction.string.regex`), and dynamic allocation keeping executors with cached blocks.
 
-**Developer: 16 questions.** They are in the user's Claude Doc, "DRE: questions for the developer" (https://claude.ai/code/artifact/0364b496-8c3e-437a-a070-ccd20af9174c):
+**Developer: 18 questions.** They are in the user's Claude Doc, "DRE: questions for the developer" (https://claude.ai/code/artifact/0364b496-8c3e-437a-a070-ccd20af9174c):
 
 1. The curated load-time column. **Answered 2026-10-15: `cdc_upd_ts`**, a string in `yyyy-MM-dd HH:mm:ss:SSSSSS`, minute granularity (`docs/decisions.md`, "Curated load time column").
 2. Record-time formats. This is now the most urgent: a wrong format parses every record time as null.
@@ -96,8 +96,6 @@ Real keys, tables and columns come from the user in later iterations (the first,
 18. (new, 2026-10-16) Where are source deletions expressed (an operation code on the CDC or incremental layer)? Needed for the `deletions` disposition in release 5.
 
     Questions 12 to 14 are answered by shape, not yet by name: `docs/evidence-contract.md` (2026-10-16) fixes the control table, rejects table, filter rule registry and log line that the team's in-pipeline audit writes; the deployed configuration fills `probes.load_log`, `probes.filter_rules` and `probes.rejects` with the real names once the first batch writes them.
-15. Query 4.
-16. Queries 5 to 7.
 
 **Platform team:**
 
