@@ -46,7 +46,7 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
 | Release 4 plan proposed: `docs/design/outside-in-evidence.md` (not built) | `55857bd`, revised in `9719cc4` and `04dcc20` | #58 to #60 |
 | Release 4 step 1: T1_PARTITION_DRIFT, `dq_partition_state` | `bc52b11` | #62 |
 | Release 5 plan proposed: `docs/design/reconciliation-contracts.md` (not built) | `802a274`, handoff in `701c513` and `1376ff0` | #64 to #66 |
-| Phase 1 assessment answered: `docs/design/target-architecture.md`, `docs/design/reconciliation-model.md` (proposed; release 5 plan superseded) | (this commit) | |
+| Phase 1 assessment answered: `docs/design/target-architecture.md`, `docs/design/reconciliation-model.md` (proposed; release 5 plan superseded) | `46ae302` | #68 |
 
 Each row has a section in `docs/decisions.md` saying what was decided and why.
 
