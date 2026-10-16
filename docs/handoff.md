@@ -43,12 +43,13 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
 | Evidence contract for the team's in-pipeline audit (`docs/evidence-contract.md`) | `e029127` | #56 |
 | Release 4 plan proposed: `docs/design/outside-in-evidence.md` (not built) | `55857bd`, revised in `9719cc4` and `04dcc20` | #58 to #60 |
 | Release 4 step 1: T1_PARTITION_DRIFT, `dq_partition_state` | `bc52b11` | #62 |
+| Release 5 plan proposed: `docs/design/reconciliation-contracts.md` (not built) | (this commit) | |
 
 Each row has a section in `docs/decisions.md` saying what was decided and why.
 
 ## What is waiting
 
-**Next action:** the user said that real keys, tables and columns come in later iterations (the first, the curated load time column, arrived on 2026-10-15). Until more arrive, wait for the user. Release 4, `docs/design/outside-in-evidence.md` (five read-only checks that cover what the team's temporary in-pipeline audit sees from inside the jobs), is agreed and under way: step 1 (T1_PARTITION_DRIFT) is built; next is step 2, T1_FILE_RECORD_COUNT, with the agreed 1 GiB per-file cap. Build it one step at a time, like release 3: spec amendment, check, tests, decisions entry. When an answer arrives:
+**Next action:** the user said that real keys, tables and columns come in later iterations (the first, the curated load time column, arrived on 2026-10-15). Until more arrive, wait for the user. Release 4, `docs/design/outside-in-evidence.md` (five read-only checks that cover what the team's temporary in-pipeline audit sees from inside the jobs), is agreed and under way: step 1 (T1_PARTITION_DRIFT) is built; next is step 2, T1_FILE_RECORD_COUNT, with the agreed 1 GiB per-file cap. Build it one step at a time, like release 3: spec amendment, check, tests, decisions entry. A release 5 plan, `docs/design/reconciliation-contracts.md` (reconciliation contracts: named exclusions, deletions, rejects, dedup, transforms, attribution, a per-hop ledger that must balance, and chain completeness), is proposed and waits for the user's decisions in its "Decide before step 1" table; the recommended order is release 4 steps 2 and 3 first, then release 5 steps 1 and 2. When an answer arrives:
 
 1. Turn it into configuration, or a small change.
 2. Add tests, and get CI green.
