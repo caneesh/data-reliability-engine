@@ -6,7 +6,7 @@ Status: proposed on 2026-10-16, waiting for the user's go-ahead on the order and
 
 The team is building a temporary in-pipeline audit (`docs/evidence-contract.md` fixes what it writes). It can see three things from inside a job that DRE cannot see from outside: the records inside a landed file, the merge's insert, update and unchanged split, and which records the job rejected and why. Everything else on its checklist DRE already does, or can do, without touching a job.
 
-Hard constraints 1 and 2 (read-only; no pipeline changes) stay as they are. This plan closes the gap the other way: five generic, read-only capabilities that read what the pipeline already produces without being asked, namely the landed files themselves, the file registry DRE already keeps, Hive partition statistics, and the tables on both sides of a hop. After it, the only checklist item DRE cannot observe is the reason a job itself dropped a record, which it reports by elimination (a MISSING key that no configured rule explains).
+Hard constraints 1 and 2 (read-only; no pipeline changes) stay as they are. This plan closes the gap the other way: five generic, read-only capabilities that read what the pipeline already produces without being asked, namely the landed files themselves, the file registry DRE already keeps, each partition's files as HDFS lists them, and the tables on both sides of a hop. After it, the only checklist item DRE cannot observe is the reason a job itself dropped a record, which it reports by elimination (a MISSING key that no configured rule explains).
 
 ## Where the engine stands
 
@@ -24,9 +24,9 @@ Hard constraints 1 and 2 (read-only; no pipeline changes) stay as they are. This
 
 ## Principles
 
-- **Read hooks only.** A new capability reads a file, a listing, a table or metastore statistics. It never asks a job to write anything, and it never writes outside the `dq` store. Reading a landed file through Spark or the Hadoop FileSystem API is a read like any other.
+- **Read hooks only.** A new capability reads a file, a directory listing, a table or the metastore's partition list. It never asks a job to write anything, and it never writes outside the `dq` store. Reading a landed file through Spark or the Hadoop FileSystem API is a read like any other.
 - **Evidence DRE keeps is append-only in its own store.** Two new tables (file record counts, partition counts), written only through `store/writer.py`, created only by `dre install --apply`. Current state comes from views.
-- **Every read is bounded before it starts.** File reads are capped by count and bytes; partition counts come from statistics by default and from a scan only when configuration says so; both run inside the dataset's compute budget and release what they cache.
+- **Every read is bounded before it starts.** File reads are capped by count and bytes; partition drift is detected from directory listings and only a rewritten partition is counted; both run inside the dataset's compute budget and release what they cache.
 - **Three result states, unchanged.** Each new check writes PASSED, FAILED or DID_NOT_RUN through `from_counts` or `did_not_run`, with an empty population as DID_NOT_RUN / empty_population and a missing input as DID_NOT_RUN with a CONFIGURATION or DATA_UNAVAILABLE reason.
 - **Configuration describes kinds, never sources.** A record tag, a sequence regex, a parity column list are settings of a dataset or feed; the checks are generic and registered like any other (`docs/extending.md`).
 - **No member data outside the store.** A record count, a partition value, a sequence number and a file base name are not member data. Row hashes stay in the Spark job and in `detail` only as counts.
