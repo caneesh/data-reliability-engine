@@ -10,7 +10,7 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
 - **Release 2** has started. Derived datasets (join and aggregate hops) are built.
 - **Release 3** (extensibility) is built: the eight-step plan in `docs/design/extensibility.md`, agreed by the user, built in order; each step has a spec amendment and a `docs/decisions.md` entry, and `docs/extending.md` is the how-to.
 - **Release 4** (outside-in evidence, `docs/design/outside-in-evidence.md`) has started: step 1 of 6 is built.
-- **Tests:** 689, all passing (`pytest --collect-only -q | tail -1` gives the exact count). A full local run takes about 20 minutes; CI about 15. Replay scenarios R01 to R13 all pass, plus a three-layer acceptance test.
+- **Tests:** 702, all passing (`pytest --collect-only -q | tail -1` gives the exact count). A full local run takes about 20 minutes; CI about 15. Replay scenarios R01 to R13 all pass, plus a three-layer acceptance test.
 
 ## History, in order (each step green in CI)
 
@@ -42,7 +42,7 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
 | Curated load time format (`yyyy-MM-dd HH:mm:ss:SSSSSS`) and minute granularity | `5fc3365` | #54 |
 | Evidence contract for the team's in-pipeline audit (`docs/evidence-contract.md`) | `e029127` | #56 |
 | Release 4 plan proposed: `docs/design/outside-in-evidence.md` (not built) | `55857bd`, revised in `9719cc4` and `04dcc20` | #58 to #60 |
-| Release 4 step 1: T1_PARTITION_DRIFT, `dq_partition_state` | (this commit) | |
+| Release 4 step 1: T1_PARTITION_DRIFT, `dq_partition_state` | `bc52b11` | #62 |
 
 Each row has a section in `docs/decisions.md` saying what was decided and why.
 
