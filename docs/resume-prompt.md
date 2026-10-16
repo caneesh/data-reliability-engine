@@ -4,7 +4,7 @@ Copy everything below the line into Claude after `/compact`, or at the start of 
 
 ---
 
-We are building the Data Reliability Engine (DRE) in `caneesh/data-reliability-engine`. Work on branch `claude/claude-md-documentation-a2lxt0`, which matches `main` (PR #1 merged as `96503b9`, CI run #29 green).
+We are building the Data Reliability Engine (DRE) in `caneesh/data-reliability-engine`. Work on branch `claude/claude-md-documentation-a2lxt0` (ahead of `main`; PR #1 was merged as `96503b9`, and everything since is on the branch with CI green per commit).
 
 Before doing anything else, read these files in order:
 
@@ -13,6 +13,7 @@ Before doing anything else, read these files in order:
 3. `docs/spec.md`: the source of truth, including release 2 (derived datasets).
 4. `docs/decisions.md`: every assumption and decision, with its reason.
 5. `docs/architecture.md`: the guarantees, the limits, and what is deliberately open.
+6. `docs/design/outside-in-evidence.md` (release 4, in progress) and `docs/design/reconciliation-contracts.md` (release 5, proposed): the current plans.
 
 Then tell me in a few lines where things stand and what you think is next, and wait for my instruction.
 

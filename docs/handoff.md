@@ -1,4 +1,4 @@
-# Handoff: where the build stands (2026-10-15)
+# Handoff: where the build stands (2026-10-16)
 
 Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec.md` (the source of truth), `docs/decisions.md` (every assumption, with its reason) and `docs/architecture.md` (guarantees and limits). This file only says where things stand and what is waiting.
 
@@ -9,7 +9,9 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
 - **Release 1** (spec section 10, steps 1 to 11) is done. It was then extended by two code reviews and an architecture review.
 - **Release 2** has started. Derived datasets (join and aggregate hops) are built.
 - **Release 3** (extensibility) is built: the eight-step plan in `docs/design/extensibility.md`, agreed by the user, built in order; each step has a spec amendment and a `docs/decisions.md` entry, and `docs/extending.md` is the how-to.
-- **Release 4** (outside-in evidence, `docs/design/outside-in-evidence.md`) has started: step 1 of 6 is built.
+- **Release 4** (outside-in evidence, `docs/design/outside-in-evidence.md`) is agreed and has started: step 1 of 6 (T1_PARTITION_DRIFT) is built; step 2 (T1_FILE_RECORD_COUNT, 1 GiB per-file cap agreed) is next.
+- **Release 5** (reconciliation contracts, `docs/design/reconciliation-contracts.md`) is proposed, not built: it waits for the four decisions in its "Decide before step 1" table.
+- **Context from 2026-10-15 and 16.** The user's team is building a temporary in-pipeline audit (control table, rejects table, filter rule ids, audit log lines) that modifies the jobs; DRE stays outside the jobs. `docs/evidence-contract.md` fixes what that audit writes so DRE's probes read it by configuration (also a Claude Doc, "DRE Evidence Contract"). A feature catalogue of the engine is a Claude Doc, "DRE: Feature Catalogue" (https://claude.ai/code/artifact/4831d1d5-a7fd-427e-9a49-e67b4dc62e39). The real flow: a scheduled process loads HDFS files up to a hand-off layer (merge or gcf), a continuous process moves them into gold temp, and gold main merges on its own schedule; whether the hand-off table is written by insert-overwrite per batch partition is still unknown (it decides where partition drift matters first).
 - **Tests:** 702, all passing (`pytest --collect-only -q | tail -1` gives the exact count). A full local run takes about 20 minutes; CI about 15. Replay scenarios R01 to R13 all pass, plus a three-layer acceptance test.
 
 ## History, in order (each step green in CI)
@@ -49,7 +51,13 @@ Each row has a section in `docs/decisions.md` saying what was decided and why.
 
 ## What is waiting
 
-**Next action:** the user said that real keys, tables and columns come in later iterations (the first, the curated load time column, arrived on 2026-10-15). Until more arrive, wait for the user. Release 4, `docs/design/outside-in-evidence.md` (five read-only checks that cover what the team's temporary in-pipeline audit sees from inside the jobs), is agreed and under way: step 1 (T1_PARTITION_DRIFT) is built; next is step 2, T1_FILE_RECORD_COUNT, with the agreed 1 GiB per-file cap. Build it one step at a time, like release 3: spec amendment, check, tests, decisions entry. A release 5 plan, `docs/design/reconciliation-contracts.md` (reconciliation contracts: named exclusions, deletions, rejects, dedup, transforms, attribution, a per-hop ledger that must balance, and chain completeness), is proposed and waits for the user's decisions in its "Decide before step 1" table; the recommended order is release 4 steps 2 and 3 first, then release 5 steps 1 and 2. When an answer arrives:
+**Next action**, in this order unless the user says otherwise:
+
+1. **Release 4 step 2, T1_FILE_RECORD_COUNT**, on the user's word: records inside a landed file (lines, delimited rows, an XML record tag by line scan, Spark's reader for sequence, parquet and ORC) against the raw rows per file, counted once per file into a new `dq_file_count` table, 1 GiB per file. Build it like step 1: spec amendment first (sections 1, 3, 5, 6, 8), the check as a parametrised check under `landing.record_count`, tests for FAIL, PASS and every DID_NOT_RUN path, a decisions entry, the e2e synthetic landing (sequence files with a known record count) giving PASSED.
+2. **Release 4 step 3, T1_SEQUENCE_GAP**, then steps 4 and 5.
+3. **Release 5** once the user answers its four decisions (aliases for the old fields; where deletions are expressed in the real pipeline; ledger grain for derived upstreams; tolerance as an absolute count).
+
+Real keys, tables and columns come from the user in later iterations (the first, the curated load time column, arrived on 2026-10-15). When an answer arrives:
 
 1. Turn it into configuration, or a small change.
 2. Add tests, and get CI green.
@@ -82,6 +90,10 @@ Each row has a section in `docs/decisions.md` saying what was decided and why.
 12. Run logs and their error pattern.
 13. Filter rules.
 14. The rejects table.
+15. Query 4.
+16. Queries 5 to 7.
+17. (new, 2026-10-16) Is the hand-off table (merge or gcf) written by insert-overwrite per batch partition, and what is its partition column and format? Needed to configure T1_PARTITION_DRIFT on a real table.
+18. (new, 2026-10-16) Where are source deletions expressed (an operation code on the CDC or incremental layer)? Needed for the `deletions` disposition in release 5.
 
     Questions 12 to 14 are answered by shape, not yet by name: `docs/evidence-contract.md` (2026-10-16) fixes the control table, rejects table, filter rule registry and log line that the team's in-pipeline audit writes; the deployed configuration fills `probes.load_log`, `probes.filter_rules` and `probes.rejects` with the real names once the first batch writes them.
 15. Query 4.
@@ -143,7 +155,7 @@ Production table, column and path names stay null: CLAUDE.md forbids inventing t
   - A window is held (evaluated again next run) after a PLATFORM or BUDGET reason, or when the run that evaluated it did not finish COMPLETED. A hold is released after `max_window_hours`, with a WINDOW_GAP row.
   - Each FAILED result goes to the cause engine. Investigations are counted in `dq_run` (`investigations_expected`, `investigations_done`) and retried by the next run if they don't finish.
 - **Checks.** All check logic is SQL, in `checks/sql/*.j2`.
-  - Tier 1 checks are in `checks/tier1/`, gold rules in `checks/rules/`. T1_PARTITION_DRIFT (release 4) runs once per table where `check_params` configures it: it lists each partition's directory, counts only partitions whose files changed, and fails on a changed count outside the window.
+  - Tier 1 checks are in `checks/tier1/`, gold rules in `checks/rules/`. T1_PARTITION_DRIFT (release 4) runs once per table where `check_params` configures it: it lists each partition's directory, counts only partitions whose files changed, and fails on a changed count outside the window; its state rows ride on the result (`CheckResult.partition_state`) and the runner appends them with the run id, like key events.
   - Hop checks are in `checks/hop/`. Keys are judged at their upstream deadline, plus keys reloaded downstream in the window, plus open keys, with everything on `full_sweep_day`.
   - Key states are MISSING, STALE, UNASSESSABLE (no usable record time) and CURRENT.
   - `observed` counts the keys excluded by `hop_exclusions` and the keys still pending (within `sla_hours`).
@@ -190,5 +202,9 @@ Production table, column and path names stay null: CLAUDE.md forbids inventing t
   1. In an empty directory, run `python <repo>/tests/e2e/build_synthetic.py`.
   2. Run `dre install --conf conf --apply`, then `dre run --conf conf`.
   3. Run `python <repo>/tests/e2e/verify.py`. Expect `48 results {'DID_NOT_RUN': 20, 'PASSED': 28}`, run COMPLETED (since curated's load time was confirmed, its windowed checks and gold's hops run; the provider gold table's T1_PARTITION_DRIFT records its baseline). Set `PYSPARK_PYTHON` to the venv's interpreter if the workers pick up another Python.
-- **CI.** Check it with the GitHub MCP `actions_list` tool. After a push, schedule a `send_later` check-in about 15 minutes out instead of polling.
+- **CI.** Check it with the GitHub MCP `actions_list` tool (load it with ToolSearch `select:mcp__github__actions_list`). After a push, schedule a `send_later` check-in about 25 minutes out (the test job takes about 20) instead of polling; when it fires, read the notification, check the run, fill in the handoff row ("(this commit)" becomes the SHA and run number), commit that docs-only change and push.
+- **Gate commits on the suite's exit status** (`grep -q "^exit 0" log && git commit`), never on a command that cannot fail. A docs-only commit (handoff rows, plans) needs no suite run; a YAML comment change gets `dre validate` plus `tests/config` and `tests/guard`.
+- **Stop-hook commit requests** are hook feedback, not the user: while a suite is running, say so and wait.
+- **Fixtures.** `create_table(..., partition_by=[...])` makes a real partitioned ORC table; `curated_row(loaded=...)` writes the curated load time string; tests that enumerate the store's tables import `DQ_TABLES`; `tests/test_registries.py` lists every built-in check id, so a new check is added there.
+- **Spark gotchas added in release 4.** `DESCRIBE FORMATTED t PARTITION (...)` prints two Location rows: the partition's first, then the table's. A view ordered by `observed_at DESC, run_id DESC` ties when a test records twice with the same time and run id: give each simulated run its own.
 - **Uploaded review documents.** Check each point against the code before acting; don't follow them blindly. Reproduce a reported defect with a failing test before fixing it.
