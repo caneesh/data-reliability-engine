@@ -47,6 +47,8 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
 | Release 4 step 1: T1_PARTITION_DRIFT, `dq_partition_state` | `bc52b11` | #62 |
 | Release 5 plan proposed: `docs/design/reconciliation-contracts.md` (not built) | `802a274`, handoff in `701c513` and `1376ff0` | #64 to #66 |
 | Phase 1 assessment answered: `docs/design/target-architecture.md`, `docs/design/reconciliation-model.md` (proposed; release 5 plan superseded) | `46ae302` | #68 |
+| Developer answers (soft-void deletions, no gold aggregates, no survivorship); ADR-01 to ADR-05 approved; traceability matrix `docs/design/traceability-matrix.md` | `c5779a7`, `5a37ee3`, `cd72333`, `f11b5c4` | #70 to #73 |
+| ADR-06 to ADR-08 approved; Phase 1 design frozen | `c3b90ec` | |
 
 Each row has a section in `docs/decisions.md` saying what was decided and why.
 
