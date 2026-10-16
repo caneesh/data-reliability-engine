@@ -1,6 +1,6 @@
 # Design: target architecture after the Phase 1 assessment (proposed)
 
-Status: proposed on 2026-10-16. Nothing here is built, and the design is **not frozen**. This document answers the Phase 1 foundational architecture assessment (16 October 2026, a static review; verdict "conditional, not ready for design freeze"). It has four parts:
+Status: proposed on 2026-10-16. **ADR-01, ADR-02 and ADR-05 were approved by the user on 2026-10-16**, together with section 3 (result states stay at three), on which ADR-01 relies. ADR-03, ADR-04 and ADR-06 to ADR-08 are still proposed. Nothing here is built, and the design is **not frozen**. This document answers the Phase 1 foundational architecture assessment (16 October 2026, a static review; verdict "conditional, not ready for design freeze"). It has four parts:
 
 - a verdict on each finding, checked against the repository;
 - the invariants;
@@ -11,7 +11,7 @@ Status: proposed on 2026-10-16. Nothing here is built, and the design is **not f
 
 **Recommended order:**
 
-1. Approve ADR-01, ADR-02 and ADR-05, which resolve the three critical findings.
+1. ~~Approve ADR-01, ADR-02 and ADR-05, which resolve the three critical findings.~~ Approved 2026-10-16.
 2. Approve ADR-03 and ADR-04.
 3. Build the traceability matrix (P1-12).
 4. Only then write code.
@@ -68,6 +68,8 @@ The trade-off: a dashboard that counts states alone will put an unsupported edge
 
 ### ADR-01: candidate and due populations, the disposition taxonomy, the scope of a PASS
 
+**Status: approved by the user, 2026-10-16.**
+
 **Decision.**
 
 - **Populations.** Candidate, due and pending populations are defined as in model section 2, and pending is outside the identity.
@@ -83,6 +85,8 @@ The trade-off: a dashboard that counts states alone will put an unsupported edge
 - Pending inside the ledger: rejected (P1-04).
 
 ### ADR-02: grain, identity, version and cardinality
+
+**Status: approved by the user, 2026-10-16.**
 
 **Decision.**
 
@@ -122,6 +126,8 @@ All of this is in model section 5.
 **Answered (2026-10-16).** Deletions are soft voids: a new version whose end date equals its effective date, with the row kept (model section 5). Hard deletes are not used by the member pipeline.
 
 ### ADR-05: event time, ingestion time, cutoff, SLA and replay modes
+
+**Status: approved by the user, 2026-10-16.**
 
 **Decision.**
 
@@ -183,7 +189,7 @@ All of this is in model section 5.
 
 | # | Criterion | Status |
 | --- | --- | --- |
-| 1 | Every critical finding resolved by an approved ADR | Proposed: ADR-01, ADR-02 and ADR-05 await approval |
+| 1 | Every critical finding resolved by an approved ADR | **Met**: ADR-01 (P1-01), ADR-02 (P1-02) and ADR-05 (P1-03) approved on 2026-10-16 |
 | 2 | The contract schema represents each required pipeline topology | Proposed: eight mapping kinds. `fan_out` is explicitly unsupported and visible |
 | 3 | The accounting identities and temporal semantics are unambiguous | Proposed: model sections 2, 3 and 8 |
 | 4 | Observability limits and evidence levels are enforceable | Proposed: ADR-06 (claim ceilings, blind spots in `dre validate`) |
@@ -192,12 +198,13 @@ All of this is in model section 5.
 
 ## 6. Decisions needed
 
-**From the user (approval):** ADR-01 to ADR-08, as written or amended. In particular:
+**From the user (approval).** Approved on 2026-10-16: ADR-01, ADR-02 and ADR-05, and with them:
 
-- that the result states stay at three (section 3);
-- that the reject policy defaults to defect;
-- that the tolerance is an absolute count on deficits only;
-- that today's RERUN and REPLAY are relabelled as current rechecks.
+- the result states stay at three (section 3);
+- the tolerance is an absolute count on deficits only (ADR-01);
+- today's RERUN and REPLAY are relabelled as current rechecks (ADR-05).
+
+Still to approve: ADR-03 and ADR-04 (among them, that the reject policy defaults to defect), then ADR-06 to ADR-08.
 
 **From the developer:**
 

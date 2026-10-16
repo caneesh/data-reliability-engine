@@ -452,6 +452,30 @@ The team is building a temporary in-pipeline audit (a control table, a rejects t
 6. **Sample config.** The synthetic provider gold table is partitioned by its merge date (`merge_dt`, a test-only column) and drift-checked, so the e2e run records a baseline (DID\_NOT\_RUN / insufficient\_history) and `verify.py` asserts it. The sample member-coverage gold stays unpartitioned: its real partition column is a platform value (spec section 11) and is not invented.
 7. **Retention** for `dq_partition_state` is 13 months, like the file registry.
 
+## Phase 1 ADRs approved: ADR-01, ADR-02, ADR-05 (2026-10-16)
+
+The user approved the three decisions that resolve the assessment's critical findings (`docs/design/target-architecture.md`), as written:
+
+1. **ADR-01 (P1-01, P1-04).**
+   - Candidate, due and pending populations, with pending outside the identity.
+   - Eleven dispositions in a fixed precedence, with an identity the engine asserts.
+   - Tolerance as an absolute count, on `missing`, `stale` and `divergent` only.
+   - A scope stored on every result.
+   - No chain-level claim until CHAIN_COMPLETENESS is built and tested.
+   - With it, section 3: **the result states stay at three** (PASSED, FAILED, DID_NOT_RUN). "Not assessable", "partial chain" and "unknown" are reasons or dispositions, not states, so hard constraint 4 stands unchanged.
+2. **ADR-02 (P1-02).**
+   - A `grain` block per dataset, and one mapping kind per edge.
+   - An unsupported kind is DID_NOT_RUN / `unsupported_mapping` on every run; `fan_out` stays unsupported.
+   - Transforms are one-directional.
+   - Key collisions from normalisers are detected at run time.
+   - Today's `key_map`, `winner_rule` and `owned_columns` become aliases.
+3. **ADR-05 (P1-03).**
+   - Every dataset declares its history class.
+   - Three evaluation modes: NORMAL; CURRENT_RECHECK, which today's RERUN and REPLAY become (labelled in the digest and the CLI); AS_OF_REPLAY, only on append-only or snapshot datasets with no partition drift since the cutoff.
+   - `execution_type` keeps its stored values, and a new `evaluation_mode` column carries the mode.
+
+Not built yet. Exit criterion 1 is met. Code waits for ADR-03 and ADR-04, and the traceability matrix comes before code (exit criterion 6). ADR-03, ADR-04 and ADR-06 to ADR-08 are still proposed.
+
 ## Developer answers on the reconciliation model (2026-10-16)
 
 Three facts for the proposed reconciliation model (`docs/design/reconciliation-model.md`), given by the user on 2026-10-16. Nothing is built from them yet; they settle the model's open points for the member pipeline.
