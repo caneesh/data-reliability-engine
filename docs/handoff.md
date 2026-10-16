@@ -40,12 +40,13 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
 | Developer question 1: curated load time is `cdc_upd_ts` (sample config, fixtures, e2e) | `1cd75e6` | #52 |
 | Curated load time format (`yyyy-MM-dd HH:mm:ss:SSSSSS`) and minute granularity | `5fc3365` | #54 |
 | Evidence contract for the team's in-pipeline audit (`docs/evidence-contract.md`) | `e029127` | #56 |
+| Release 4 plan proposed: `docs/design/outside-in-evidence.md` (not built) | (this commit) | |
 
 Each row has a section in `docs/decisions.md` saying what was decided and why.
 
 ## What is waiting
 
-**Next action:** the user said that real keys, tables and columns come in later iterations (the first, the curated load time column, arrived on 2026-10-15). Until more arrive, wait for the user. When an answer arrives:
+**Next action:** the user said that real keys, tables and columns come in later iterations (the first, the curated load time column, arrived on 2026-10-15). Until more arrive, wait for the user. A release 4 plan, `docs/design/outside-in-evidence.md` (five read-only checks that cover what the team's temporary in-pipeline audit sees from inside the jobs), is proposed and waits for the user's go-ahead on its order and its two cost decisions; build it in order, one step at a time, like release 3. When an answer arrives:
 
 1. Turn it into configuration, or a small change.
 2. Add tests, and get CI green.
