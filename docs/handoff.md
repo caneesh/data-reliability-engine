@@ -45,7 +45,7 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
 | Evidence contract for the team's in-pipeline audit (`docs/evidence-contract.md`) | `e029127` | #56 |
 | Release 4 plan proposed: `docs/design/outside-in-evidence.md` (not built) | `55857bd`, revised in `9719cc4` and `04dcc20` | #58 to #60 |
 | Release 4 step 1: T1_PARTITION_DRIFT, `dq_partition_state` | `bc52b11` | #62 |
-| Release 5 plan proposed: `docs/design/reconciliation-contracts.md` (not built) | (this commit) | |
+| Release 5 plan proposed: `docs/design/reconciliation-contracts.md` (not built) | `802a274`, handoff in `701c513` and `1376ff0` | #64 to #66 |
 
 Each row has a section in `docs/decisions.md` saying what was decided and why.
 
