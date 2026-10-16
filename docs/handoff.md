@@ -40,7 +40,7 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
 | Developer question 1: curated load time is `cdc_upd_ts` (sample config, fixtures, e2e) | `1cd75e6` | #52 |
 | Curated load time format (`yyyy-MM-dd HH:mm:ss:SSSSSS`) and minute granularity | `5fc3365` | #54 |
 | Evidence contract for the team's in-pipeline audit (`docs/evidence-contract.md`) | `e029127` | #56 |
-| Release 4 plan proposed: `docs/design/outside-in-evidence.md` (not built) | (this commit) | |
+| Release 4 plan proposed: `docs/design/outside-in-evidence.md` (not built) | `55857bd`, revised in `9719cc4` and `04dcc20` | #58 to #60 |
 
 Each row has a section in `docs/decisions.md` saying what was decided and why.
 
