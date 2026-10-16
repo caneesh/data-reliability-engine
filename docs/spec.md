@@ -698,8 +698,8 @@ Build in this order. Each step ends with its tests passing and is usable before 
 | Curated winner rule across loads | Within one load confirmed (`sourcelastupdatets DESC, enddate DESC`); across loads: developer question 2 |
 | Gold merge clause and dedupe | Developer question 3 |
 | CDC table and key | Not confirmed; developer question 4 |
-| Run logs location | Developer question 5 |
-| Filter rules and rejects table | Developer question 6 |
+| Run logs location | Developer question 5; the log line shape is fixed in `docs/evidence-contract.md` |
+| Filter rules and rejects table | Developer question 6; their shape is fixed in `docs/evidence-contract.md` |
 | Plan join for the gold key | Query 4 |
 | Rule baselines | Queries 5 to 7 |
 

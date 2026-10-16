@@ -39,6 +39,7 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
 | Verification batch 3b: retried investigations judge open keys, bounded landing and log reads, `landing.max_files`, daily retry cadence, watchdog exit codes, `dre trace --key-file` | `1594c4a` | #49 |
 | Developer question 1: curated load time is `cdc_upd_ts` (sample config, fixtures, e2e) | `1cd75e6` | #52 |
 | Curated load time format (`yyyy-MM-dd HH:mm:ss:SSSSSS`) and minute granularity | `5fc3365` | #54 |
+| Evidence contract for the team's in-pipeline audit (`docs/evidence-contract.md`) | (this commit) | |
 
 Each row has a section in `docs/decisions.md` saying what was decided and why.
 
@@ -77,6 +78,8 @@ Each row has a section in `docs/decisions.md` saying what was decided and why.
 12. Run logs and their error pattern.
 13. Filter rules.
 14. The rejects table.
+
+    Questions 12 to 14 are answered by shape, not yet by name: `docs/evidence-contract.md` (2026-10-16) fixes the control table, rejects table, filter rule registry and log line that the team's in-pipeline audit writes; the deployed configuration fills `probes.load_log`, `probes.filter_rules` and `probes.rejects` with the real names once the first batch writes them.
 15. Query 4.
 16. Queries 5 to 7.
 

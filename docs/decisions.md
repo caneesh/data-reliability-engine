@@ -431,6 +431,15 @@ Developer question 1 answered: the curated table's load time is `cdc_upd_ts`. Th
 4. **End-to-end.** The synthetic gold rows carry the curated version's record time, so the member feed's hops are healthy like the provider feed's, and `verify.py` asserts them.
 5. **Proving test.** `tests/replay/test_r04_to_r07_hops.py::test_curated_keys_are_judged_by_cdc_upd_ts_not_by_their_record_time`: a version updated 60 hours ago but written 12 hours ago is judged in this window; read by its record time it would not be.
 
+## Evidence contract (2026-10-16)
+
+The team is building a temporary in-pipeline audit (a control table, a rejects table, filter rules and audit log lines, written by each job). It is not part of DRE and nothing of it is built here; `docs/evidence-contract.md` fixes the shape of what it writes so that DRE's packaged probes read it by configuration alone:
+
+1. The rejects table fills `probes.rejects` (`table_contains`, cause REJECTED), the filter rule registry fills `probes.filter_rules` (`table_contains`, cause FILTERED, naming the rule id), the audit log line fills `probes.load_log` (`log_contains`, cause LOAD_ERROR). No engine change.
+2. The control table is not read by a packaged probe. Two generic capabilities are noted for later, not built: a stage-status probe (NOT_RUN, PIPELINE_STALLED from a missing or FAILED stage row) and a file record-count hop (the control row's `source_count` against the rows raw holds for the file).
+3. Names in the contract are placeholders (hard constraint 7); the deployed configuration carries the real ones. The sample feed's probe comments point at the contract.
+4. DRE's own run, SLA and watchdog checks stay in place whatever the audit reports: a pipeline cannot report its own non-run.
+
 ## Notes for later steps
 
 - **Step 4:** done: `dre dry-run` parses SQL fragments (`config/fragments.py`).
