@@ -49,7 +49,7 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
 | Phase 1 assessment answered: `docs/design/target-architecture.md`, `docs/design/reconciliation-model.md` (proposed; release 5 plan superseded) | `46ae302` | #68 |
 | Developer answers (soft-void deletions, no gold aggregates, no survivorship); ADR-01 to ADR-05 approved; traceability matrix `docs/design/traceability-matrix.md` | `c5779a7`, `5a37ee3`, `cd72333`, `f11b5c4` | #70 to #73 |
 | ADR-06 to ADR-08 approved; Phase 1 design frozen | `c3b90ec` | #74 |
-| Phase 1 build step 1: the contract schema and its validation (`grain`, `contracts`, protected queues, hop exclusions through the contract, `dre validate`'s hop report); checkpoint 1 in `docs/design/checkpoints.md` | (this commit) | |
+| Phase 1 build step 1: the contract schema and its validation (`grain`, `contracts`, protected queues, hop exclusions through the contract, `dre validate`'s hop report); checkpoint 1 in `docs/design/checkpoints.md` | `f9d86d4` | #76 |
 
 Each row has a section in `docs/decisions.md` saying what was decided and why.
 

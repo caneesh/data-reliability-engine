@@ -16,7 +16,7 @@ A checkpoint report states:
 
 ## Checkpoint 1: the contract schema and its validation (2026-10-16)
 
-**Status:** built; awaiting the user's review. **CI:** see the handoff's history table (row "Phase 1 build step 1"). **Proving tests:** `tests/config/test_contracts.py` (the schema, its rules, the aliases, the report) and `tests/checks/test_hop_contracts.py::test_a_contract_exclusion_counts_only_rows_loaded_while_it_is_effective` (a contract changes what the hop checks expect, and only as written).
+**Status:** built; awaiting the user's review. **CI:** run #76 on `f9d86d4`, green (`test`, `e2e`, `package`). **Proving tests:** `tests/config/test_contracts.py` (the schema, its rules, the aliases, the report) and `tests/checks/test_hop_contracts.py::test_a_contract_exclusion_counts_only_rows_loaded_while_it_is_effective` (a contract changes what the hop checks expect, and only as written).
 
 ### Planned against delivered
 
@@ -92,5 +92,5 @@ provider_roster_raw->provider_directory: dedup (from key_map)
 ### Gate to step 2 (commit rows, ADR-07)
 
 1. The user ratifies deviations D1 to D6, or asks for changes.
-2. CI is green on the step 1 commit (the handoff's history table).
+2. ~~CI is green on the step 1 commit.~~ Run #76, green.
 3. Nothing else blocks step 2. The open inputs (DRE's queue name, the kill switch's path and owner, developer questions 17 and 19, curated's history class) are needed by later steps, not by step 2.
