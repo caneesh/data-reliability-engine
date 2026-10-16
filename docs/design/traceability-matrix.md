@@ -56,7 +56,7 @@ Every criterion below is met **per hop**: one dataset against one upstream, for 
 | IN5 | An unobservable cause is never labelled confirmed | U | Causes are CONFIRMED only by a cause check, and suspected by elimination (`causes/test_causes.py`) | Ceilings for reported evidence (ADR-06) |
 | IN6 | The earliest observed gap is not necessarily the originating defect | D, U | `dre trace` names the first hop with a gap (`test_trace.py`) | Its wording says "gap", but the digest has no explicit statement that this is not the origin |
 | IN7 | Every result is reproducible against its evidence snapshot, or labelled a current recheck | D (ADR-05, approved); C partly | RERUN and REPLAY print that they are not a snapshot (`runner.py`); `test_execution_types.py::test_a_rerun_of_an_older_window_does_not_become_the_current_result` | No `evaluation_mode` column, no digest label, no AS_OF_REPLAY |
-| IN8 | An incomplete evidence write never becomes a visible complete PASS | D (ADR-07, proposed) | See AC6 | A process death between writes. Commit rows are not built |
+| IN8 | An incomplete evidence write never becomes a visible complete PASS | D (ADR-07, approved) | See AC6 | A process death between writes. Commit rows are not built |
 
 ## 4. Proof scenarios (`docs/design/reconciliation-model.md`, section 10)
 
@@ -96,13 +96,13 @@ All are at level D. Each row names the build step (`docs/design/target-architect
 | Soft-void deletion (end date = effective date), `deleted_not_applied` | 04 | 1, 3 |
 | The `history` class; the `evaluation_mode` column; CURRENT_RECHECK labels; AS_OF_REPLAY | 05 | 4 |
 
-## 6. Proposed, not approved (ADR-06 to ADR-08)
+## 6. Approved, not built (ADR-06 to ADR-08)
 
 | Element | ADR | Level |
 | --- | --- | --- |
-| Five evidence levels and claim ceilings on dispositions and results | 06 | D (proposed) |
-| `dq_commit` and committed-only views | 07 | D (proposed) |
-| Run budget, queue, concurrency cap, kill switch, backpressure, load test | 08 | D (proposed) |
+| Five evidence levels and claim ceilings on dispositions and results | 06 | D. Build steps 3 and 6 |
+| `dq_commit` (per batch of evaluations) and committed-only views | 07 | D. Build step 2 |
+| Run budget (40 minutes), queue (never the high-priority one), concurrency cap, kill switch, backpressure, load test | 08 | D. Build step 8; the load test is O |
 
 ## 7. What the matrix says
 

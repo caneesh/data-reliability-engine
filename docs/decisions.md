@@ -492,7 +492,18 @@ Not built yet. Exit criterion 1 is met.
    - **Deletions** are a declared tombstone rule. For the member pipeline that is the soft void below.
    - The pipeline's own filter registry never authorises an exclusion.
 
-The traceability matrix comes before code (exit criterion 6). ADR-06 to ADR-08 are still proposed.
+The traceability matrix comes before code (exit criterion 6).
+
+**Then ADR-06 to ADR-08, approved the same day** ("I approve all"). With them every exit criterion is met, and the Phase 1 design is frozen. A later change needs a new entry here.
+
+6. **ADR-06.** Five evidence levels (observed, reconstructed, reported, inferred, unavailable) on every disposition count, cause line and result. A claim is capped by its weakest evidence. Reported evidence (the team's audit) counts only under policy. Blind spots are listed.
+7. **ADR-07.** Evidence, then the result, then a commit row in `dq_commit`; the views show only committed evaluations. Amended on approval: **one commit row per batch of evaluations**, written after all their evidence and results, to avoid a small Hive file per evaluation. It is built first among the store changes (build step 2).
+8. **ADR-08.**
+   - **Run budget:** `run_budget_minutes` defaults to **40**, with on-time and completeness checks first when it runs out.
+   - **Queue:** a dedicated YARN queue whose name the user will provide (left `null` until then). DRE **never runs in the cluster's high-priority queue**, which the production pipelines use. Its name is a production value, so it is kept only in deployed configuration (hard constraint 7), and `dre validate` will refuse a queue on the deployment's `protected_queues` list.
+   - **Kill switch:** a file path in configuration. Its path and owner are deployment values, left `null`.
+   - **Backpressure:** at 80% of the budget the next run defers the full sweep.
+   - **Load test:** on a representative cluster, which needs the platform team.
 
 ## Developer answers on the reconciliation model (2026-10-16)
 

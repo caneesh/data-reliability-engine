@@ -1,6 +1,6 @@
 # Design: target architecture after the Phase 1 assessment (proposed)
 
-Status: proposed on 2026-10-16. **ADR-01 to ADR-05 were approved by the user on 2026-10-16**, together with section 3 (result states stay at three), on which ADR-01 relies. ADR-06 to ADR-08 are still proposed. Nothing here is built, and the design is **not frozen**. This document answers the Phase 1 foundational architecture assessment (16 October 2026, a static review; verdict "conditional, not ready for design freeze"). It has four parts:
+Status: **approved and frozen on 2026-10-16.** The user approved ADR-01 to ADR-08 that day, together with section 3 (result states stay at three), and every Phase 1 exit criterion is met (section 5). Nothing here is built yet; section 7 is the build order. A change to an approved decision needs a new decision entry in `docs/decisions.md`. This document answers the Phase 1 foundational architecture assessment (16 October 2026, a static review; verdict "conditional, not ready for design freeze"). It has four parts:
 
 - a verdict on each finding, checked against the repository;
 - the invariants;
@@ -14,7 +14,7 @@ Status: proposed on 2026-10-16. **ADR-01 to ADR-05 were approved by the user on 
 1. ~~Approve ADR-01, ADR-02 and ADR-05, which resolve the three critical findings.~~ Approved 2026-10-16.
 2. ~~Approve ADR-03 and ADR-04.~~ Approved 2026-10-16.
 3. ~~Build the traceability matrix (P1-12).~~ Done: `docs/design/traceability-matrix.md`.
-4. Only then write code.
+4. Only then write code. All three done on 2026-10-16: the build can start (section 7).
 
 Release 4 (`docs/design/outside-in-evidence.md`) step 1 is built. Steps 2 onward wait with everything else, except step 2 (file record count): the expected results for proof scenario 9 depend on it.
 
@@ -148,6 +148,8 @@ All of this is in model section 5.
 
 ### ADR-06: evidence levels, unknown states and permitted claims
 
+**Status: approved by the user, 2026-10-16.**
+
 **Decision.** There are five evidence levels. They are attached to every disposition count, every cause line and every result's scope:
 
 | Level | Meaning | Example | May support |
@@ -162,9 +164,11 @@ All of this is in model section 5.
 
 ### ADR-07: transactional publication of evidence
 
+**Status: approved by the user, 2026-10-16.**
+
 **Decision.**
 
-- **Write order.** Each evaluation writes its evidence first (key events, disposition counts, partition state, exception keys), then its result row, then one **commit row**. The commit row goes to a new append-only table `dq_commit` (run id, evaluation id, the row count written to each evidence table).
+- **Write order.** Each evaluation writes its evidence first (key events, disposition counts, partition state, exception keys), then its result row, then one **commit row**. The commit row goes to a new append-only table `dq_commit` (run id, evaluation id, the row count written to each evidence table). **Commit rows are written per batch of evaluations** (amended on approval): one append covers every evaluation whose evidence and result are already stored. This is as safe as a row per evaluation, because nothing in the batch is visible before the append, and it avoids a small Hive file per evaluation.
 - **What is visible.** Every view that exposes current state (`v_latest_result`, `v_open_keys`, `v_latest_partition_state`, and the new reconciliation views) shows only rows of committed evaluations.
 - **Failures.** A crash anywhere before the commit leaves the evaluation invisible. The run is not COMPLETED, so its window is held and the next run evaluates it again.
 - **Idempotency.** Deterministic evaluation ids keep the retry idempotent.
@@ -178,12 +182,14 @@ All of this is in model section 5.
 
 ### ADR-08: operational isolation and security
 
+**Status: approved by the user, 2026-10-16.**
+
 **Decision.**
 
-- **Budgets.** A run-level budget (`run_budget_minutes`) on top of the per-check budget. Checks beyond the run budget are DID_NOT_RUN / BUDGET, in a fixed priority order: freshness and completeness first.
-- **Queue.** A dedicated YARN queue with a capped share (a platform value, left `null` until confirmed).
+- **Budgets.** A run-level budget (`run_budget_minutes`, default **40** of the hourly run) on top of the per-check budget. Checks beyond the run budget are DID_NOT_RUN / BUDGET, in a fixed priority order: on-time and completeness first, value checks after.
+- **Queue.** A dedicated YARN queue with a capped share. Its name is a platform value, left `null` until the user provides it. **DRE never runs in the cluster's high-priority queue** (user, 2026-10-16): that queue belongs to the production pipelines. Its name is a production value, so it is kept only in the deployed configuration, never in this repository. `dre validate` will refuse a configured queue that is on the deployment's `protected_queues` list.
 - **Concurrency.** At most N concurrent Spark jobs per run.
-- **Kill switch.** A kill switch read at start and between checks: a file path in config. When it is present, the run ends PARTIAL with every remaining check DID_NOT_RUN / `disabled`. No pipeline is touched either way.
+- **Kill switch.** A kill switch read at start and between checks: a file path in config. When it is present, the run ends PARTIAL with every remaining check DID_NOT_RUN / `disabled`. No pipeline is touched either way. The path and who may create the file are deployment values (left `null` until named).
 - **Backpressure.** When the previous run used over 80% of its budget, the next run defers the weekly full sweep.
 - **Security.** It stays as today: HMAC keys, no `key_value` outside the store, the secret from a file.
 
@@ -196,7 +202,7 @@ All of this is in model section 5.
 | 1 | Every critical finding resolved by an approved ADR | **Met**: ADR-01 (P1-01), ADR-02 (P1-02) and ADR-05 (P1-03) approved on 2026-10-16 |
 | 2 | The contract schema represents each required pipeline topology | **Met on paper**: eight mapping kinds (ADR-02, ADR-03, approved). `fan_out` is explicitly unsupported and visible. The member pipeline needs `identity`/`dedup`/`merge` and `union_partition`; whether it needs `join_contribution` is developer question 19 |
 | 3 | The accounting identities and temporal semantics are unambiguous | **Met on paper**: model sections 2, 3 and 8 (ADR-01, ADR-05, approved) |
-| 4 | Observability limits and evidence levels are enforceable | **Open**: ADR-06 (claim ceilings, blind spots in `dre validate`) awaits approval |
+| 4 | Observability limits and evidence levels are enforceable | **Met on paper**: ADR-06 approved on 2026-10-16 (claim ceilings, blind spots in `dre validate`) |
 | 5 | Each proof scenario has an expected result | Done on paper: model section 10 |
 | 6 | A traceability matrix separates proposed from implemented and tested behaviour | **Done**: `docs/design/traceability-matrix.md` (2026-10-16). It is kept current by each build step |
 
@@ -208,7 +214,7 @@ All of this is in model section 5.
 - the tolerance is an absolute count on deficits only (ADR-01);
 - today's RERUN and REPLAY are relabelled as current rechecks (ADR-05).
 
-Then approved, the same day: ADR-03 and ADR-04, including that the reject policy defaults to defect. Still to approve: ADR-06 to ADR-08.
+Then approved, the same day: ADR-03 and ADR-04, including that the reject policy defaults to defect; then ADR-06 to ADR-08, with commit rows per batch, a 40-minute run budget, and on-time and completeness checks first.
 
 **From the developer:**
 
@@ -223,7 +229,8 @@ Answered on 2026-10-16 (`docs/decisions.md`, "Developer answers on the reconcili
 
 **From the platform team:**
 
-- the YARN queue;
+- the YARN queue for DRE (the user will provide it; never the high-priority queue);
+- the kill switch's path and who may use it;
 - whether any layer is genuinely append-only (needed for AS_OF_REPLAY);
 - a representative cluster for the load test.
 
