@@ -16,7 +16,7 @@ A checkpoint report states:
 
 ## Checkpoint 1: the contract schema and its validation (2026-10-16)
 
-**Status:** built; awaiting the user's review. **CI:** run #76 on `f9d86d4`, green (`test`, `e2e`, `package`). **Proving tests:** `tests/config/test_contracts.py` (the schema, its rules, the aliases, the report) and `tests/checks/test_hop_contracts.py::test_a_contract_exclusion_counts_only_rows_loaded_while_it_is_effective` (a contract changes what the hop checks expect, and only as written).
+**Status:** built; **ratified by the user on 2026-10-17, approved with conditions** (below, "Ratification"). **CI:** run #76 on `f9d86d4`, green (`test`, `e2e`, `package`). **Proving tests:** `tests/config/test_contracts.py` (the schema, its rules, the aliases, the report) and `tests/checks/test_hop_contracts.py::test_a_contract_exclusion_counts_only_rows_loaded_while_it_is_effective` (a contract changes what the hop checks expect, and only as written).
 
 ### Planned against delivered
 
@@ -72,12 +72,13 @@ Each is recorded in `docs/decisions.md`, and the reconciliation model document n
 From `dre validate --conf conf`:
 
 ```
-example_curated_enrollment->gold_member_coverage: union_partition (contract)
+example_curated_enrollment->gold_member_coverage: union_partition (declared)
   attribution (each row here owned by exactly one source) is not proven until build step 5
   deletions declared (soft); counted as deleted from build step 3
   as-of replay unavailable: example_curated_enrollment does not declare grain.history
   as-of replay unavailable: gold_member_coverage is mutable
-provider_roster_raw->provider_directory: dedup (from key_map)
+provider_roster_raw->provider_directory: dedup (inferred from key_map)
+  kind dedup is inferred from key_map, not declared: its results can never claim contract-proven completeness
   deletions not modelled: a deleted record is judged like any other version
   as-of replay unavailable: provider_directory is mutable
 ```
@@ -94,3 +95,25 @@ provider_roster_raw->provider_directory: dedup (from key_map)
 1. The user ratifies deviations D1 to D6, or asks for changes.
 2. ~~CI is green on the step 1 commit.~~ Run #76, green.
 3. Nothing else blocks step 2. The open inputs (DRE's queue name, the kill switch's path and owner, developer questions 17 and 19, curated's history class) are needed by later steps, not by step 2.
+
+### Ratification (the user, 2026-10-17)
+
+**Decision: approved with conditions.**
+
+- **D1 to D5** are approved as documented.
+- **D6** is approved for backward compatibility, on four conditions:
+  1. An inferred mapping kind must be distinguishable from an explicitly declared contract.
+  2. A legacy dedup inference must not establish contract-proven completeness.
+  3. A derived aggregate inference must not authorise aggregation reconciliation without an explicit, validated aggregation rule.
+  4. Validation and result reporting must keep unsupported mappings and evidence limits visible.
+- **The remaining step 1 gaps** are accepted as temporary, each to be resolved at its assigned checkpoint.
+- **Step 2** (ADR-07 commit rows and committed-only views) is authorised, once these conditions are recorded in the decision log (`docs/decisions.md`, "Checkpoint 1 ratified").
+- **Step 2 acceptance** requires failure-injection and recovery tests proving that no incomplete evaluation becomes visible as a committed result.
+- **Scope of the approval.** It is not an independent verification of CI run #76 or of the source code.
+
+| Condition | Met now | Enforced later |
+| --- | --- | --- |
+| 1. Inferred is distinguishable | `Hop.declared`. `dre validate` labels every hop "declared" or "inferred from key_map", and an inferred hop carries its own blind-spot line (`config/test_contracts.py::test_validate_prints_each_hop_its_kind_and_its_blind_spots`) | Each result's scope records it (step 3) |
+| 2. No contract-proven completeness from an inferred dedup | The blind-spot line says so | The ledger (step 3) writes a result's claim as contract-proven only for a declared contract. An inferred hop's result is scoped "inferred contract", and CHAIN_COMPLETENESS (step 6) treats such a hop as below the claim level, so a chain through it is `partial_chain` |
+| 3. No aggregation reconciliation from an inferred aggregate | A blind-spot line on an inferred aggregate hop (`config/test_contracts.py::test_a_hop_without_a_contract_resolves_from_the_release_1_fields`). Today's group-level hop checks (release 2) keep running unchanged | The ledger reconciles an aggregate hop only under a declared `mapping: aggregate`, whose derived definition validation has checked (step 3) |
+| 4. Unsupported mappings and evidence limits stay visible | `dre validate` warnings and blind spots | DID_NOT_RUN / `unsupported_mapping` and blind spots on each result's scope (step 3); evidence levels (steps 3 and 6) |

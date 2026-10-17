@@ -86,6 +86,7 @@ Level D unless the row says otherwise. Each row names the build step (`docs/desi
 | Scope columns on results; `dq_reconciliation` | 01 | D | | 3 |
 | No chain claim before CHAIN_COMPLETENESS | 01 | D | `docs/architecture.md` scope note | 6 |
 | The `grain` block; mapping kinds and their rules; aliases for today's fields; each hop's blind spots in `dre validate` | 02 | **U** | `config/test_contracts.py` (every case), `::test_a_hop_without_a_contract_resolves_from_the_release_1_fields`, `::test_validate_prints_each_hop_its_kind_and_its_blind_spots`; `checks/test_hop_contracts.py::test_the_alias_and_an_equivalent_contract_judge_alike`; the `e2e` job (sample with a declared contract, results unchanged) | 1 (done) |
+| Inferred kinds told apart from declared contracts; never contract-proven (D6 conditions 1 to 3, 2026-10-17) | 02 | **U** (validation and report) | `config/test_contracts.py::test_validate_prints_each_hop_its_kind_and_its_blind_spots`, `::test_a_hop_without_a_contract_resolves_from_the_release_1_fields` | 3 (result scope), 6 (chain) |
 | DID_NOT_RUN / `unsupported_mapping` at run time | 02 | D (today a `dre validate` warning, and an error if such a hop is keyed) | `config/test_contracts.py::test_kinds_judged_later_or_never_are_warnings_never_silent` | 3 |
 | Run-time key collision detection | 02 | D | | 3 |
 | One-directional transforms with expressions | 02 | D | | 3 |

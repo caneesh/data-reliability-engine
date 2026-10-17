@@ -505,6 +505,28 @@ The traceability matrix comes before code (exit criterion 6).
    - **Backpressure:** at 80% of the budget the next run defers the full sweep.
    - **Load test:** on a representative cluster, which needs the platform team.
 
+## Checkpoint 1 ratified, with conditions (2026-10-17)
+
+The user ratified checkpoint 1 (`docs/design/checkpoints.md`) as "approved with conditions".
+
+1. **D1 to D5 approved** as documented: the grain without a repeated key or version; conditions that parse their own dates; `applied_as` with `soft_when`; reject reasons as `{disposition, max_share}`; the union attribution as the dataset's `feed_filter`.
+2. **D6 approved for backward compatibility**, on four conditions that bind every later step:
+   1. **Inferred is distinguishable from declared.** Done in step 1:
+      - `Hop.declared`;
+      - `dre validate` labels each hop "declared" or "inferred from key_map";
+      - an inferred hop's blind spots say that its results can never claim contract-proven completeness.
+   2. **An inferred dedup never establishes contract-proven completeness.**
+      - The ledger (step 3) marks a result's claim as contract-proven only under a declared contract. Otherwise it is scoped "inferred contract".
+      - CHAIN_COMPLETENESS (step 6) treats an inferred hop as below the claim level, so a chain through it is at best `partial_chain`.
+   3. **An inferred aggregate never authorises aggregation reconciliation.**
+      - The ledger reconciles an aggregate hop only under a declared `mapping: aggregate` whose derived definition passed validation.
+      - Today's release 2 group-level hop checks keep running, as before.
+      - In step 1, an inferred aggregate hop carries a blind-spot line saying so.
+   4. **Unsupported mappings and evidence limits stay visible**, in validation (step 1: warnings and blind spots) and in result reporting (step 3: DID_NOT_RUN / `unsupported_mapping`, and blind spots on each result's scope).
+3. **The remaining step 1 gaps** are accepted as temporary, each to be resolved at its assigned checkpoint (the checkpoint's "Left for later steps" column).
+4. **Step 2 is authorised**: ADR-07 commit rows and committed-only views. **Its acceptance requires failure-injection and recovery tests** proving that no incomplete evaluation becomes visible as a committed result.
+5. **The approval is not an independent verification** of CI run #76 or of the source code, and is not to be cited as one.
+
 ## Phase 1 build step 1: the contract schema and its validation (2026-10-16)
 
 `docs/design/target-architecture.md` section 7, step 1. The user asked for it to be "an architectural checkpoint, a controlled implementation phase": `docs/design/checkpoints.md` is the checkpoint report, and step 2 waits for the user's review.

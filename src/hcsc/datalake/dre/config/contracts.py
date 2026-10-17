@@ -5,7 +5,9 @@ when there is one; otherwise it is read from the release 1 fields, which stay va
 `key_map` (an identity or dedup hop), `hop_exclusions` (one legacy exclusion, unversioned and
 unapproved), `winner_rule` (the version rule) and `owned_columns` (identity transforms). A hop with
 no contract entry is `aggregate` when its upstream is derived and `dedup` otherwise: that is what
-the hop checks judge, the latest upstream version of each key.
+the hop checks judge, the latest upstream version of each key. An inferred kind is told apart
+from a declared one everywhere (`Hop.declared`, the report, the blind spots), and never supports a
+contract-proven claim (D6, ratified 2026-10-17 with conditions; docs/decisions.md).
 
 `blind_spots` lists what the engine cannot yet see or prove on a hop, from configuration alone:
 `dre validate` prints it, so nobody assumes coverage that is not there (ADR-06).
@@ -83,6 +85,12 @@ def exclusion_text(hop: Hop) -> str:
 def blind_spots(config: Config, hop: Hop) -> list[str]:
     """What the engine cannot see or prove on this hop yet, in plain words."""
     c, spots = hop.contract, []
+    if not hop.declared:  # D6, ratified 2026-10-17 with conditions: an inferred kind proves nothing by contract
+        spots.append(f"kind {c.mapping} is inferred from key_map, not declared: its results can never claim "
+                     "contract-proven completeness")
+        if c.mapping == "aggregate":
+            spots.append("aggregation is not reconciled by contract until a contract declares mapping: aggregate "
+                         "(today's group-level hop checks still run)")
     if c.mapping in UNSUPPORTED:
         spots.append(f"{c.mapping} cannot be judged: one upstream record to several records here "
                      "(unsupported_mapping)")
@@ -124,7 +132,7 @@ def contract_report(config: Config) -> list[str]:
     if found:
         lines.append(f"contracts: {len(found)} hop(s)")
     for hop in found:
-        source = "contract" if hop.declared else "from key_map"
+        source = "declared" if hop.declared else "inferred from key_map"
         lines.append(f"  {hop.label}: {hop.contract.mapping} ({source})")
         lines.extend(f"    blind spot: {spot}" for spot in blind_spots(config, hop))
     return lines

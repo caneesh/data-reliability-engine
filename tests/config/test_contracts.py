@@ -55,6 +55,13 @@ def test_a_hop_without_a_contract_resolves_from_the_release_1_fields() -> None:
     hop = hop_contract(config.datasets, legacy, "example_curated_enrollment")
     assert (hop.contract.mapping, hop.legacy_exclusion, hop.exclusions) == ("dedup", "status = 'TEST'", [])
     assert any("no id, version, approval or volume guard" in s for s in blind_spots(config, hop))
+    derived = config.datasets["provider_roster_raw"].model_copy(
+        update={"table": None, "derived": {"from": "provider_directory", "group_by": {"provider_id": "provider_id"}}})
+    inferred = hop_contract({**config.datasets, "provider_roster_raw": derived}, config.datasets["provider_directory"],
+                            "provider_roster_raw")
+    assert (inferred.declared, inferred.contract.mapping) == (False, "aggregate")
+    assert any("aggregation is not reconciled by contract until a contract declares" in s
+               for s in blind_spots(config, inferred))  # D6 condition 3
     assert [h.label for h in hops(config)] == ["example_curated_enrollment->gold_member_coverage",
                                                "provider_roster_raw->provider_directory"]
 
@@ -63,11 +70,15 @@ def test_validate_prints_each_hop_its_kind_and_its_blind_spots(capsys: pytest.Ca
     assert main(["validate", "--conf", str(SAMPLE_CONF)]) == 0
     out = capsys.readouterr().out
     assert "contracts: 2 hop(s)" in out
-    assert "  example_curated_enrollment->gold_member_coverage: union_partition (contract)" in out
-    assert "  provider_roster_raw->provider_directory: dedup (from key_map)" in out
+    assert "  example_curated_enrollment->gold_member_coverage: union_partition (declared)" in out
+    assert "  provider_roster_raw->provider_directory: dedup (inferred from key_map)" in out
     assert "blind spot: attribution (each row here owned by exactly one source) is not proven until build step 5" in out
     assert "blind spot: as-of replay unavailable: gold_member_coverage is mutable" in out
     assert "blind spot: deletions not modelled" in out  # the provider hop declares none
+    # D6 conditions 1 and 2 (2026-10-17): an inferred kind is labelled, and says it proves nothing by contract
+    assert "blind spot: kind dedup is inferred from key_map, not declared: its results can never claim " \
+        "contract-proven completeness" in out
+    assert out.count("is inferred from key_map") == 1  # the declared gold hop does not carry it
 
 
 # (id, file, old, new, field, line needle, problem contains, fix contains)
