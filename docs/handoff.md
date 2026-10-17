@@ -1,4 +1,4 @@
-# Handoff: where the build stands (2026-10-16)
+# Handoff: where the build stands (2026-10-17)
 
 Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec.md` (the source of truth), `docs/decisions.md` (every assumption, with its reason) and `docs/architecture.md` (guarantees and limits). This file only says where things stand and what is waiting.
 
@@ -9,10 +9,16 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
 - **Release 1** (spec section 10, steps 1 to 11) is done. It was then extended by two code reviews and an architecture review.
 - **Release 2** has started. Derived datasets (join and aggregate hops) are built.
 - **Release 3** (extensibility) is built: the eight-step plan in `docs/design/extensibility.md`, agreed by the user, built in order; each step has a spec amendment and a `docs/decisions.md` entry, and `docs/extending.md` is the how-to.
-- **Release 4** (outside-in evidence, `docs/design/outside-in-evidence.md`) is agreed and has started: step 1 of 6 (T1_PARTITION_DRIFT) is built; step 2 (T1_FILE_RECORD_COUNT, 1 GiB per-file cap agreed) is next.
-- **Phase 1 architecture assessment (2026-10-16).** An external static review found the design not ready to freeze: 12 findings, 3 critical (completeness claim beyond the contract, identity and grain, historical replay). The answer is `docs/design/target-architecture.md` (finding-by-finding verdicts checked against the repo, invariants, ADR-01 to ADR-08, exit criteria) and `docs/design/reconciliation-model.md` (populations, dispositions and their identity, mapping kinds, exclusions, rejects, deletions, multi-source shapes, lineage and chain, time modes, five worked examples, expected results for the ten proof scenarios). Both proposed, nothing built; they supersede the release 5 plan `docs/design/reconciliation-contracts.md`.
+- **Release 4** (outside-in evidence, `docs/design/outside-in-evidence.md`) is agreed and has started: step 1 of 6 (T1_PARTITION_DRIFT) is built; step 2 (T1_FILE_RECORD_COUNT, 1 GiB per-file cap agreed) is next in that plan, but the Phase 1 build order comes first unless the user says otherwise.
+- **Phase 1 design: approved, frozen, and being built step by step (the current work).**
+  - **The assessment.** An external static review (2026-10-16) found 12 findings, 3 of them critical. The answer is `docs/design/target-architecture.md`: verdicts on each finding, invariants, ADR-01 to ADR-08, exit criteria and the build order. `docs/design/reconciliation-model.md` is the model: populations, 11 dispositions, mapping kinds, exclusions, rejects, deletions, multi-source shapes, the chain, time modes, examples and the 10 proof scenarios.
+  - **Approval.** The user approved all eight ADRs on 2026-10-16, and the design is frozen. `docs/design/traceability-matrix.md` maps every requirement to its code and tests.
+  - **Controlled implementation.** Each build step ends at an architectural checkpoint (`docs/design/checkpoints.md`): plan against delivered, conformance by ADR, deviations to ratify, invariants, evidence, risks, the gate. Then **stop for the user's review**. Each step also updates `docs/design/implementation.md` (how it is built) and the matrix in the same commit.
+  - **Step 1** (the contract schema and its validation) is built (`f9d86d4`, CI #76). **Checkpoint 1 was ratified on 2026-10-17, approved with conditions.** D1 to D5 are approved. D6, inferring a hop's kind from `key_map`, is approved for backward compatibility on four conditions that bind steps 3 and 6 (`docs/decisions.md`, "Checkpoint 1 ratified").
+  - **Step 2** (commit rows and committed-only views, ADR-07) is built (`d8db1ad`, CI #79 pending at handoff). **Checkpoint 2 awaits the user's review of decisions E1 to E6.** Its acceptance tests, failure injection at four write boundaries plus recovery, are in `tests/test_commit_protocol.py`.
+  - **Step 3** (HOP_LEDGER and `dq_reconciliation`) is next, only on the user's word, after checkpoint 2 is ratified.
 - **Context from 2026-10-15 and 16.** The user's team is building a temporary in-pipeline audit (control table, rejects table, filter rule ids, audit log lines) that modifies the jobs; DRE stays outside the jobs. `docs/evidence-contract.md` fixes what that audit writes so DRE's probes read it by configuration (also a Claude Doc, "DRE Evidence Contract"). A feature catalogue of the engine is a Claude Doc, "DRE: Feature Catalogue" (https://claude.ai/code/artifact/4831d1d5-a7fd-427e-9a49-e67b4dc62e39). The real flow: a scheduled process loads HDFS files up to a hand-off layer (merge or gcf), a continuous process moves them into gold temp, and gold main merges on its own schedule; whether the hand-off table is written by insert-overwrite per batch partition is still unknown (it decides where partition drift matters first).
-- **Tests:** 746, all passing (`pytest --collect-only -q | tail -1` gives the exact count). A full local run takes about 20 minutes; CI about 15. Replay scenarios R01 to R13 all pass, plus a three-layer acceptance test.
+- **Tests:** 746 (`pytest --collect-only -q | tail -1` gives the exact count). A full local run takes about 25 minutes; CI about 20. Replay scenarios R01 to R13 all pass, plus a three-layer acceptance test. Proof scenarios R14 to R23 are planned (traceability matrix, section 4); PS8 is already covered by `tests/test_commit_protocol.py`.
 
 ## History, in order (each step green in CI)
 
@@ -50,8 +56,10 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
 | Developer answers (soft-void deletions, no gold aggregates, no survivorship); ADR-01 to ADR-05 approved; traceability matrix `docs/design/traceability-matrix.md` | `c5779a7`, `5a37ee3`, `cd72333`, `f11b5c4` | #70 to #73 |
 | ADR-06 to ADR-08 approved; Phase 1 design frozen | `c3b90ec` | #74 |
 | Phase 1 build step 1: the contract schema and its validation (`grain`, `contracts`, protected queues, hop exclusions through the contract, `dre validate`'s hop report); checkpoint 1 in `docs/design/checkpoints.md` | `f9d86d4` | #76 |
-| Checkpoint 1 ratified with conditions (D6 conditions bind steps 3 and 6); inferred hop kinds labelled | `5e7830f` | |
-| Phase 1 build step 2: commit rows and committed-only views (ADR-07), failure-injection tests; checkpoint 2 | (this commit) | |
+| Checkpoint 1 ratified with conditions (D6 conditions bind steps 3 and 6); inferred hop kinds labelled | `5e7830f` | #78 |
+| Phase 1 build step 2: commit rows and committed-only views (ADR-07), failure-injection tests; checkpoint 2 | `d8db1ad` | #79 (running at handoff) |
+| Implementation guide `docs/design/implementation.md` (steps 1 and 2) | `029bdda` | #80 (running at handoff) |
+| Handoff for compaction | (this commit) | |
 
 Each row has a section in `docs/decisions.md` saying what was decided and why.
 
@@ -59,10 +67,40 @@ Each row has a section in `docs/decisions.md` saying what was decided and why.
 
 **Next action**, in this order unless the user says otherwise:
 
-0. **The Phase 1 design is approved and frozen** (2026-10-16: ADR-01 to ADR-08, every exit criterion met; `docs/design/target-architecture.md`). Build in the order of its section 7, step by step on the user's word. **Each step ends at an architectural checkpoint** (the user's instruction, 2026-10-16), and updates `docs/design/implementation.md` (how it is implemented: modules, data flow, tables, views, tests) in the same commit: a report in `docs/design/checkpoints.md` (scope against plan, conformance by ADR, deviations to ratify, invariants re-verified, evidence, risks, the gate to the next step), then stop for the user's review. Step 1 (contract schema and validation) is built, and checkpoint 1 was ratified with conditions on 2026-10-17 (`docs/decisions.md`, "Checkpoint 1 ratified": the four D6 conditions bind steps 3 and 6). Step 2 (commit rows, ADR-07) is built: checkpoint 2 awaits review (its acceptance tests are `tests/test_commit_protocol.py`). Step 3 (HOP_LEDGER) is next, on the user's word, bound by the D6 conditions. The traceability matrix (`docs/design/traceability-matrix.md`) is updated by each step in the same commit. Pending values, none blocking step 1: DRE's YARN queue (the user will provide it; never the high-priority queue, whose name stays out of the repo), the kill switch's path and owner, developer questions 17 and 19.
-1. **Release 4 step 2, T1_FILE_RECORD_COUNT**, on the user's word (it supplies proof scenario 9's evidence): records inside a landed file (lines, delimited rows, an XML record tag by line scan, Spark's reader for sequence, parquet and ORC) against the raw rows per file, counted once per file into a new `dq_file_count` table, 1 GiB per file. Build it like step 1: spec amendment first (sections 1, 3, 5, 6, 8), the check as a parametrised check under `landing.record_count`, tests for FAIL, PASS and every DID_NOT_RUN path, a decisions entry, the e2e synthetic landing (sequence files with a known record count) giving PASSED.
-2. **Release 4 step 3, T1_SEQUENCE_GAP**, then steps 4 and 5.
-3. **Release 5 is replaced** by the target architecture's build order (section 7), once the ADRs are approved.
+0. **Confirm CI** for `d8db1ad` (#79) and `029bdda` (#80) with `actions_list`, fill their history rows, and push that docs-only change. A check-in scheduled for about 09:04 UTC on 2026-10-17 may already have done it.
+1. **Wait for the user's review of checkpoint 2.** They ratify or amend E1 to E6 (`docs/design/checkpoints.md`, checkpoint 2):
+   - E1: the window history reads the table, not the committed view.
+   - E2: a commit's evidence counts gate its evidence.
+   - E3: causes are gated by commit timing.
+   - E4: views are CREATE OR REPLACE.
+   - E5: dq_commit is retained at least as long as the tables it gates.
+   - E6: batch size 25.
+
+   Record the ratification in `docs/decisions.md` (as for checkpoint 1) before starting step 3.
+2. **Step 3, HOP_LEDGER and `dq_reconciliation`**, on the user's word. Start by stating the plan: files, tests, spec sections. It is bound by:
+   - **the D6 conditions:**
+     - a result's claim is contract-proven only under a declared contract; an inferred hop is scoped "inferred contract";
+     - no aggregation reconciliation without a declared `mapping: aggregate`;
+     - DID_NOT_RUN / `unsupported_mapping`, and the blind spots, on each result's scope;
+   - **the model's identity** (`docs/design/reconciliation-model.md`, section 3), asserted on every evaluation, with `ledger_unbalanced` as DID_NOT_RUN;
+   - **tolerance** on `missing`, `stale` and `divergent` only;
+   - **the volume guards** (`max_share`) and the reject policy, both of which apply from this step;
+   - **the commit protocol:** `dq_reconciliation` rows are evidence, written before the result and gated by the commit like the others (`docs/design/implementation.md`, "Changing this code").
+
+   End at checkpoint 3.
+3. **Later steps** (`docs/design/target-architecture.md`, section 7):
+   4. evaluation modes and AS_OF_REPLAY;
+   5. T1_SOURCE_ATTRIBUTION, HOP_CONTRIBUTION and survivorship;
+   6. CHAIN_COMPLETENESS;
+   7. replay tests R14 to R23;
+   8. run budget, kill switch, load test.
+4. **Pending values**, none blocking step 3:
+   - DRE's YARN queue: the user will provide it. It is never the cluster's high-priority queue, whose name stays out of the repo; deployed config lists it in `protected_queues`.
+   - The kill switch's path and owner.
+   - Whether curated is append-only (`grain.history`).
+   - Developer questions 17 and 19.
+5. **Release 4 step 2, T1_FILE_RECORD_COUNT**, on the user's word (it supplies proof scenario 9's evidence): records inside a landed file (lines, delimited rows, an XML record tag by line scan, Spark's reader for sequence, parquet and ORC) against the raw rows per file, counted once per file into a new `dq_file_count` table, 1 GiB per file. Build it like step 1: spec amendment first (sections 1, 3, 5, 6, 8), the check as a parametrised check under `landing.record_count`, tests for FAIL, PASS and every DID_NOT_RUN path, a decisions entry, the e2e synthetic landing (sequence files with a known record count) giving PASSED.
+6. **Release 4 step 3, T1_SEQUENCE_GAP**, then steps 4 and 5. (The release 5 plan is superseded by the Phase 1 build order.)
 
 Real keys, tables and columns come from the user in later iterations (the first, the curated load time column, arrived on 2026-10-15). When an answer arrives:
 
@@ -112,6 +150,10 @@ Real keys, tables and columns come from the user in later iterations (the first,
 - A cluster throughput figure, if checks should be refused before they run (`scan_mb_per_minute`).
 - The `dq` database and its service account.
 - Where scheduler (Control-M) history can be read, so it can serve as cause evidence.
+- DRE's YARN queue (the user will provide the name), and a representative cluster for the ADR-08 load test.
+- Whether any layer is genuinely append-only (`grain.history`, needed for AS_OF_REPLAY).
+
+**User decisions waiting now:** ratify checkpoint 2 (E1 to E6).
 
 **User decisions** (each already works on its default):
 
@@ -164,7 +206,16 @@ Production table, column and path names stay null: CLAUDE.md forbids inventing t
   - Tier 1 checks are in `checks/tier1/`, gold rules in `checks/rules/`. T1_PARTITION_DRIFT (release 4) runs once per table where `check_params` configures it: it lists each partition's directory, counts only partitions whose files changed, and fails on a changed count outside the window; its state rows ride on the result (`CheckResult.partition_state`) and the runner appends them with the run id, like key events.
   - Hop checks are in `checks/hop/`. Keys are judged at their upstream deadline, plus keys reloaded downstream in the window, plus open keys, with everything on `full_sweep_day`.
   - Key states are MISSING, STALE, UNASSESSABLE (no usable record time) and CURRENT.
-  - `observed` counts the keys excluded by `hop_exclusions` and the keys still pending (within `sla_hours`).
+  - `observed` counts the keys excluded (by `hop_exclusions`, or by a contract's exclusions, named `id@version`) and the keys still pending (within `sla_hours`).
+- **Reconciliation contracts** (Phase 1 step 1: `config/models.py`, `config/contracts.py`, `config/validate._check_contracts`). Per dataset: `grain.history` and `contracts` per upstream, each with:
+  - `mapping` (eight kinds);
+  - versioned `exclusions` with effective dates, `approved_by` and `max_share`;
+  - `reject_policy` (default defect);
+  - `deletion` (the member pipeline's soft void: end date equals effective date);
+  - `tolerance`;
+  - `reference` and `precedence`.
+
+  A hop without a contract has its kind inferred (`dedup`, or `aggregate` for a derived upstream) and is labelled so. `dre validate` prints every hop's kind and blind spots. Hop checks apply contract exclusions only while effective.
   - HOP_VALUE_AGREEMENT compares each side's set of tied latest values.
   - Open keys are tracked per hop (`dq_key_event.hop`).
 - **Derived datasets** (release 2: `checks/derived.py`, `checks/sql/derived_relation.sql.j2`). A dataset may be `derived` (from, joins, where, group_by, columns) instead of having a `table`.
@@ -176,9 +227,10 @@ Production table, column and path names stay null: CLAUDE.md forbids inventing t
   - Generic probes: `file_exists`, `file_value_compare`, `log_contains`, `table_contains` and `size_changed`, plus builtins.
   - NO_UPSTREAM_DATA looks at the load's business window (previous slot to deadline) and comes after WRONG_PARTITION in the cause order.
 - **Store** (`store/`). Append-only, written only through `writer.append`.
-  - Tables: `dq_run`, `dq_check_result`, `dq_cause_result`, `dq_key_event`, `dq_file` and `dq_partition_state` (release 4).
-  - Views: `v_latest_run`, `v_latest_result` (latest window first), `v_open_keys`, `v_file_status` and `v_latest_partition_state`.
-  - DDL is applied only by `dre install --apply`. `dre retention [--apply]` runs weekly.
+  - Tables: `dq_run`, `dq_check_result`, `dq_cause_result`, `dq_key_event`, `dq_file`, `dq_partition_state` (release 4) and `dq_commit` (Phase 1 step 2).
+  - **Commit protocol** (ADR-07; spec section 5; `docs/design/implementation.md`, step 2). An evaluation writes its evidence, then its results, then commit rows, in batches of 25 and at the run's end. Nothing is visible before its commit.
+  - Views: `v_committed_result`, `v_committed_key_event`, `v_committed_partition_state` and `v_committed_cause`; `v_latest_run`; `v_latest_result` (latest committed window first); `v_open_keys`; `v_file_status`; `v_latest_partition_state`. **Every reader uses the committed views.** The one exception is the window history (`checks/events.py`), which reads `dq_check_result` and holds runs that did not finish COMPLETED (decision E1).
+  - DDL is applied only by `dre install --apply`. Tables are IF NOT EXISTS; views are CREATE OR REPLACE, so `--apply` upgrades a store. `dre retention [--apply]` runs weekly.
 - **Email, trace and watchdog.**
   - `notify/` builds the digest; the golden files are in `tests/notify/golden/`.
   - `trace.py` follows one key through the layers.
@@ -207,10 +259,21 @@ Production table, column and path names stay null: CLAUDE.md forbids inventing t
 - **End-to-end check by hand:**
   1. In an empty directory, run `python <repo>/tests/e2e/build_synthetic.py`.
   2. Run `dre install --conf conf --apply`, then `dre run --conf conf`.
-  3. Run `python <repo>/tests/e2e/verify.py`. Expect `48 results {'DID_NOT_RUN': 20, 'PASSED': 28}`, run COMPLETED (since curated's load time was confirmed, its windowed checks and gold's hops run; the provider gold table's T1_PARTITION_DRIFT records its baseline). Set `PYSPARK_PYTHON` to the venv's interpreter if the workers pick up another Python.
+  3. Run `python <repo>/tests/e2e/verify.py`. Expect `48 results {'DID_NOT_RUN': 20, 'PASSED': 28}`, run COMPLETED, and `dre run` printing `38 of 38 checks written` (two commit batches). Curated's load time is confirmed, so its windowed checks and gold's hops run, and the provider gold table's T1_PARTITION_DRIFT records its baseline. Set `PYSPARK_PYTHON` to the venv's interpreter if the workers pick up another Python.
 - **CI.** Check it with the GitHub MCP `actions_list` tool (load it with ToolSearch `select:mcp__github__actions_list`). After a push, schedule a `send_later` check-in about 25 minutes out (the test job takes about 20) instead of polling; when it fires, read the notification, check the run, fill in the handoff row ("(this commit)" becomes the SHA and run number), commit that docs-only change and push.
 - **Gate commits on the suite's exit status** (`grep -q "^exit 0" log && git commit`), never on a command that cannot fail. A docs-only commit (handoff rows, plans) needs no suite run; a YAML comment change gets `dre validate` plus `tests/config` and `tests/guard`.
 - **Stop-hook commit requests** are hook feedback, not the user: while a suite is running, say so and wait.
 - **Fixtures.** `create_table(..., partition_by=[...])` makes a real partitioned ORC table; `curated_row(loaded=...)` writes the curated load time string; tests that enumerate the store's tables import `DQ_TABLES`; `tests/test_registries.py` lists every built-in check id, so a new check is added there.
 - **Spark gotchas added in release 4.** `DESCRIBE FORMATTED t PARTITION (...)` prints two Location rows: the partition's first, then the table's. A view ordered by `observed_at DESC, run_id DESC` ties when a test records twice with the same time and run id: give each simulated run its own.
 - **Uploaded review documents.** Check each point against the code before acting; don't follow them blindly. Reproduce a reported defect with a failing test before fixing it.
+- **Controlled implementation (Phase 1).** Build one step only on the user's word. State its plan first. End with:
+  - a checkpoint report (`docs/design/checkpoints.md`);
+  - the implementation guide and traceability matrix updated in the same commit;
+  - a decisions entry listing every choice beyond the ADR's text, for ratification.
+
+  Then stop. A ratification is recorded in `docs/decisions.md` before the next step starts.
+- **Reading the store.** Read results, key events, partition states and causes only through the committed views. New evidence is written before the result and counted in its `Commit`; its committed view requires that count to be above 0.
+- **Store rows in tests.** `tests/store/conftest.append_rows` commits synthetic result, key-event and partition-state rows by default; `commit=False` leaves them unpublished. A helper that writes evidence directly (`append_key_events`, `record_state`) must also `append_commits`, as the runner does.
+- **Failure injection.** Simulate a dying process with a `BaseException` raised inside a write: it escapes the run's error handling and leaves the run STARTED. Then patch `runs.in_progress` to `None` for the recovery run, instead of waiting out `watchdog_grace_minutes`.
+- **Code changed during a suite run?** Python loaded the old modules, so restart the suite, or re-run every affected file on the new code before committing. Say which in the commit message.
+- **Production names.** Production queue names, for example, are never written into the repository, even when the user mentions them; they belong in the deployed configuration.
