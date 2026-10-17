@@ -99,6 +99,9 @@ def history_sql(dq_database: str, datasets: list[str], since: date | None = None
     lookback = f" AND r.run_date >= DATE'{since.isoformat()}'" if since is not None else ""
     # A run that did not finish COMPLETED (PARTIAL, FAILED, or died while STARTED) may not have
     # stored all its evidence: its events are held too. A result with no run row is not held.
+    # This reads the table, not v_committed_result (ADR-07): an uncommitted row belongs to a run that
+    # did not finish COMPLETED (a run is COMPLETED only once every evaluation is committed), so it is
+    # held here, which keeps its window and the max_window_hours limit on holding.
     incomplete = "coalesce(u.status, 'COMPLETED') <> 'COMPLETED'"
     return (
         f"WITH events AS ("

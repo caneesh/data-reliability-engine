@@ -138,8 +138,8 @@ def cause_line(spark: SparkSession, config: Config, up: Layer, down: Layer, key_
     rows = [r.asDict() for r in spark.sql(  # the latest evaluation's rows only, ranked in SQL
         f"SELECT * FROM (SELECT c.*, r.evaluated_at AS result_at, "
         f"DENSE_RANK() OVER (ORDER BY r.evaluated_at DESC) AS latest_rank "
-        f"FROM {dq_database}.dq_cause_result c "
-        f"JOIN {dq_database}.dq_check_result r ON r.evaluation_id = c.evaluation_id AND r.run_id = c.run_id "
+        f"FROM {dq_database}.v_committed_cause c "
+        f"JOIN {dq_database}.v_committed_result r ON r.evaluation_id = c.evaluation_id AND r.run_id = c.run_id "
         f"WHERE r.dataset = '{ds.dataset}' AND r.check_id = 'HOP_KEY_CURRENCY' "
         f"AND c.hop = '{hop}' AND c.failure_ref = '{ref}') ranked WHERE latest_rank = 1").collect()]
     feed = config.feed_of(ds.dataset)

@@ -90,6 +90,7 @@ CASES = [
     ("dq-database-not-identifier", DEFAULTS, "dq_database: dq", "dq_database: dq.prod", "dq_database", "dq_database", "plain identifier", "plain identifier"),
     ("hmac-relative-path", DEFAULTS, "hmac_secret_file: null", "hmac_secret_file: secrets/key", "", "dq_database: dq", "absolute path", "outside the repository"),
     ("retention-missing-table", DEFAULTS, "  dq_file: 13\n", "", "", "dq_database: dq", "retention_months", "dq_file"),
+    ("commit-retention-short", DEFAULTS, "  dq_commit: 84", "  dq_commit: 12", "", "dq_database: dq", "shorter than a table it gates", "at least 84 months"),
     ("record-time-shorthand", GOLD, GOLD_RECORD_TIME, "record_time: src_lcts\n", "record_time", "record_time:", "expected a mapping", "key: value"),
     ("key-map-needs-record-time", GOLD, GOLD_RECORD_TIME, "", "record_time", "dataset: gold_member_coverage", "needs record_time", "add record_time"),
     ("upstream-needs-record-time", CURATED, CURATED_RECORD_TIME, "", "record_time", "dataset: example_curated_enrollment", "compares against this dataset", "add record_time"),

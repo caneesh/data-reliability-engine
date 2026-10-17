@@ -129,7 +129,7 @@ def read_run(spark: SparkSession, dq_database: str, run_id: str, run_date: date 
         raise ValueError("unexpected run id")
     this_run = f"run_id = '{run_id}'" + (f" AND run_date = DATE'{run_date.isoformat()}'" if run_date else "")
     current = [r.asDict() for r in spark.sql(
-        f"SELECT *, {GROUPS_SQL} AS groups FROM {dq_database}.dq_check_result WHERE {this_run}").collect()]
+        f"SELECT *, {GROUPS_SQL} AS groups FROM {dq_database}.v_committed_result WHERE {this_run}").collect()]
     if not current:
         return {"current": [], "history": {}, "previous_groups": {}, "causes": [], "samples": {}}
     started = min(as_utc(r["evaluated_at"]) for r in current)
@@ -137,7 +137,7 @@ def read_run(spark: SparkSession, dq_database: str, run_id: str, run_date: date 
     datasets = ", ".join(f"'{validate_identifier(d, 'dataset id')}'" for d in sorted({d for d, _ in pairs}))
     checks = ", ".join(f"'{validate_identifier(c, 'check id')}'" for c in sorted({c for _, c in pairs}))
     lookback = f" AND run_date >= DATE'{since.isoformat()}'" if since else ""
-    earlier = (f"SELECT *, {GROUPS_SQL} AS groups FROM {dq_database}.dq_check_result "
+    earlier = (f"SELECT *, {GROUPS_SQL} AS groups FROM {dq_database}.v_committed_result "
                f"WHERE execution_type = 'NORMAL' AND run_id <> '{run_id}' AND evaluated_at < {utc_literal(started)} "
                f"AND dataset IN ({datasets}) AND check_id IN ({checks}){lookback}")
     history = {
@@ -164,12 +164,12 @@ def read_run(spark: SparkSession, dq_database: str, run_id: str, run_date: date 
             f"  ON l.dataset = h.dataset AND l.check_id = h.check_id AND l.run_id = h.run_id").collect():
         previous_groups.setdefault((r.dataset, r.check_id), {})[r.groups] = r.state
     causes = [r.asDict() for r in spark.sql(
-        f"SELECT * FROM {dq_database}.dq_cause_result WHERE {this_run}").collect()]
+        f"SELECT * FROM {dq_database}.v_committed_cause WHERE {this_run}").collect()]
     samples: dict[str, list[str]] = {}
     sample_rows = spark.sql(
         f"SELECT evaluation_id, key_hash FROM ("
         f"  SELECT evaluation_id, key_hash, ROW_NUMBER() OVER (PARTITION BY evaluation_id ORDER BY key_hash) AS rn "
-        f"  FROM {dq_database}.dq_key_event WHERE {this_run} AND event IN ('FLAGGED', 'STILL_FLAGGED')"
+        f"  FROM {dq_database}.v_committed_key_event WHERE {this_run} AND event IN ('FLAGGED', 'STILL_FLAGGED')"
         f") ranked WHERE rn <= {SAMPLE_KEYS} ORDER BY evaluation_id, key_hash").collect() if with_samples else []
     for r in sample_rows:
         samples.setdefault(r.evaluation_id, []).append(r.key_hash)

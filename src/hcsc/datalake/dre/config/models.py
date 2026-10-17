@@ -21,6 +21,9 @@ from pydantic_core import PydanticCustomError
 
 from hcsc.datalake.dre.store.names import DQ_TABLES, validate_dq_database
 
+# Tables whose rows are visible only through a commit row (ADR-07): dq_commit must outlive them.
+GATED_BY_COMMIT = ("dq_check_result", "dq_cause_result", "dq_key_event", "dq_partition_state")
+
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _HHMM = re.compile(r"([01]\d|2[0-3]):[0-5]\d")
 _ORDER_TERM = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\s+(ASC|DESC))?", re.I)
@@ -282,6 +285,13 @@ class Defaults(SettingsOverride):
             raise invalid(
                 f"retention_months must list exactly the dq tables; missing {missing}, unknown {unknown}",
                 f"set retention_months for each of {list(DQ_TABLES)}",
+            )
+        gated = {t: self.retention_months[t] for t in GATED_BY_COMMIT}
+        if self.retention_months["dq_commit"] < max(gated.values()):
+            raise invalid(
+                f"retention_months.dq_commit ({self.retention_months['dq_commit']}) is shorter than a table it "
+                f"gates ({gated}): results and evidence would become invisible when their commit rows expire",
+                f"keep dq_commit at least {max(gated.values())} months (ADR-07)",
             )
         if self.hmac_secret_file is not None:
             path = self.hmac_secret_file

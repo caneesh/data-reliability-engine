@@ -334,30 +334,37 @@ def test_weekly_rules_use_rule_weekly_day_when_set(monkeypatch, tmp_path) -> Non
 
 def test_a_failed_key_event_write_makes_the_run_partial_and_the_result_is_still_explained(
         spark, tmp_path, monkeypatch, capsys) -> None:
-    """Review finding 4: a result is written only when its key events are too; a stored result is
-    still explained."""
+    """Review finding 4, under the commit protocol (ADR-07): a result is written only when its key
+    events are; the evaluation whose key events fail publishes an evidence_incomplete marker instead,
+    and the run is PARTIAL. Every other result is stored, published and explained."""
     from hcsc.datalake.dre import runner
+    from tests.replay.test_r04_to_r07_hops import setup
 
-    replay = replay_conf(spark, tmp_path, "runner_key_events")
+    replay = setup(spark, tmp_path, "runner_key_events")  # with the HMAC secret: the hop writes key events
     create_table(spark, replay.gold, GOLD_COLUMNS, [gold_row()])
     create_table(spark, replay.curated, CURATED_COLUMNS, [curated_row()])
-    explained: list[int] = []
+    explained: list[tuple[str, int]] = []
     real_explain = runner.explain_failures
 
     def failing_write(*args, **kwargs):
         raise OSError("synthetic write failure")
 
     def spy(spark_, config, evaluation, rows, run, *rest):
-        explained.append(len(rows))
+        explained.append((evaluation.planned.check.check_id, len(rows)))
         return real_explain(spark_, config, evaluation, rows, run, *rest)
 
     monkeypatch.setattr(runner, "write_key_events", failing_write)
     monkeypatch.setattr(runner, "explain_failures", spy)
     assert main(["run", "--conf", str(replay.conf)]) == 2
     [final] = [r for r in spark.table(f"{replay.dq}.dq_run").collect() if r.status != "STARTED"]
-    assert (final.status, final.checks_written) == ("PARTIAL", 0)
-    assert spark.table(f"{replay.dq}.dq_check_result").count() == final.checks_expected  # every result stored
-    assert explained and all(n > 0 for n in explained)  # each with its rows, so causes can be written
+    hop_rows = [r for r in spark.table(f"{replay.dq}.dq_check_result").collect()
+                if (r.dataset, r.check_id) == ("gold_member_coverage", "HOP_KEY_CURRENCY")]
+    assert [(r.state, r.reason_code) for r in hop_rows] == [("DID_NOT_RUN", "evidence_incomplete")]  # no FAILED row
+    assert final.status == "PARTIAL" and final.checks_written == final.checks_expected - 1  # only the hop is short
+    published = spark.table(f"{replay.dq}.v_committed_result").count()
+    assert published == spark.table(f"{replay.dq}.dq_check_result").count()  # everything stored is published
+    others = [n for check, n in explained if check != "HOP_KEY_CURRENCY"]
+    assert others and all(n > 0 for n in others)  # each stored result with its rows, so causes can be written
 
 
 def test_a_planning_error_ends_the_run_failed(spark, tmp_path, monkeypatch, capsys) -> None:

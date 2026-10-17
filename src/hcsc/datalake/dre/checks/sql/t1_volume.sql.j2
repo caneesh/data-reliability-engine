@@ -33,7 +33,7 @@ counts AS (
 per_load AS (
   SELECT group_values['slot'] AS label, group_values['slot_time'] AS slot_time,
          max_by(population, window_end) AS row_count, MAX(window_end) AS window_end
-  FROM {{ dq_database }}.dq_check_result
+  FROM {{ dq_database }}.v_committed_result
   WHERE dataset = '{{ dataset }}'
     AND check_id = 'T1_VOLUME'
     AND execution_type = 'NORMAL'

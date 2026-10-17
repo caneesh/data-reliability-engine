@@ -17,6 +17,7 @@ from hcsc.datalake.dre.checks.registry import CHECKS
 from hcsc.datalake.dre.checks.tier1.partition_drift import parse_spec
 from hcsc.datalake.dre.config.models import Dataset
 from hcsc.datalake.dre.store.local_setup import create_store
+from hcsc.datalake.dre.store.commits import Commit, append_commits
 from hcsc.datalake.dre.store.partitions import latest_state, record_state
 from tests.fixtures.settings import SETTINGS
 
@@ -68,7 +69,10 @@ def run(spark, ds: Dataset, record: bool = True):
     if record and result.partition_state:
         RUNS["n"] += 1
         at = NOW + timedelta(minutes=RUNS["n"])
-        record_state(spark, DQ, ds.dataset, ds.table, list(result.partition_state), f"run-{RUNS['n']}", at, at.date())
+        run_id = f"run-{RUNS['n']}"
+        n = record_state(spark, DQ, ds.dataset, ds.table, list(result.partition_state), run_id, at, at.date())
+        append_commits(spark, DQ, [Commit(run_id, f"eval-{run_id}", ds.dataset, "T1_PARTITION_DRIFT", 1,
+                                          partition_state_rows=n)], at, at.date())  # ADR-07: published
     return result
 
 

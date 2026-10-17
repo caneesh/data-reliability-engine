@@ -20,6 +20,7 @@ from hcsc.datalake.dre.checks.hop.file_completeness import FileCompleteness
 from hcsc.datalake.dre.checks.hop.key_currency import KeyCurrency
 from hcsc.datalake.dre.checks.hop.value_agreement import ValueAgreement
 from hcsc.datalake.dre.config.models import Dataset, TimeColumn
+from hcsc.datalake.dre.store.commits import Commit, append_commits
 from hcsc.datalake.dre.store.key_events import append_key_events
 from hcsc.datalake.dre.store.local_setup import create_store
 from tests.fixtures.layers import CURATED_COLUMNS, GOLD_COLUMNS, create_table, curated_row, gold_row
@@ -81,8 +82,10 @@ def events_of(result) -> list[tuple[str, str, str, str | None]]:
 
 def record(spark, result, ds: Dataset, run_id: str, observed: datetime) -> None:
     hop = hop_label(result.group_values["upstream"], ds.dataset)
-    append_key_events(result.key_events, DQ, run_id, f"eval-{run_id}-{hop}", ds.dataset, "HOP_KEY_CURRENCY",
-                      hop, observed, observed.date())
+    n = append_key_events(result.key_events, DQ, run_id, f"eval-{run_id}-{hop}", ds.dataset, "HOP_KEY_CURRENCY",
+                          hop, observed, observed.date())
+    append_commits(spark, DQ, [Commit(run_id, f"eval-{run_id}-{hop}", ds.dataset, "HOP_KEY_CURRENCY", 1,
+                                      key_event_rows=n)], observed, observed.date())  # ADR-07: published
 
 
 # --- HOP_KEY_CURRENCY ---
@@ -475,6 +478,8 @@ def test_open_keys_are_read_from_recent_partitions_only(spark, monkeypatch) -> N
                                             "key_hash STRING, key_value STRING, event STRING, state_detail STRING"),
                       DQ, "run-old", "eval-old", dn.dataset, "HOP_KEY_CURRENCY",
                       hop_label(up.dataset, dn.dataset), old_day, old_day.date())
+    append_commits(spark, DQ, [Commit("run-old", "eval-old", dn.dataset, "HOP_KEY_CURRENCY", 1, key_event_rows=1)],
+                   old_day, old_day.date())  # the run that stored it published it (ADR-07)
     seen: list[str] = []
     real_sql = spark.sql
     monkeypatch.setattr(spark, "sql", lambda text: seen.append(text) or real_sql(text))
@@ -485,10 +490,11 @@ def test_open_keys_are_read_from_recent_partitions_only(spark, monkeypatch) -> N
     # nothing else puts it in the judged range.
     [r] = run(spark, KeyCurrency(), dn, up, secret=SECRET, history_since=date(2026, 1, 1))
     assert (r.state, r.reason_code) == ("DID_NOT_RUN", "empty_population")
-    judged_sql = [s for s in seen if "dq_key_event" in s and "run_date >= DATE'2026-01-01'" in s][-1]
+    judged_sql = [s for s in seen if "v_committed_key_event" in s and "run_date >= DATE'2026-01-01'" in s][-1]
     plan = real_sql("EXPLAIN FORMATTED " + judged_sql).collect()[0][0]
-    event_scan = [part for part in plan.split("PartitionFilters: [") if "run_date" in part.split("]", 1)[0]]
-    assert event_scan, plan
+    pruned = [part.split("]", 1)[0] for part in plan.split("PartitionFilters: [") if "run_date" in part.split("]", 1)[0]]
+    # both scans behind the committed view prune on run_date: the events', and the commits' (by the join)
+    assert len(pruned) >= 2, plan
 
 
 def test_only_candidate_keys_go_through_the_window_functions(spark, monkeypatch) -> None:

@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -55,6 +55,7 @@ from hcsc.datalake.dre.notify.sinks import deliver, from_digests
 from hcsc.datalake.dre.sources.hdfs import LandingError, list_landing
 from hcsc.datalake.dre.store import runs
 from hcsc.datalake.dre.store.causes import append_cause_results
+from hcsc.datalake.dre.store.commits import Commit, append_commits
 from hcsc.datalake.dre.store.files import register_files
 from hcsc.datalake.dre.store.install import missing_objects
 from hcsc.datalake.dre.store.names import validate_identifier
@@ -423,26 +424,79 @@ def incomplete_rows(evaluation: Evaluation, rows: list[dict[str, Any]], now: dat
     for row in rows:
         marked.append({**row, "state": "DID_NOT_RUN", "reason_category": "PLATFORM",
                        "reason_code": "evidence_incomplete", "population": None, "violations": None,
-                       "observed": f"{row['state']} result stored; the evaluation's evidence rows (key events, partition states) were not all stored",
+                       "observed": f"{row['state']} result not published: the evaluation's evidence rows (key events, partition states) were not all stored",
                        "expected": "the result and its evidence rows stored together", "evaluated_at": now,
                        "detail": "the window is held and evaluated again"})
     return marked
 
 
 def write_key_events(spark: SparkSession, db: str, evaluation: Evaluation, rows: list[dict[str, Any]],
-                     run: runs.Run) -> None:
+                     run: runs.Run) -> dict[str, tuple[int, int]]:
     """Append each result's evidence rows with the run id: key events (hop checks) and partition
-    states (T1_PARTITION_DRIFT)."""
+    states (T1_PARTITION_DRIFT). Returns evaluation id -> (key events, partition states) written."""
     from hcsc.datalake.dre.store.partitions import record_state
 
+    counts: dict[str, tuple[int, int]] = {}
     for result, row in zip(evaluation.results, rows):
+        events = states = 0
         if result.key_events is not None:
             hop = hop_label(result.group_values.get("upstream") or "", row["dataset"])
-            append_key_events(result.key_events, db, run.run_id, row["evaluation_id"], row["dataset"],
-                              row["check_id"], hop, row["evaluated_at"], run.run_date)
+            events = append_key_events(result.key_events, db, run.run_id, row["evaluation_id"], row["dataset"],
+                                       row["check_id"], hop, row["evaluated_at"], run.run_date)
         if result.partition_state:
-            record_state(spark, db, row["dataset"], evaluation.planned.dataset.table or "",
-                         list(result.partition_state), run.run_id, row["evaluated_at"], run.run_date)
+            states = record_state(spark, db, row["dataset"], evaluation.planned.dataset.table or "",
+                                  list(result.partition_state), run.run_id, row["evaluated_at"], run.run_date)
+        counts[row["evaluation_id"]] = (events, states)
+    return counts
+
+
+def commits_for(rows: list[dict[str, Any]], run: runs.Run,
+                evidence: dict[str, tuple[int, int]] | None = None) -> list[Commit]:
+    """One commit per stored result row (each row is its own evaluation id), vouching for the
+    evidence counts written for it (none for a marker or a row without evidence)."""
+    evidence = evidence or {}
+    return [Commit(run.run_id, r["evaluation_id"], r["dataset"], r["check_id"], 1,
+                   *evidence.get(r["evaluation_id"], (0, 0))) for r in rows]
+
+
+# Evaluations whose commit rows are appended together (ADR-07, amended on approval: one append per
+# batch, not a small file per evaluation). The run's remaining commits are appended at its end.
+COMMIT_BATCH = 25
+
+
+@dataclass
+class Publisher:
+    """Collects stored evaluations' commits and appends them in batches. An evaluation counts as
+    written (dq_run.checks_written) only once its commit is stored, so a commit that cannot be
+    stored makes the run PARTIAL and holds its windows, like any other failed write."""
+
+    spark: SparkSession
+    db: str
+    run: runs.Run
+    batch: int = COMMIT_BATCH
+    pending: list[tuple[list[Commit], int]] = field(default_factory=list)
+    published: int = 0  # evaluations counted as written
+
+    def add(self, commits: list[Commit], complete: int) -> None:
+        if not commits:  # an evaluation with no result rows (a grouped check with no groups): nothing to publish
+            self.published += complete
+            return
+        self.pending.append((commits, complete))
+        if len(self.pending) >= self.batch:
+            self.flush()
+
+    def flush(self) -> None:
+        if not self.pending:
+            return
+        commits = [c for batch, _ in self.pending for c in batch]
+        try:
+            append_commits(self.spark, self.db, commits, datetime.now(timezone.utc), self.run.run_date)
+            self.published += sum(complete for _, complete in self.pending)
+        except Exception as exc:
+            log.error("could not write %d commit rows: %s", len(commits), error_detail(exc))
+            print(f"commit rows not stored ({type(exc).__name__}): {len(self.pending)} evaluation(s) stay unpublished; "
+                  "their windows are evaluated again")
+        self.pending.clear()
 
 
 @dataclass
@@ -513,8 +567,8 @@ def pending_investigations(spark: SparkSession, config: Config, since: date,
     rows = spark.sql(
         f"SELECT r.* FROM (SELECT d.*, ROW_NUMBER() OVER (PARTITION BY dataset, check_id, {GROUPS_SQL} "
         f"  ORDER BY window_end DESC, evaluated_at DESC, run_id DESC) AS rn "
-        f"  FROM {db}.dq_check_result d WHERE run_date >= {day} AND execution_type = 'NORMAL') r "
-        f"LEFT ANTI JOIN (SELECT DISTINCT evaluation_id FROM {db}.dq_cause_result WHERE run_date >= {day}) c "
+        f"  FROM {db}.v_committed_result d WHERE run_date >= {day} AND execution_type = 'NORMAL') r "
+        f"LEFT ANTI JOIN (SELECT DISTINCT evaluation_id FROM {db}.v_committed_cause WHERE run_date >= {day}) c "
         f"  ON c.evaluation_id = r.evaluation_id "
         f"WHERE r.rn = 1 AND r.state = 'FAILED'").collect()
     return [r.asDict() for r in rows if r.evaluation_id not in skip]
@@ -677,7 +731,7 @@ def stored_outcomes(spark: SparkSession, db: str, jobs: list[Job]) -> dict[str, 
     columns = ", ".join(OUTCOME)
     rows = spark.sql(
         f"SELECT evaluation_id, event_id, {columns} FROM (SELECT r.*, ROW_NUMBER() OVER (PARTITION BY evaluation_id "
-        f"ORDER BY evaluated_at DESC, run_id DESC) AS rn FROM {db}.dq_check_result r "
+        f"ORDER BY evaluated_at DESC, run_id DESC) AS rn FROM {db}.v_committed_result r "
         f"WHERE dataset IN ({datasets}) AND window_start >= {lo} AND window_end <= {hi}) latest WHERE rn = 1").collect()
     return {r.evaluation_id: tuple(r[c] for c in OUTCOME) for r in rows if r.event_id in ids}
 
@@ -725,32 +779,44 @@ def _preflight(spark: SparkSession, conf: str, feed_id: str | None,
 
 
 def write_evaluation(spark: SparkSession, db: str, evaluation: Evaluation, rows: list[dict[str, Any]],
-                     run_record: runs.Run, budget_minutes: float | None = None) -> tuple[list[dict[str, Any]], int]:
-    """Store an evaluation's results, then its key events. Returns (the rows that are stored, 1 if
-    the check counts as written). A check counts as written only once both are stored; a missing
-    write makes the run PARTIAL, and a result stored without its key events gets a newer
-    evidence_incomplete row. A stored result is explained either way (the caller's job). The
-    key-event write runs under budget_minutes (WRITE_BUDGET_MINUTES in a run): one that runs past
-    it takes the evidence_incomplete path like any failed write."""
+                     run_record: runs.Run, budget_minutes: float | None = None
+                     ) -> tuple[list[dict[str, Any]], int, list[Commit]]:
+    """Store an evaluation's evidence (key events, partition states), then its results (ADR-07).
+    Returns (the rows stored, 1 if the check counts as written once committed, the commits that
+    publish them). Nothing is visible until the caller stores the commits. If the evidence cannot
+    be stored, the results are not written; an evidence_incomplete marker is, and its commits vouch
+    for no evidence, so the partial evidence stays invisible; the check does not count as written,
+    which makes the run PARTIAL and holds the window. If the results cannot be stored, the marker
+    is tried the same way. The evidence write runs under budget_minutes (WRITE_BUDGET_MINUTES in a
+    run): one that runs past it takes the marker path like any failed write."""
     check_id, ds_id = evaluation.planned.check.check_id, evaluation.planned.dataset.dataset
+
+    def marked(what: str, exc: Exception) -> tuple[list[dict[str, Any]], int, list[Commit]]:
+        log.error("could not write the %s of %s for %s: %s", what, check_id, ds_id, error_detail(exc))
+        marker = incomplete_rows(evaluation, rows, datetime.now(timezone.utc))
+        try:  # say so explicitly; the run is PARTIAL either way, which also holds the window
+            append_check_results(spark, db, marker)
+        except Exception as marker_exc:
+            log.error("could not mark %s incomplete: %s", check_id, error_detail(marker_exc))
+            return [], 0, []
+        return marker, 0, commits_for(marker, run_record)
+
+    carries = any(r.key_events is not None or r.partition_state for r in evaluation.results)
+    try:
+        if not carries:  # nothing to store before the results
+            evidence: dict[str, tuple[int, int]] = {}
+        elif budget_minutes is not None:
+            evidence = within_budget(spark, budget_minutes,
+                                     lambda: write_key_events(spark, db, evaluation, rows, run_record))
+        else:
+            evidence = write_key_events(spark, db, evaluation, rows, run_record)
+    except Exception as exc:
+        return marked("evidence rows", exc)
     try:
         append_check_results(spark, db, rows)
     except Exception as exc:
-        log.error("could not write %s for %s: %s", check_id, ds_id, error_detail(exc))
-        return [], 0
-    try:
-        if budget_minutes is not None:
-            within_budget(spark, budget_minutes, lambda: write_key_events(spark, db, evaluation, rows, run_record))
-        else:
-            write_key_events(spark, db, evaluation, rows, run_record)
-    except Exception as exc:
-        log.error("could not write the key events of %s for %s: %s", check_id, ds_id, error_detail(exc))
-        try:  # say so explicitly; the run is PARTIAL either way, which also holds the window
-            append_check_results(spark, db, incomplete_rows(evaluation, rows, datetime.now(timezone.utc)))
-        except Exception as marker_exc:
-            log.error("could not mark %s incomplete: %s", check_id, error_detail(marker_exc))
-        return rows, 0
-    return rows, 1
+        return marked("results", exc)
+    return rows, 1, commits_for(rows, run_record, evidence)
 
 
 # How long a key-event write may take before it counts as failed (evidence_incomplete, the window
@@ -782,6 +848,7 @@ def run(spark: SparkSession, conf: str, feed_id: str | None = None, selection: S
     run_record = runs.start_run(spark, db, conf_dir=conf, execution_type=kind)
     print(f"dre run: started {run_record.run_id} ({kind} run, {run_record.started_at:%Y-%m-%d %H:%M} UTC)")
     written = expected = 0
+    publisher = Publisher(spark, db, run_record)
     investigations = Investigations()
     explained: set[str] = set()  # evaluation ids this run already investigated
     try:
@@ -797,9 +864,9 @@ def run(spark: SparkSession, conf: str, feed_id: str | None = None, selection: S
             stored = stored_outcomes(spark, db, jobs)
         expected = len(jobs) + len(gap_rows)
         for planned, gap, held_by in gap_rows:
-            append_check_results(spark, db, [gap_row(planned, gap, held_by, run_record, kind,
-                                                     datetime.now(timezone.utc))])
-            written += 1
+            gap_rows_stored = [gap_row(planned, gap, held_by, run_record, kind, datetime.now(timezone.utc))]
+            append_check_results(spark, db, gap_rows_stored)
+            publisher.add(commits_for(gap_rows_stored, run_record), 1)
             print(f"{planned.dataset.dataset} {GAP_CHECK_ID}: DID_NOT_RUN (DATA_UNAVAILABLE/window_gap)")
         spent: dict[tuple[str, str], float] = {}  # compute_budget_scope dataset: minutes per dataset window
         for planned, event in jobs:
@@ -817,14 +884,16 @@ def run(spark: SparkSession, conf: str, feed_id: str | None = None, selection: S
                 print(f"{ds_id} {planned.check.check_id}: unchanged since its stored result; not written again")
                 drop_judged_views(spark, evaluation)
                 continue
-            stored_rows, complete = write_evaluation(spark, db, evaluation, rows, run_record, WRITE_BUDGET_MINUTES)
-            written += complete
+            stored_rows, complete, commits = write_evaluation(spark, db, evaluation, rows, run_record,
+                                                              WRITE_BUDGET_MINUTES)
+            publisher.add(commits, complete)
             rows = stored_rows
             explained.update(r["evaluation_id"] for r in rows)
             for line in describe(evaluation) + explain_failures(spark, config, evaluation, rows, run_record,
                                                                 investigations, remaining):
                 print(line)
             drop_judged_views(spark, evaluation)
+        publisher.flush()  # the run's remaining commits, before anything reads this run's results
         if normal:
             try:
                 for line in retry_investigations(spark, config, run_record, key_secret, investigations, explained):
@@ -834,6 +903,8 @@ def run(spark: SparkSession, conf: str, feed_id: str | None = None, selection: S
                 print(f"pending cause investigations not retried ({type(exc).__name__}); the next run retries them")
     except Exception as exc:
         log.error("run %s failed: %s", run_record.run_id, error_detail(exc))
+        publisher.flush()  # what was stored completely before the failure is published; nothing else is
+        written += publisher.published
         print(f"dre run: FAILED, {written} of {expected} checks written ({kind} run {run_record.run_id}): "
               f"{error_detail(exc)}")
         try:
@@ -842,6 +913,7 @@ def run(spark: SparkSession, conf: str, feed_id: str | None = None, selection: S
         except Exception as final_exc:  # the run stays STARTED, which the watchdog reports
             log.error("could not write the final row of run %s: %s", run_record.run_id, error_detail(final_exc))
         return EXIT_PARTIAL
+    written += publisher.published
     if normal:
         for line in email_digests(spark, config, run_record):
             print(line)

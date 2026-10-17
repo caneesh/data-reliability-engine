@@ -39,7 +39,7 @@ open_keys AS (
   SELECT key_hash, k FROM (
     SELECT key_hash, key_value AS k, event,
            ROW_NUMBER() OVER (PARTITION BY key_hash ORDER BY observed_at DESC, run_id DESC) AS rn
-    FROM {{ p.dq_database }}.dq_key_event
+    FROM {{ p.dq_database }}.v_committed_key_event
     WHERE dataset = '{{ p.dataset }}' AND check_id = 'HOP_KEY_CURRENCY' AND hop = '{{ p.hop }}'
 {% if p.events_since %}
       AND run_date >= DATE'{{ p.events_since }}'

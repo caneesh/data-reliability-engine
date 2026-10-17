@@ -66,7 +66,7 @@ These stay counts and key states, not new result states: every check still write
 | 3 | Two upstreams feeding one gold target | Met | `test_open_keys_are_kept_per_hop` and `test_a_synthetic_pipeline_with_two_upstreams_exclusions_late_data_and_a_missing_key` in `tests/checks/test_hop.py` |
 | 4 | Legitimate exclusions without false data-loss alerts | Met | The same scenario test, and `test_file_completeness_reports_what_it_excluded_and_what_is_pending` |
 | 5 | Silent success, skipped processing and delayed loads, independent of job status | Met | T1\_ON\_TIME, T1\_ZERO\_ROWS, T1\_FILES\_NOT\_LOADED (replays R01 to R03); no check reads job status |
-| 6 | Recovery from partial DRE writes without duplicate active findings | Met, within Hive's limits | `tests/test_recovery.py`; no atomic commit across tables |
+| 6 | Recovery from partial DRE writes without duplicate active findings | Met (commit rows, ADR-07) | `tests/test_commit_protocol.py` (failure injection at each write boundary, then recovery); `tests/test_recovery.py` |
 | 7 | DRE outage and heavy load do not affect source processing | By design; not yet demonstrated | Needs a run in a representative cluster |
 | 8 | Uncertainty reported clearly | Met | Evidence levels on cause lines, UNASSESSABLE, NOT\_READY |
 
@@ -103,9 +103,10 @@ These stay counts and key states, not new result states: every check still write
 **How:**
 
 - **Deterministic ids.** `evaluation_id` is a hash of (event, check, expectation version, engine version, group). Re-evaluating the same window gives the same ids.
-- **Current state.** Each evaluation's current state is its newest row in the views. `v_latest_result` orders by window, then by evaluation time.
+- **Commit rows** (Phase 1 design, ADR-07; spec section 5, "Commit protocol"). An evaluation's evidence (key events, partition states) is written first, then its results, then its `dq_commit` row, in batches of 25 and at the end of the run. Every view of current state, and every reader of results, key events, partition states and causes, sees committed rows only. A run that dies, or a write that fails, anywhere before the commit leaves nothing visible.
+- **Current state.** Each evaluation's current state is its newest committed row in the views. `v_latest_result` orders by window, then by evaluation time.
 - **Partial writes:**
-  - **Key events not stored.** A result stored without its key events gets a newer DID\_NOT\_RUN / PLATFORM / `evidence_incomplete` row under the same `evaluation_id`, and the run ends PARTIAL.
+  - **Evidence not stored.** The results are not written. A DID\_NOT\_RUN / PLATFORM / `evidence_incomplete` row is written and committed, with no evidence vouched for, so the partial evidence stays invisible, and the run ends PARTIAL.
   - **Interrupted runs.** Any NORMAL event evaluated by a run that did not finish COMPLETED (PARTIAL, FAILED, or died while STARTED) is held, and the next run evaluates it again.
   - **Limit on holding.** A hold lasts at most `max_window_hours`; then a WINDOW\_GAP row records the span that was never checked.
 - **Idempotent reruns.** A RERUN or REPLAY writes a result only if its outcome differs from the stored one. Neither reads nor writes key events.
@@ -114,7 +115,14 @@ These stay counts and key states, not new result states: every check still write
   - The watchdog reports an incomplete investigation, and the digest shows `cause: investigation incomplete`.
   - Each NORMAL run retries such investigations for up to `investigation_retry_days`, as long as the failed result is still its check's latest result.
 
-**Open.** The store is append-only Hive/ORC, which has no transactions across tables. Recovery therefore relies on deterministic ids, newest-row-wins views, and holding windows, not on atomic commits.
+**Proof.** `tests/test_commit_protocol.py` injects a failure at each write boundary and checks that nothing of the interrupted evaluations is visible and that the next run publishes the held window once:
+
+- the process dies after the evidence;
+- it dies before the commit;
+- the commit is refused;
+- the evidence is partly stored.
+
+**Open.** Hive/ORC still has no transaction across tables, so an interrupted run leaves rows in the tables. They are invisible, not absent, until retention removes them. Concurrency stays as before: one NORMAL run at a time.
 
 ## Historical replay semantics
 

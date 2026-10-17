@@ -1,7 +1,8 @@
 -- dq store tables and views (spec section 5), applied by `dre install --apply`.
 -- Rendered by store/schema.py with a validated dq_database; statements are
--- separated by semicolons. Every statement is IF NOT EXISTS, so applying it
--- again changes nothing. Tables are append-only; views derive current state.
+-- separated by semicolons. Tables are CREATE ... IF NOT EXISTS and views CREATE OR REPLACE,
+-- so applying it again changes nothing, and applying it after an upgrade replaces the views
+-- (they hold no data). Tables are append-only; views derive current state.
 
 CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_run (
   run_id STRING, started_at TIMESTAMP, ended_at TIMESTAMP,
@@ -52,9 +53,21 @@ CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_partition_state (
   observed_at TIMESTAMP, run_id STRING
 ) PARTITIONED BY (run_date DATE) STORED AS ORC;
 
+-- Phase 1 design, ADR-07: one row per committed evaluation id. An evaluation's evidence (key
+-- events, partition states) and its result rows are written first; its commit row last. Every
+-- view of current state shows only committed rows, so an evaluation interrupted anywhere before
+-- its commit is invisible, and its window is evaluated again. A row's evidence counts say what
+-- the commit vouches for: evidence rows of a commit with a count of 0 stay invisible (an
+-- evidence_incomplete marker commits its result rows only).
+CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_commit (
+  run_id STRING, evaluation_id STRING, dataset STRING, check_id STRING,
+  result_rows INT, key_event_rows BIGINT, partition_state_rows INT,
+  committed_at TIMESTAMP
+) PARTITIONED BY (run_date DATE) STORED AS ORC;
+
 -- A run's state is its latest dq_run row: the final row (COMPLETED, PARTIAL or
 -- FAILED) once written, otherwise STARTED.
-CREATE VIEW IF NOT EXISTS {{ dq_database }}.v_latest_run AS
+CREATE OR REPLACE VIEW {{ dq_database }}.v_latest_run AS
 SELECT run_id, started_at, ended_at, engine_version, config_commit, status,
        checks_expected, checks_written, investigations_expected, investigations_done, execution_type, run_date
 FROM (
@@ -67,11 +80,43 @@ FROM (
 ) ranked
 WHERE latest_rank = 1;
 
+-- Committed rows only (ADR-07). Every reader of results, key events, partition states and causes
+-- reads these, never the tables, except the window history, which holds every event of a run
+-- that did not finish COMPLETED (a stricter rule that also covers uncommitted rows).
+CREATE OR REPLACE VIEW {{ dq_database }}.v_committed_result AS
+SELECT r.*
+FROM {{ dq_database }}.dq_check_result r
+LEFT SEMI JOIN {{ dq_database }}.dq_commit c
+  ON c.run_id = r.run_id AND c.evaluation_id = r.evaluation_id AND c.run_date = r.run_date;
+
+CREATE OR REPLACE VIEW {{ dq_database }}.v_committed_key_event AS
+SELECT e.*
+FROM {{ dq_database }}.dq_key_event e
+LEFT SEMI JOIN {{ dq_database }}.dq_commit c
+  ON c.run_id = e.run_id AND c.evaluation_id = e.evaluation_id AND c.run_date = e.run_date
+  AND c.key_event_rows > 0;
+
+CREATE OR REPLACE VIEW {{ dq_database }}.v_committed_partition_state AS
+SELECT s.*
+FROM {{ dq_database }}.dq_partition_state s
+LEFT SEMI JOIN {{ dq_database }}.dq_commit c
+  ON c.run_id = s.run_id AND c.dataset = s.dataset AND c.run_date = s.run_date
+  AND c.check_id = 'T1_PARTITION_DRIFT' AND c.partition_state_rows > 0;
+
+-- A cause row counts once its evaluation is committed: by the run that investigated it, or
+-- before a later run's retry investigated it. A cause left by a run that never committed its
+-- evaluation stays out, even after another run commits the same evaluation id.
+CREATE OR REPLACE VIEW {{ dq_database }}.v_committed_cause AS
+SELECT x.*
+FROM {{ dq_database }}.dq_cause_result x
+LEFT SEMI JOIN {{ dq_database }}.dq_commit c
+  ON c.evaluation_id = x.evaluation_id AND (c.run_id = x.run_id OR c.committed_at <= x.evaluated_at);
+
 -- Every row of the latest evaluation per (dataset, check_id): one row for an
 -- ungrouped check, one row per group for a grouped one. Latest = the latest window, then
 -- the latest evaluation of it, so a RERUN or REPLAY of an older window never becomes the
 -- current state, while a RERUN of the current window replaces it.
-CREATE VIEW IF NOT EXISTS {{ dq_database }}.v_latest_result AS
+CREATE OR REPLACE VIEW {{ dq_database }}.v_latest_result AS
 SELECT evaluation_id, run_id, event_id, window_start, window_end, execution_type, feed, dataset, check_id,
        expectation_version, state, reason_category, reason_code, population,
        violations, observed, expected, group_values, severity, evaluated_at,
@@ -82,14 +127,14 @@ FROM (
            PARTITION BY dataset, check_id
            ORDER BY window_end DESC, evaluated_at DESC, run_id DESC
          ) AS latest_rank
-  FROM {{ dq_database }}.dq_check_result r
+  FROM {{ dq_database }}.v_committed_result r
 ) ranked
 WHERE latest_rank = 1;
 
 -- Keys whose latest event at a hop is FLAGGED or STILL_FLAGGED, with the time the key
 -- was first flagged in its current open spell (after its last CLEARED).
 -- key_value is restricted and not exposed here.
-CREATE VIEW IF NOT EXISTS {{ dq_database }}.v_open_keys AS
+CREATE OR REPLACE VIEW {{ dq_database }}.v_open_keys AS
 SELECT dataset, check_id, hop, key_hash, latest_event, state_detail,
        first_flagged_at, last_observed_at, run_id, evaluation_id
 FROM (
@@ -108,13 +153,13 @@ FROM (
     SELECT e.*,
            MAX(CASE WHEN event = 'CLEARED' THEN observed_at END)
              OVER (PARTITION BY dataset, check_id, hop, key_hash) AS last_cleared_at
-    FROM {{ dq_database }}.dq_key_event e
+    FROM {{ dq_database }}.v_committed_key_event e
   ) with_cleared
 ) ranked
 WHERE latest_rank = 1 AND latest_event IN ('FLAGGED', 'STILL_FLAGGED');
 
 -- One row per file path: first-seen time, and size and times from the latest observation.
-CREATE VIEW IF NOT EXISTS {{ dq_database }}.v_file_status AS
+CREATE OR REPLACE VIEW {{ dq_database }}.v_file_status AS
 SELECT path, feed, first_seen_at, size_bytes AS latest_size_bytes,
        modified_at AS latest_modified_at, observed_at AS last_observed_at
 FROM (
@@ -126,12 +171,12 @@ FROM (
 WHERE latest_rank = 1;
 
 -- The latest recorded state per dataset and partition (T1_PARTITION_DRIFT compares against it).
-CREATE VIEW IF NOT EXISTS {{ dq_database }}.v_latest_partition_state AS
+CREATE OR REPLACE VIEW {{ dq_database }}.v_latest_partition_state AS
 SELECT dataset, table_name, partition_value, file_count, total_bytes, latest_modified_at,
        row_count, counted_at, observed_at, run_id, run_date
 FROM (
   SELECT s.*,
          ROW_NUMBER() OVER (PARTITION BY dataset, partition_value ORDER BY observed_at DESC, run_id DESC) AS latest_rank
-  FROM {{ dq_database }}.dq_partition_state s
+  FROM {{ dq_database }}.v_committed_partition_state s
 ) ranked
 WHERE latest_rank = 1

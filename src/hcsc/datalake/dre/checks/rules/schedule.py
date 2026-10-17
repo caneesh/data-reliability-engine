@@ -46,7 +46,7 @@ def last_completed_sql(dq_database: str, since: date | None = None) -> str:
     blocking = ", ".join(f"'{c}'" for c in BLOCKING_CATEGORIES)
     lookback = f" AND run_date >= DATE'{since.isoformat()}'" if since is not None else ""
     return (
-        f"SELECT dataset, check_id, MAX(evaluated_at) AS evaluated_at FROM {dq_database}.dq_check_result "
+        f"SELECT dataset, check_id, MAX(evaluated_at) AS evaluated_at FROM {dq_database}.v_committed_result "
         f"WHERE execution_type = 'NORMAL' AND severity IS NOT NULL{lookback} "
         f"AND NOT (state = 'DID_NOT_RUN' AND reason_category IN ({blocking})) "
         f"GROUP BY dataset, check_id"

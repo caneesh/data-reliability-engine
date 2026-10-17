@@ -23,4 +23,4 @@ def validate_dq_database(name: str) -> str:
 
 
 # The dq store tables (spec section 5).
-DQ_TABLES = ("dq_run", "dq_check_result", "dq_cause_result", "dq_key_event", "dq_file", "dq_partition_state")
+DQ_TABLES = ("dq_run", "dq_check_result", "dq_cause_result", "dq_key_event", "dq_file", "dq_partition_state", "dq_commit")

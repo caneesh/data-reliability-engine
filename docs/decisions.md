@@ -505,6 +505,40 @@ The traceability matrix comes before code (exit criterion 6).
    - **Backpressure:** at 80% of the budget the next run defers the full sweep.
    - **Load test:** on a representative cluster, which needs the platform team.
 
+## Phase 1 build step 2: commit rows and committed-only views (2026-10-17)
+
+ADR-07, authorised by the checkpoint 1 ratification. Checkpoint 2 (`docs/design/checkpoints.md`) waits for the user's review.
+
+1. **`dq_commit`.**
+   - One row per committed evaluation id (each result row is its own id): run, evaluation, dataset, check, and the counts it vouches for (result rows, key events, partition states).
+   - Appended through the one writer, in batches of 25 evaluations and at the end of the run, also after a failure.
+   - Retention 84 months. `dre validate` refuses less than any table it gates, or results would disappear with their commits.
+2. **Write order**: evidence (key events, partition states), then results, then the commit.
+   - An evaluation counts in `checks_written` only once its commit is stored.
+   - If the evidence cannot be stored, the results are not written. The release 1 evidence_incomplete marker is written and committed with evidence counts of 0, so the current state explains the gap and the partial evidence stays invisible.
+   - If the results cannot be stored, the marker is tried the same way.
+   - If the commit cannot be stored, the run is PARTIAL and nothing is published.
+   - WINDOW_GAP rows are committed like any result.
+3. **Committed views**: `v_committed_result`, `v_committed_key_event`, `v_committed_partition_state`, `v_committed_cause`. `v_latest_result`, `v_open_keys` and `v_latest_partition_state` read them. So do every other reader:
+   - the digest;
+   - `dre trace`;
+   - the hop's open keys;
+   - T1_VOLUME and T1_SCHEMA_DRIFT history;
+   - the rule schedule;
+   - RERUN idempotency (`stored_outcomes`), so an unpublished row never makes a RERUN skip its window;
+   - the retry of investigations.
+4. **Decisions beyond the ADR's text, for checkpoint 2:**
+   1. **The window history reads `dq_check_result` itself.** It already holds every event of a run that did not finish COMPLETED, and a run is COMPLETED only once every evaluation is committed. Holding is therefore stricter than committed-only reading, and it keeps the `max_window_hours` limit and the WINDOW_GAP record. The REPLAY window list reads the table too, for the same reason.
+   2. **A commit's evidence counts gate its evidence.** Key events and partition states of a commit with a count of 0 stay invisible. This is what keeps a marker from publishing partial evidence.
+   3. **Causes are gated by timing.** A cause row counts once its evaluation id is committed, by the investigating run or before a later run's retry. A cause left by a run that never committed stays out, even after another run commits the same deterministic id.
+   4. **Views are `CREATE OR REPLACE`.** Tables stay IF NOT EXISTS. Views hold no data, so `dre install --apply` replaces older definitions; that is the upgrade path for an installed store. The guard already allowed CREATE OR REPLACE VIEW in `store/ddl.sql` only.
+   5. **Batch size 25**, a constant. The ADR said "per batch" without a size.
+5. **Tests.**
+   - `tests/test_commit_protocol.py`, the acceptance condition: failure injection at four write boundaries, each followed by recovery, plus unit tests of the committed views.
+   - `store/test_install.py`: replacing older views.
+   - `config/test_validate.py`: the retention rule.
+   - Tests that write synthetic store rows commit them, as a run would (`tests/store/conftest.append_rows(commit=True)`). `commit=False` leaves them unpublished, and the protocol tests use it.
+
 ## Checkpoint 1 ratified, with conditions (2026-10-17)
 
 The user ratified checkpoint 1 (`docs/design/checkpoints.md`) as "approved with conditions".

@@ -192,8 +192,10 @@ def test_a_slow_key_event_write_is_cancelled_by_the_budget_and_marked_incomplete
     evaluation = Evaluation(planned, event, [result], at, 10)
     rows = result_rows(evaluation, run, "NORMAL")
     monkeypatch.setattr(runner, "write_key_events", lambda *args, **kwargs: _slow_job(spark))
-    stored, complete = write_evaluation(spark, replay.dq, evaluation, rows, run, budget_minutes=0.02)
+    stored, complete, commits = write_evaluation(spark, replay.dq, evaluation, rows, run, budget_minutes=0.02)
     assert (len(stored), complete) == (1, 0)
+    assert [(c.key_event_rows, c.partition_state_rows) for c in commits] == [(0, 0)]  # the marker vouches for no evidence
+    runner.append_commits(spark, replay.dq, commits, at, run.run_date)  # as the run's publisher does (ADR-07)
     current = [r for r in spark.table(f"{replay.dq}.v_latest_result").collect() if r.check_id == "HOP_KEY_CURRENCY"]
     assert [(r.state, r.reason_code) for r in current] == [("DID_NOT_RUN", "evidence_incomplete")]
 

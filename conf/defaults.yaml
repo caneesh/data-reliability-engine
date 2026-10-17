@@ -14,6 +14,7 @@ retention_months:             # spec section 5: results and events 7 years, file
   dq_key_event: 84
   dq_file: 13
   dq_partition_state: 13      # release 4: partition states (T1_PARTITION_DRIFT)
+  dq_commit: 84               # ADR-07: at least as long as every table it gates (results, events, partition states)
 
 recipients:                   # feed owner -> email addresses (spec section 8)
   membership-gold: [dre-alerts@example.com]

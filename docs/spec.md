@@ -26,7 +26,7 @@ Repository copy: production paths, file names, and database and table names are 
 
 **Release 4 (outside-in evidence, October 2026; `docs/design/outside-in-evidence.md`):** read-only checks that see what an in-pipeline audit sees from inside the jobs, without touching a job. Built so far: T1\_PARTITION\_DRIFT (section 6; a partition rewritten outside the window, detected from each partition's files and confirmed by counting that partition alone; its state in `dq_partition_state`, section 5). Planned: T1\_FILE\_RECORD\_COUNT, T1\_SEQUENCE\_GAP, HOP\_ROW\_PARITY and HOP\_CARDINALITY. Still out, by nature: the reason a job itself rejected a record, and a merge's inserted-versus-updated split.
 
-**Phase 1 design (approved and frozen 2026-10-16; `docs/design/target-architecture.md`, `docs/design/reconciliation-model.md`):** every hop gets a reconciliation contract, and the engine will account for every due record in exactly one disposition. Built in steps (the architecture's section 7). Built so far: step 1, the contract schema and its validation: `grain` and `contracts` on a dataset, `yarn_queue` and `protected_queues` in `defaults.yaml` (section 3); hop checks read a hop's exclusions through its contract (section 6); `dre validate` reports each hop's kind and blind spots (section 3, "Validation"). Not built yet: the ledger (dispositions, volume guards, the reject policy, tolerance), commit rows, evaluation modes, attribution and contribution checks, the chain, run budgets.
+**Phase 1 design (approved and frozen 2026-10-16; `docs/design/target-architecture.md`, `docs/design/reconciliation-model.md`):** every hop gets a reconciliation contract, and the engine will account for every due record in exactly one disposition. Built in steps (the architecture's section 7). Built so far: step 1, the contract schema and its validation: `grain` and `contracts` on a dataset, `yarn_queue` and `protected_queues` in `defaults.yaml` (section 3); hop checks read a hop's exclusions through its contract (section 6); `dre validate` reports each hop's kind and blind spots (section 3, "Validation"). Step 2, commit rows: an evaluation becomes visible only once its `dq_commit` row is stored, and every reader reads committed rows (section 5, "Commit protocol"). Not built yet: the ledger (dispositions, volume guards, the reject policy, tolerance), evaluation modes, attribution and contribution checks, the chain, run budgets.
 
 ## 2. Stack and repository layout
 
@@ -406,7 +406,7 @@ RERUN and REPLAY:
 
 ## 5. Data model
 
-All tables in the `dq` database, ORC, partitioned by `run_date`. Append-only: the writer module exposes only `append`, which selects the frame's columns in the table's column order before `insertInto`. Retention is set per table in `defaults.yaml` (results and events default to 7 years, file registry to 13 months) and applied only by `store/retention.py`. The platform team creates the empty `dq` database and grants the service account access; `dre install --apply` creates the tables and views in it (every statement is IF NOT EXISTS, so it is safe to rerun), and `dre install --check` compares an existing store with the DDL. `dre run` never creates the database or the store: it checks the store tables and views exist and, if not, exits 3 naming `dre install`. `store/local_setup.py` creates the database and store for tests and local runs.
+All tables in the `dq` database, ORC, partitioned by `run_date`. Append-only: the writer module exposes only `append`, which selects the frame's columns in the table's column order before `insertInto`. Retention is set per table in `defaults.yaml` (results, events and commits default to 7 years, the file registry and partition states to 13 months) and applied only by `store/retention.py`. The platform team creates the empty `dq` database and grants the service account access; `dre install --apply` creates the tables and views in it (every statement is IF NOT EXISTS, so it is safe to rerun), and `dre install --check` compares an existing store with the DDL. `dre run` never creates the database or the store: it checks the store tables and views exist and, if not, exits 3 naming `dre install`. `store/local_setup.py` creates the database and store for tests and local runs.
 
 `dq_run` gets two rows per run: STARTED when the run starts (`ended_at` and the check counts null) and a final row (COMPLETED, PARTIAL or FAILED) when it ends. A run's state is its latest row. Both rows carry `run_date` = the UTC date the run started, so a run that ends after midnight UTC stays in one partition.
 
@@ -460,15 +460,41 @@ CREATE TABLE dq.dq_partition_state (
   row_count BIGINT, counted_at TIMESTAMP,
   observed_at TIMESTAMP, run_id STRING
 ) PARTITIONED BY (run_date DATE) STORED AS ORC;
+
+-- Phase 1 design, ADR-07: one row per committed evaluation id (each result row is its own id).
+-- The counts say what the commit vouches for; evidence rows of a commit with a count of 0 stay
+-- invisible.
+CREATE TABLE dq.dq_commit (
+  run_id STRING, evaluation_id STRING, dataset STRING, check_id STRING,
+  result_rows INT, key_event_rows BIGINT, partition_state_rows INT,
+  committed_at TIMESTAMP
+) PARTITIONED BY (run_date DATE) STORED AS ORC;
 ```
 
-Views derive current state:
+**Commit protocol** (Phase 1 design, ADR-07). Hive has no transaction across tables, so an evaluation is published by a commit row written last:
+
+1. **Order.** The run writes an evaluation's evidence (key events, partition states), then its result rows, then, in a batch with other evaluations, one `dq_commit` row per evaluation id. The commit rows are appended every 25 evaluations and at the end of the run, also when the run fails, so the store gains one small file per batch, not one per evaluation.
+2. **Visibility.** Every reader of results, key events, partition states and causes reads the committed views below, never the tables:
+   - results and key events count only with a commit of the same run and evaluation id;
+   - partition states count only with a commit of the same run, dataset and T1\_PARTITION\_DRIFT;
+   - causes count once their evaluation id was committed by the investigating run, or before a later run's retry investigated it.
+
+   The window history is the one exception. It reads `dq_check_result` itself and holds every event of a run that did not finish COMPLETED (section 4), which is stricter: a run is COMPLETED only once all its evaluations are committed.
+3. **Failures.** An evaluation interrupted before its commit is invisible. This covers a process that dies, a write that fails, and a commit that cannot be stored. Its run is not COMPLETED, so its window is held and evaluated again, and evaluation ids are deterministic (section 4), so the retry publishes the same ids under its own run.
+   - **Evidence cannot be stored.** The results are not written. An evidence\_incomplete DID\_NOT\_RUN row for every row of the evaluation is written and committed with evidence counts of 0, so the current state says so, and the partial evidence stays invisible.
+   - **Results cannot be stored.** The same marker is tried.
+   - **Counting.** An evaluation counts in `checks_written` only once its commit is stored.
+4. **Retention.** `dq_commit` must be kept at least as long as every table it gates (`dq_check_result`, `dq_cause_result`, `dq_key_event`, `dq_partition_state`), or results would disappear with their commits; `dre validate` checks it.
+
+Views derive current state. They are `CREATE OR REPLACE`, so `dre install --apply` replaces them after an upgrade; they hold no data:
+
+- `dq.v_committed_result`, `dq.v_committed_key_event`, `dq.v_committed_partition_state`, `dq.v_committed_cause`: the committed rows of each table (commit protocol above)
 
 - `dq.v_latest_run`: each run's latest `dq_run` row (its final row once written, otherwise STARTED)
-- `dq.v_latest_result`: the latest evaluation per (dataset, check\_id), by `window_end` and then `evaluated_at` (so a RERUN or REPLAY of an older window never becomes the current state): one row for an ungrouped check, one row per group for a grouped one
-- `dq.v_open_keys`: keys whose latest `dq_key_event` at a hop is FLAGGED or STILL\_FLAGGED, with first flagged date (per dataset, check, hop and key)
+- `dq.v_latest_result`: the latest committed evaluation per (dataset, check\_id), by `window_end` and then `evaluated_at` (so a RERUN or REPLAY of an older window never becomes the current state): one row for an ungrouped check, one row per group for a grouped one
+- `dq.v_open_keys`: keys whose latest committed `dq_key_event` at a hop is FLAGGED or STILL\_FLAGGED, with first flagged date (per dataset, check, hop and key)
 - `dq.v_file_status`: one row per file path with first-seen time and latest size
-- `dq.v_latest_partition_state`: the latest `dq_partition_state` row per dataset and partition (release 4)
+- `dq.v_latest_partition_state`: the latest committed `dq_partition_state` row per dataset and partition (release 4)
 
 `key_hash` is HMAC-SHA256 of the normalised key, with the secret read from a protected file named in config, never from the repository. Emails use counts and, only if enabled, `key_hash`; `key_value` is never written to logs or emails.
 
@@ -631,7 +657,7 @@ A filter rule is one `table_contains` parameter set under `filter_rules`: `table
 | --- | --- | --- |
 | `dre validate [--conf DIR]` | Static validation of all config | 0 valid, 1 errors |
 | `dre dry-run --feed F` | Runs preconditions and checks for one feed, prints results, writes nothing | 0 always, unless the command itself fails |
-| `dre install --print\|--apply\|--check [--conf DIR]` | `--print` renders the store DDL for the configured dq database; `--apply` creates missing tables and views (all IF NOT EXISTS, safe to rerun); `--check` compares the existing tables and views with the DDL | 0 done or matching, 1 differences found or apply failed, 3 the database does not exist |
+| `dre install --print\|--apply\|--check [--conf DIR]` | `--print` renders the store DDL for the configured dq database; `--apply` creates missing tables (IF NOT EXISTS) and creates or replaces the views (they hold no data, so an upgrade's new definitions take effect), safe to rerun; `--check` compares the existing tables and views with the DDL | 0 done or matching, 1 differences found or apply failed, 3 the database does not exist |
 | `dre run [--feed F] [--execution-type NORMAL\|RERUN\|REPLAY] [--window-start T --window-end T] [--from T --to T]` | NORMAL (the default) is scheduled every hour; RERUN takes `--window-start` and `--window-end`, REPLAY takes `--from` and `--to` (ISO 8601, UTC; section 4). A NORMAL run evaluates only feeds with something due: a cadence slot's deadline (slot + `sla_hours`) passed since the feed's last evaluated window, or new or changed landed files. `--feed F` evaluates F even when nothing is due. Then preconditions, checks, causes, append results, send email | 0 run completed (even with FAILED checks), 2 partial, 3 could not start (including: the store is not installed, the message names `dre install`; another NORMAL run is still STARTED and younger than `watchdog_grace_minutes`, so the two would evaluate the same windows and store everything twice; an older STARTED run is dead and does not block) |
 | `dre trace --dataset D (--key-file FILE \| --key "k1,k2,...")` | Prints one line per layer along the `upstream` chain: present or not, record time, load time, file; ends with the first layer where the key is absent or older, then that hop's cause line. The key is read from the first line of `--key-file` (`-` for stdin), which keeps it off the command line, the process list and the shell history (`--key` stays for interactive use); it travels as data in a one-row temp view the layer queries join, never as a literal in SQL text, so it reaches no query plan or history-server page | 0, or 3 for an unknown dataset, a key with the wrong number of parts, or no key |
 | `dre watchdog` | Checks the last expected run exists and wrote every expected check; emails if not | 0 healthy, 1 alert sent, 3 the watchdog itself could not run (configuration unreadable, or an error outside the store read; a store that cannot be read is an alert) |
