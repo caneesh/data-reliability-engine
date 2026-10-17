@@ -197,7 +197,7 @@ Recorded in `docs/decisions.md`, "Phase 1 build step 2", item 4.
 
 ## Checkpoint 2, revised: identity, verification and repair (2026-10-17)
 
-**Status:** built; awaiting the user's review. **CI:** run #83 on `3112889`, green (`test`, `e2e`, `package`), with the `test-report` (JUnit XML, every test by name) and `e2e-logs` artifacts kept with the run. **Decisions:** `docs/decisions.md`, "Checkpoint 2 reviewed" (the review, E1 to E6 verdicts, my assessment) and "Checkpoint 2 revision" (what was built).
+**Status:** built; **reviewed by the user on 2026-10-17: corrections R1 to R3 required, then ratified for implementation** (below, "Checkpoint 2 corrections"). **CI:** run #83 on `3112889`, green (`test`, `e2e`, `package`), with the `test-report` (JUnit XML, every test by name) and `e2e-logs` artifacts kept with the run. **Decisions:** `docs/decisions.md`, "Checkpoint 2 reviewed" (the review, E1 to E6 verdicts, my assessment) and "Checkpoint 2 revision" (what was built).
 
 ### Findings and what answers them
 
@@ -252,4 +252,61 @@ Recorded in `docs/decisions.md`, "Phase 1 build step 2", item 4.
 1. The user reviews this revision, or asks for changes.
 2. ~~CI is green on the revision commit, with the test report kept.~~ Run #83, green, both artifacts kept.
 3. Step 3 is bound by the D6 conditions from checkpoint 1.
+
+## Checkpoint 2 corrections R1 to R3 (2026-10-17)
+
+**Status:** built; awaiting independent verification and the user's sign-off. Checkpoint 2 stays open and step 3 blocked until then. **CI:** see the handoff's history table (row "Checkpoint 2 corrections R1 to R3"). **Decisions:** `docs/decisions.md`, "Checkpoint 2 corrections R1 to R3". **Evidence package:** `docs/design/evidence/checkpoint2-corrections.md` (commands, committed-view and integrity-view output, residual risks).
+
+### Corrections and their proof
+
+| ID | Correction | Code | Proving tests (`tests/test_evidence_integrity.py` unless named) |
+| --- | --- | --- | --- |
+| R1 | Consistency model documented (spec section 5, item 6) | spec section 5 | (documentation) |
+| R1 | The publisher-less cause commit moved out of the cancellable thread | `runner.explain_failures` | `test_f01_a_cancelled_investigation_that_finishes_late_never_publishes` |
+| R1 | Results preserved when evidence is lost later; evidence states VALID, INVALID, EXPIRED, UNKNOWN; `healthy` | `store/ddl.sql` (`v_commit_state`, committed views, `v_latest_result`) | `test_f01_evidence_changed_after_verification_is_invalid_and_never_healthy`, `test_f02_evidence_lost_after_commit_keeps_the_result_and_marks_it_invalid`, `test_f09_commit_metadata_outliving_its_evidence_is_expired_not_lost`, `test_a_failed_sweep_is_unknown_not_lost_until_a_sweep_completes` |
+| R1 | Compromised or unverified evidence never healthy, and never a baseline | views; `runner.without_pass`, `rebaselines`, forced full sweep; `integrity.compromised_baselines` | `test_compromised_baselines_until_rebaselined`, `test_partition_drift_cannot_pass_on_a_compromised_baseline`, `test_a_compromised_hop_runs_as_a_full_sweep_and_is_rebaselined`, `test_the_digest_never_counts_unverified_evidence_as_healthy` |
+| R1 | Explicit lifetime (13 months partition states, 84 results); retention deadlines; investigation holds | `store/commits.py` (`with_lifetime`), `store/retention.py` (`droppable`), `config/models.py` (`RetentionHold`) | `test_a_commit_records_how_long_its_evidence_is_kept`, `test_retention_keeps_promised_and_held_partitions` |
+| R1 | Confirmed loss (EVIDENCE\_MISMATCH, INVALID) against transient failure (SWEEP FAILED, UNKNOWN) | `store/integrity.py` (`sweep`) | `test_f02_...`, `test_a_failed_sweep_is_unknown_not_lost_until_a_sweep_completes` |
+| R1 | Integrity-check freshness reported | `notify/digest.py`, `watchdog.integrity_problems` | `test_the_digest_never_counts_unverified_evidence_as_healthy`, `test_the_watchdog_reports_integrity_freshness_and_incidents`, the digest golden files |
+| R2 | Readback after repair; only CONFIRMED units published; absent, conflicting, unavailable fail closed; conflicts recorded | `runner.Publisher._repaired`, `store/commits.stored_commits` | `test_f04_a_repair_whose_readback_fails_is_uncertain_and_not_published`, `test_identical_duplicate_commits_are_confirmed`, `test_a_conflicting_commit_fails_closed_and_is_recorded`; `tests/test_commit_protocol.py::test_a_failed_commit_write_is_read_back_and_completed[none, some, all]`, `::test_a_unit_left_split_by_a_failed_repair_does_not_count` |
+| R3 | `result_run_date` on cause commits; join on run, run\_date, evaluation id | `store/ddl.sql` (`v_committed_cause`), `runner.cause_commits` | `test_f07_f08_causes_attach_by_run_run_date_and_evaluation_id`; `tests/test_trace.py::test_a_retried_investigation_s_cause_is_shown`; `tests/test_commit_protocol.py::test_a_cause_attaches_to_a_result_by_identity_never_by_time` |
+
+### The failure-injection matrix
+
+| ID | Scenario | Required outcome | Test | What it asserts |
+| --- | --- | --- | --- | --- |
+| F01 | Evidence changes between verification and commit | No false committed PASS | `test_f01_evidence_changed_after_verification_is_invalid_and_never_healthy`; late threads: `test_f01_a_cancelled_investigation_that_finishes_late_never_publishes`, `test_f01_a_cancelled_evidence_write_that_lands_late_stays_invisible` | The added key event is found by the sweep (`key events: 2 declared, 3 stored`); the PASSED result stays, INVALID, `healthy` false, its key events hidden. A late cause row has no commit and no visible cause; a late key event under a marker stays invisible |
+| F02 | Evidence missing after commit | Integrity invalidation and visibility policy enforced | `test_f02_evidence_lost_after_commit_keeps_the_result_and_marks_it_invalid` | `key events: 3 declared, 0 stored` recorded; the FAILED result stays visible, INVALID |
+| F03 | Commit append partly succeeds, then raises | Readback reconciles exact identities | `tests/test_commit_protocol.py::test_a_failed_commit_write_is_read_back_and_completed[none, some, all]`, `::test_a_unit_left_split_by_a_failed_repair_does_not_count` | Every unit published once after the repair; a unit left split by a failed repair is not counted |
+| F04 | Repair append succeeds, then the readback fails | Uncertain; no success asserted | `test_f04_a_repair_whose_readback_fails_is_uncertain_and_not_published` | 0 published, 2 unconfirmed, although the 3 commit rows landed |
+| F05 | Retry under the same deterministic evaluation id | Idempotent; no conflicting published rows | `test_f05_f06_one_current_result_when_runs_publish_the_same_evaluation`; the commit-protocol boundary tests (published once) | One current result |
+| F06 | Two publishers race on the same evaluation | Single authoritative outcome | `test_f05_f06_one_current_result_when_runs_publish_the_same_evaluation` | Exactly one `v_latest_result` row: the later evaluation, then the higher run id |
+| F07 | Cause date differs from the result's | Correct association | `test_f07_f08_causes_attach_by_run_run_date_and_evaluation_id`; `tests/test_trace.py::test_a_retried_investigation_s_cause_is_shown` | The date-B cause for the date-A result is shown, with `result_run_date` 2026-02-18 |
+| F08 | Orphan or conflicting cause commit | Not visible as a valid cause | `test_f07_f08_causes_attach_by_run_run_date_and_evaluation_id` | Orphan, collision (same run and id, other date), unrelated and INVALID cause sets are not shown |
+| F09 | Commit metadata survives evidence retention | No misleading complete-evidence claim | `test_f09_commit_metadata_outliving_its_evidence_is_expired_not_lost`; `test_retention_keeps_promised_and_held_partitions` | EXPIRED, not INVALID, not healthy; retention keeps promised and held partitions |
+| F10 | Prior checkpoint 2 regression suite | All previously passing tests green | `tests/test_commit_protocol.py`, the full suite | Green (CI row in the handoff) |
+
+Precedence (the acceptance list): `test_normal_rerun_and_replay_precedence` (a RERUN of the current window replaces it; a REPLAY or RERUN of an older window never becomes current), with `tests/test_execution_types.py`.
+
+### Invariants re-verified
+
+- **Hard constraints.** Writes through `store/writer.py`, append only, to the dq store; partition drops only in `store/retention.py`; no change to any pipeline; guard tests pass.
+- **Three result states.** No new state: evidence states describe a committed unit, not a result. One new DID\_NOT\_RUN reason, `evidence_invalid` (PLATFORM).
+- **D1 to D6 and E1 to E6.** Unchanged, with E3 as revised at the first review.
+- **Tests restated, none weakened:** the synthetic key-event commit (one commit per evaluation, as a run writes it), `test_views.py`'s key-event ids, the digest golden files' new integrity line.
+
+### Residual risks
+
+1. **Outside the model.** Rows or commits forged by a writer with access to the dq database are not detectable when they match each other; the sweep detects only mismatches.
+2. **Sweep cost.** The weekly full sweep counts every unexpired commit's rows (key events are the largest table); the daily sweep reads 35 days. Not load-tested (ADR-08).
+3. **A compromised hop's full sweep** may exceed its budget; the window is then held and retried as a full sweep until `max_window_hours`, then becomes a WINDOW\_GAP.
+4. **UNKNOWN is store-wide by scope.** A failed daily sweep makes every result of the last 35 days UNKNOWN (not healthy) until a sweep completes: noisy, but fail closed.
+5. **Wall-clock ordering of sweeps.** Which sweep is latest is decided by `recorded_at` (DRE's own records); a clock step backwards could pick an older sweep. It affects UNKNOWN only, never which cause attaches to which result.
+6. **An unconfirmed unit may be published twice**: if its commit landed but could not be confirmed, its window is evaluated again and published under the next run; the precedence rule picks one current result.
+
+### Gate to step 3
+
+1. Independent verification of R1 to R3 and F01 to F10 (each Verified or Reopened).
+2. CI green on the corrections commit, with the test report kept.
+3. The user signs off checkpoint 2.
 

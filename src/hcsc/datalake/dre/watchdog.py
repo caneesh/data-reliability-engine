@@ -10,7 +10,10 @@ The expected run is the hour H = (now - watchdog_grace_minutes) floored to the h
 - a run started then whose latest row is still STARTED more than the grace after it started;
 - a run started then that ended FAILED, or wrote fewer checks than it expected;
 - a run started then whose cause investigations did not all finish (tracked apart from its
-  checks, so the checks keep their states; the next run retries the investigations).
+  checks, so the checks keep their states; the next run retries the investigations);
+- the store's integrity is not verified: no integrity sweep completed in the last 26 hours, once
+  the store is older than that (checkpoint 2 corrections, R1: integrity-check freshness);
+- integrity incidents (an evidence mismatch or a commit conflict) recorded in that hour.
 Alerts go to watchdog_owner's recipients, or every address in recipients when it is not set.
 Exit 0 healthy, 1 alert raised (sent, or printed when no mail relay is configured).
 """
@@ -28,6 +31,7 @@ if TYPE_CHECKING:
 
 STARTED = "STARTED"
 HOUR = timedelta(hours=1)
+STALE_AFTER = timedelta(hours=26)  # the integrity sweep runs daily
 
 
 @dataclass(frozen=True)
@@ -99,6 +103,32 @@ def read_runs(spark: SparkSession, dq_database: str, since: datetime) -> list[Ru
                 f"AND coalesce(execution_type, 'NORMAL') = 'NORMAL'").collect()]
 
 
+def integrity_problems(spark: SparkSession, dq_database: str, now: datetime, grace_minutes: int) -> list[str]:
+    """Integrity-check freshness and the expected hour's integrity incidents (dq_integrity)."""
+    dq_database = validate_dq_database(dq_database)
+    now = _utc(now)
+    hour = expected_hour(now, grace_minutes)
+    stamp = lambda t: _utc(t).strftime("%Y-%m-%d %H:%M:%S")  # noqa: E731
+    row = spark.sql(
+        f"SELECT MAX(CASE WHEN record = 'SWEEP' AND status = 'COMPLETED' THEN recorded_at END) AS verified, "
+        f"SUM(CASE WHEN record IN ('EVIDENCE_MISMATCH', 'COMMIT_CONFLICT') AND run_date >= DATE'{hour.date().isoformat()}' "
+        f"  AND recorded_at >= TIMESTAMP '{stamp(hour)}' AND recorded_at < TIMESTAMP '{stamp(hour + HOUR)}' "
+        f"  THEN 1 ELSE 0 END) AS incidents FROM {dq_database}.dq_integrity").collect()[0]
+    found = []
+    oldest = spark.sql(f"SELECT MIN(started_at) AS t FROM {dq_database}.dq_run").collect()[0].t
+    if oldest is not None and now - _utc(oldest) > STALE_AFTER:
+        if row.verified is None:
+            found.append("store integrity not verified: no integrity sweep has completed")
+        elif now - _utc(row.verified) > STALE_AFTER:
+            found.append(f"store integrity verification is stale: the last integrity sweep completed "
+                         f"{_utc(row.verified):%Y-%m-%d %H:%M} UTC")
+    if row.incidents:
+        found.append(f"{int(row.incidents)} integrity incident(s) recorded in {hour:%Y-%m-%d %H:%M}-"
+                     f"{hour + HOUR:%H:%M} UTC (dq_integrity: evidence changed or lost after publication, "
+                     "or a conflicting commit)")
+    return found
+
+
 def watch(spark: SparkSession, conf: str, now: datetime | None = None) -> int:
     """0 healthy, 1 alert sent (or printed), 3 the watchdog itself could not run (configuration
     unreadable, or an error outside the store read), so a scheduler can tell the two apart."""
@@ -128,6 +158,10 @@ def _watch(spark: SparkSession, conf: str, now: datetime | None) -> int:
         found = problems(read_runs(spark, defaults.dq_database, expected_hour(now, grace) - HOUR), now, grace)
     except Exception as exc:
         found = [f"cannot read {defaults.dq_database}.dq_run ({type(exc).__name__})"]
+    try:
+        found += integrity_problems(spark, defaults.dq_database, now, grace)
+    except Exception as exc:
+        found.append(f"cannot read {defaults.dq_database}.dq_integrity ({type(exc).__name__})")
     if not found:
         print(f"dre watchdog: healthy (the run for {expected_hour(now, grace):%Y-%m-%d %H:00} UTC completed)")
         return EXIT_HEALTHY

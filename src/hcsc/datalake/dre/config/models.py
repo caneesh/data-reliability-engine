@@ -231,6 +231,27 @@ class EmailServer(Model):
     all_clear_digest: Literal["every_run", "daily", "never"] = "every_run"
 
 
+class RetentionHold(Model):
+    """An investigation hold (checkpoint 2 corrections, R1): `dre retention` drops no dq partition
+    whose run_date lies in [from, to] while the hold lasts (until that day, inclusive, or until the
+    hold is removed when `until` is null)."""
+
+    from_: date = Field(alias="from")
+    to: date
+    reason: NonEmptyStr
+    until: date | None = None
+
+    @model_validator(mode="after")
+    def _order(self) -> RetentionHold:
+        if self.to < self.from_:
+            raise invalid(f"retention_holds: to ({self.to}) is before from ({self.from_})",
+                          "set `to` on or after `from`")
+        return self
+
+    def holds(self, run_date: date, today: date) -> bool:
+        return self.from_ <= run_date <= self.to and (self.until is None or today <= self.until)
+
+
 class Defaults(SettingsOverride):
     dq_database: Annotated[str, AfterValidator(_dq_database)]
     environment: NonEmptyStr
@@ -260,6 +281,12 @@ class Defaults(SettingsOverride):
     watchdog_grace_minutes: int = Field(default=30, ge=1, le=59)
     # ADR-07: evaluations and investigations a run publishes per append of commit rows.
     commit_batch: int = Field(default=25, ge=1, le=1000)
+    # Checkpoint 2 corrections (R1): the daily integrity sweep checks the commits of the last
+    # integrity_sweep_days days against the store; on integrity_full_sweep_day it checks every commit
+    # whose evidence is still kept (null: never). Investigation holds keep partitions from retention.
+    integrity_sweep_days: int = Field(default=35, ge=1)
+    integrity_full_sweep_day: Weekday | None = "SUNDAY"
+    retention_holds: list[RetentionHold] = []
     # How far back a run looks for FAILED results whose cause investigation never finished, to retry it.
     investigation_retry_days: int = Field(default=7, ge=1)
     # How far back (run_date) the hourly reads of the dq store look: the window history, the rule

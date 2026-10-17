@@ -71,7 +71,7 @@ def digests(spark, config):
     create_store(spark, DQ)
     gold, cur = "gold_member_coverage", "example_curated_enrollment"
     keys_obs = ("1 of 3 keys have more than one row", "every key at most once")
-    append_rows(spark, DQ, "dq_check_result", [
+    results = [
         # two runs ago
         result(OLDER, gold, "T1_KEY_NULLS", "FAILED", SRC_A, violations=2),
         result(OLDER, gold, "one_row_per_coverage", "PASSED", SRC_A, violations=0),
@@ -108,9 +108,12 @@ def digests(spark, config):
         result(CURRENT, cur, "HOP_FILE_COMPLETENESS", "FAILED", {"upstream": "example_raw_enrollment"}, violations=1,
                observed="1 of 4 upstream files have fewer rows here", expected="every upstream row of each file present here"),
         result(CURRENT, "provider_directory", "T1_KEY_NULLS", "PASSED", feed="provider_directory_merge", violations=0),
-    ])
+    ]
     on_time = f"3-{gold}-T1_ON_TIME-"
     currency = f"3-{gold}-HOP_KEY_CURRENCY-upstream=example_curated_enrollment"
+    # The hop's result is committed with its key events below: one commit vouches for both, as a run writes it.
+    append_rows(spark, DQ, "dq_check_result", [r for r in results if r["evaluation_id"] != currency])
+    append_rows(spark, DQ, "dq_check_result", [r for r in results if r["evaluation_id"] == currency], commit=False)
     files = f"3-{cur}-HOP_FILE_COMPLETENESS-upstream=example_raw_enrollment"
     append_rows(spark, DQ, "dq_cause_result", [
         *[cause(on_time, slot, 2, "PIPELINE_STALLED", "CONFIRMED") for slot in SLOTS],
@@ -170,7 +173,8 @@ def test_key_samples_are_bounded_in_sql_and_read_only_when_wanted(spark, config)
     create_store(spark, DQ)
     append_rows(spark, DQ, "dq_check_result", [{**result(CURRENT, "gold_member_coverage", "HOP_KEY_CURRENCY", "FAILED",
                                                            UPSTREAM, violations=20), "run_id": run_id,
-                                                 "evaluation_id": "many-keys", "evaluated_at": at, "run_date": at.date()}])
+                                                 "evaluation_id": "many-keys", "evaluated_at": at, "run_date": at.date()}],
+                commit=False)  # committed with its key events
     append_rows(spark, DQ, "dq_key_event", [
         {"run_id": run_id, "evaluation_id": "many-keys", "dataset": "gold_member_coverage", "check_id": "HOP_KEY_CURRENCY",
          "hop": "h", "key_hash": f"{n:064x}", "key_value": KEY_VALUE, "event": "FLAGGED", "state_detail": "MISSING",

@@ -54,4 +54,14 @@ Report only (proposed rules)
 {% endfor %}
 
 {% endif %}
+{% if d.evidence %}
+Evidence not verified (not counted as healthy)
+{% for i in d.evidence %}
+- {{ i.label }}: {{ i.state }}, evidence {{ i.reason }}
+{% endfor %}
+
+{% endif %}
 Passing checks: {{ d.passing }}
+{% if d.integrity %}
+{{ d.integrity }}
+{% endif %}

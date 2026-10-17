@@ -10,7 +10,7 @@ from jinja2 import Environment, StrictUndefined
 
 from hcsc.datalake.dre.store.names import validate_dq_database
 
-VIEWS = ("v_latest_run", "v_committed_result", "v_committed_key_event", "v_committed_partition_state",
+VIEWS = ("v_latest_run", "v_commit_state", "v_committed_result", "v_committed_key_event", "v_committed_partition_state",
          "v_committed_cause", "v_commit_integrity", "v_latest_result", "v_open_keys", "v_file_status",
          "v_latest_partition_state")
 

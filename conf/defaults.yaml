@@ -15,6 +15,7 @@ retention_months:             # spec section 5: results and events 7 years, file
   dq_file: 13
   dq_partition_state: 13      # release 4: partition states (T1_PARTITION_DRIFT)
   dq_commit: 84               # ADR-07: at least as long as every table it gates (results, events, partition states)
+  dq_integrity: 84            # checkpoint 2 corrections: integrity sweeps and incidents
 
 recipients:                   # feed owner -> email addresses (spec section 8)
   membership-gold: [dre-alerts@example.com]
@@ -39,6 +40,9 @@ rule_run_at: "06:00"          # daily gold rules run at the first run at or afte
 rule_weekly_day: null         # weekly gold rules' day; null: each dataset's full_sweep_day
 watchdog_grace_minutes: 30    # dre watchdog expects each hour's run to have started (and finished) this long after the hour
 commit_batch: 25              # ADR-07: evaluations and investigations published per append of commit rows (1 to 1000)
+integrity_sweep_days: 35      # the daily integrity sweep checks this many days of commits against the store
+integrity_full_sweep_day: SUNDAY  # and every commit whose evidence is still kept, once a week (null: never)
+retention_holds: []           # investigation holds: [{from: 2026-01-01, to: 2026-01-31, reason: "...", until: 2026-12-31}]
 investigation_retry_days: 7   # each NORMAL run retries cause investigations left unfinished this far back
 history_lookback_days: 400    # how far back (run_date) the hourly reads of the dq store look; must cover max_window_hours and investigation_retry_days
 watchdog_owner: null          # whose recipients get watchdog alerts; null: every address in recipients

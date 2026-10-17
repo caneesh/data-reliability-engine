@@ -53,7 +53,7 @@ from hcsc.datalake.dre.config.validate import validate_conf
 from hcsc.datalake.dre.notify.digest import digests_for_run, GROUPS_SQL, to_send
 from hcsc.datalake.dre.notify.sinks import deliver, from_digests
 from hcsc.datalake.dre.sources.hdfs import LandingError, list_landing
-from hcsc.datalake.dre.store import runs
+from hcsc.datalake.dre.store import integrity, runs
 from hcsc.datalake.dre.store.causes import append_cause_results
 from hcsc.datalake.dre.store.commits import CAUSE, Commit, append_commits, mismatches, stored_commits, stored_counts
 from hcsc.datalake.dre.store.files import register_files
@@ -365,7 +365,8 @@ def upstreams_of(config: Config, ds: Dataset) -> dict[str, Dataset]:
 
 def check_context(spark: SparkSession, config: Config, planned: Planned, event: Event,
                   landing_problems: dict[str, CheckResult] | None = None, key_secret: bytes | None = None,
-                  budget_minutes: float | None = None, record_key_events: bool = True) -> CheckContext:
+                  budget_minutes: float | None = None, record_key_events: bool = True,
+                  force_full_sweep: bool = False) -> CheckContext:
     ds = planned.dataset
     landing_problem = (landing_problems or {}).get(planned.feed.feed) if planned.feed else None
     return CheckContext(
@@ -373,7 +374,7 @@ def check_context(spark: SparkSession, config: Config, planned: Planned, event: 
         config.defaults.dq_database, landing_problem,
         upstreams=upstreams_of(config, ds),
         key_secret=key_secret,
-        full_sweep=is_full_sweep(config, ds.dataset, event),
+        full_sweep=force_full_sweep or is_full_sweep(config, ds.dataset, event),
         budget_minutes=budget_minutes, scan_mb_per_minute=config.defaults.scan_mb_per_minute,
         record_key_events=record_key_events, history_since=history_since(config, event.window_end),
     )
@@ -381,9 +382,10 @@ def check_context(spark: SparkSession, config: Config, planned: Planned, event: 
 
 def evaluate(spark: SparkSession, config: Config, planned: Planned, event: Event,
              landing_problems: dict[str, CheckResult] | None = None, key_secret: bytes | None = None,
-             budget_minutes: float | None = None, record_key_events: bool = True) -> Evaluation:
+             budget_minutes: float | None = None, record_key_events: bool = True,
+             force_full_sweep: bool = False) -> Evaluation:
     ctx = check_context(spark, config, planned, event, landing_problems, key_secret, budget_minutes,
-                        record_key_events)
+                        record_key_events, force_full_sweep)
     results, duration_ms = run_check(planned.check, ctx, event)
     return Evaluation(planned, event, results, datetime.now(timezone.utc), duration_ms, ctx)
 
@@ -468,11 +470,13 @@ COMMIT_BATCH = 25
 @dataclass(frozen=True)
 class Unit:
     """What is published or withheld whole: an evaluation (every row and group it stored) or a
-    cause investigation. `complete` counts in checks_written, `investigated` in investigations_done."""
+    cause investigation. `complete` counts in checks_written, `investigated` in investigations_done;
+    `after` are dq_integrity rows recorded once the unit is published (REBASELINED)."""
 
     commits: list[Commit]
     complete: int = 0
     investigated: int = 0
+    after: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -480,24 +484,32 @@ class Publisher:
     """Collects stored units' commits and appends them in batches (ADR-07). Before a batch is
     written, the rows its commits vouch for are counted in the store, and a unit whose stored rows
     differ is withheld whole. A unit counts (checks_written, investigations_done) only once its
-    commits are stored, so a commit that cannot be stored makes the run PARTIAL and holds its
-    windows, like any other failed write. After a failed write the run reads back what was stored
-    (a write can fail after its file landed) and appends the missing rows once more."""
+    commits are confirmed stored, so a commit that cannot be stored makes the run PARTIAL and holds
+    its windows, like any other failed write. After a failed write the run reads the batch back
+    (a write can fail after its file landed), appends what is missing, reads back again, and
+    publishes only CONFIRMED units: absent, conflicting (recorded as integrity incidents) or
+    unreadable ones fail closed. With `retention`, each commit records how long its evidence is kept."""
 
     spark: SparkSession
     db: str
     run: runs.Run
     batch: int = COMMIT_BATCH
     tally: Investigations | None = None
+    retention: dict[str, int] | None = None
     pending: list[Unit] = field(default_factory=list)
     published: int = 0  # evaluations counted as written
     withheld: int = 0  # units held back by verification
+    unconfirmed: int = 0  # units not confirmed after a failed commit write
 
-    def add(self, commits: list[Commit], complete: int, investigated: int = 0) -> None:
+    def add(self, commits: list[Commit], complete: int, investigated: int = 0,
+            after: list[dict[str, Any]] | None = None) -> None:
+        if self.retention is not None:
+            commits = [c.with_lifetime(self.run.run_date, self.retention) for c in commits]
+        unit = Unit(commits, complete, investigated, after or [])
         if not commits:  # an evaluation with no result rows (a grouped check with no groups): nothing to publish
-            self._count([Unit(commits, complete, investigated)])
+            self._count([unit])
             return
-        self.pending.append(Unit(commits, complete, investigated))
+        self.pending.append(unit)
         if len(self.pending) >= self.batch:
             self.flush()
 
@@ -505,6 +517,12 @@ class Publisher:
         self.published += sum(u.complete for u in units)
         if self.tally is not None:
             self.tally.done += sum(u.investigated for u in units)
+        records = [r for u in units for r in u.after]
+        if records:
+            try:
+                integrity.append_records(self.spark, self.db, records)
+            except Exception as exc:  # the next run finds the baseline still compromised and re-establishes it
+                log.error("could not record %d integrity row(s): %s", len(records), error_detail(exc))
 
     def _verified(self, units: list[Unit]) -> list[Unit]:
         """The units whose stored rows match what their commits declare; the others are withheld."""
@@ -530,24 +548,54 @@ class Publisher:
             self.withheld += 1
         return kept
 
-    def _repaired(self, units: list[Unit], commits: list[Commit]) -> list[Unit]:
-        """After a failed write: the units whose commits are all stored, once the missing rows are
-        appended again (duplicates are harmless)."""
-        stored: set[tuple[str, str, str]] = set()
+    def _readback(self) -> dict[tuple[str, str, str], set[tuple]] | None:
         try:
-            stored = stored_commits(self.spark, self.db, self.run.run_id, self.run.run_date)
+            return stored_commits(self.spark, self.db, self.run.run_id, self.run.run_date)
+        except Exception as exc:
+            log.error("could not read the commit batch back: %s", error_detail(exc))
+            return None
+
+    def _repaired(self, units: list[Unit], commits: list[Commit]) -> list[Unit]:
+        """After a failed write: read back, append what is missing once, read back again, and return
+        the CONFIRMED units only (every commit stored with exactly its own contents)."""
+        stored = self._readback()
+        if stored is not None:
             missing = [c for c in commits if c.identity not in stored]
             if missing:
-                append_commits(self.spark, self.db, missing, datetime.now(timezone.utc), self.run.run_date)
-            print(f"commit write failed after storing {len(commits) - len(missing)} of its {len(commits)} rows; "
-                  f"{len(missing)} appended again")
-            return units
-        except Exception as exc:
-            log.error("could not repair the commit batch: %s", error_detail(exc))
-        done = [u for u in units if all(c.identity in stored for c in u.commits)]
-        print(f"commit rows not stored ({len(units) - len(done)} unit(s) stay unpublished); "
-              "their windows are evaluated again")
-        return done
+                try:
+                    append_commits(self.spark, self.db, missing, datetime.now(timezone.utc), self.run.run_date)
+                except Exception as exc:  # the readback below says what is stored
+                    log.error("could not append the missing commit rows: %s", error_detail(exc))
+                stored = self._readback()
+        if stored is None:
+            print(f"commit write failed and could not be read back: {len(units)} unit(s) not confirmed "
+                  "(uncertain, not published); their windows are evaluated again")
+            self.unconfirmed += len(units)
+            return []
+        day = self.run.run_date
+        confirmed, absent, conflicting = [], 0, []
+        for unit in units:
+            states = [("absent" if c.identity not in stored
+                       else "confirmed" if stored[c.identity] == {c.contents(day)} else "conflicting")
+                      for c in unit.commits]
+            if all(s == "confirmed" for s in states):
+                confirmed.append(unit)
+            elif "conflicting" in states:
+                conflicting += [c for c, s in zip(unit.commits, states) if s == "conflicting"]
+            else:
+                absent += 1
+        if conflicting:
+            try:
+                integrity.append_records(self.spark, self.db,
+                                         [integrity.conflict_record(self.run, c, stored[c.identity]) for c in conflicting])
+            except Exception as exc:  # the views mark a conflicting identity INVALID by themselves
+                log.error("could not record %d commit conflict(s): %s", len(conflicting), error_detail(exc))
+        not_confirmed = len(units) - len(confirmed)
+        self.unconfirmed += not_confirmed
+        print(f"commit write failed; after reading back: {len(confirmed)} unit(s) confirmed, {absent} absent, "
+              f"{len(conflicting)} conflicting commit(s) (recorded as integrity incidents)"
+              + (f"; {not_confirmed} unit(s) not published, their windows are evaluated again" if not_confirmed else ""))
+        return confirmed
 
     def flush(self) -> None:
         if not self.pending:
@@ -607,8 +655,6 @@ def explain_failures(spark: SparkSession, config: Config, evaluation: Evaluation
         def investigate() -> list[dict[str, Any]]:
             found = explain(cx, result, row["evaluation_id"], run.run_id, run.run_date, datetime.now(timezone.utc))
             append_cause_results(spark, db, found)
-            if publisher is None:
-                append_commits(spark, db, cause_commits(found, row, run), datetime.now(timezone.utc), run.run_date)
             return found
         try:
             cause_rows = within_budget(spark, budget_minutes, investigate) if budget_minutes is not None else investigate()
@@ -620,22 +666,34 @@ def explain_failures(spark: SparkSession, config: Config, evaluation: Evaluation
             log.error("could not explain %s for %s: %s", p.check.check_id, p.dataset.dataset, error_detail(exc))
             lines.append(f"  cause investigation incomplete ({type(exc).__name__}); the next run retries it")
             continue
+        # The commit is written here, in the run's thread, never inside the cancellable investigation:
+        # an investigation cancelled by its budget keeps running in the background and may still store
+        # rows, but it can never publish them.
         if publisher is not None:  # done once the cause commit is stored
             publisher.add(cause_commits(cause_rows, row, run), 0, investigated=1)
-        elif tally is not None:
-            tally.done += 1
+        else:
+            try:
+                append_commits(spark, db, cause_commits(cause_rows, row, run), datetime.now(timezone.utc), run.run_date)
+            except Exception as exc:
+                log.error("could not publish the causes of %s for %s: %s", p.check.check_id, p.dataset.dataset,
+                          error_detail(exc))
+                lines.append(f"  cause investigation incomplete ({type(exc).__name__}); the next run retries it")
+                continue
+            if tally is not None:
+                tally.done += 1
         counts = Counter(line.text() for line in summarise(cause_rows, ft).values())
         lines += [f"  {text} [{n} failing]" for text, n in sorted(counts.items())]
     return lines
 
 
 def cause_commits(cause_rows: list[dict[str, Any]], row: dict[str, Any], run: runs.Run) -> list[Commit]:
-    """The commit that publishes one investigation's cause rows, naming the run whose committed
-    result they explain (this run's, or the original run's for a retry). None without cause rows."""
+    """The commit that publishes one investigation's cause rows, naming the committed result they
+    explain by its run, run_date and evaluation id (this run's, or the original run's for a retry).
+    None without cause rows."""
     if not cause_rows:
         return []
     return [Commit(run.run_id, row["evaluation_id"], row["dataset"], row["check_id"], 0, kind=CAUSE,
-                   result_run_id=row["run_id"], cause_rows=len(cause_rows))]
+                   result_run_id=row["run_id"], result_run_date=row["run_date"], cause_rows=len(cause_rows))]
 
 
 def pending_investigations(spark: SparkSession, config: Config, since: date,
@@ -799,10 +857,81 @@ def historical_jobs(spark: SparkSession, config: Config, planned_all: list[Plann
     return jobs, landing
 
 
+def without_pass(evaluation: Evaluation) -> Evaluation:
+    """T1_PARTITION_DRIFT on a compromised baseline (R1): a PASSED result cannot be trusted (a
+    partition first recorded by the lost evidence now looks new), so it becomes DID_NOT_RUN /
+    PLATFORM / evidence_invalid, which holds the window. FAILED stands: the drift it found against
+    the older baseline is real. The partition states are still stored, and become the baseline."""
+    from hcsc.datalake.dre.checks.base import DID_NOT_RUN, PASSED
+
+    return replace(evaluation, results=[
+        replace(r, state=DID_NOT_RUN, reason_category="PLATFORM", reason_code="evidence_invalid",
+                population=None, violations=None,
+                observed="not judged: the baseline partition states were found compromised after publication",
+                expected="a baseline whose evidence is intact")
+        if r.state == PASSED else r for r in evaluation.results])
+
+
+def rebaselines(run: runs.Run, evaluation: Evaluation, tainted: list[tuple[str, date, str]] | None,
+                complete: int) -> list[dict[str, Any]]:
+    """The REBASELINED rows to record once this evaluation is published: it re-established the
+    baseline of the INVALID units in `tainted` if it was stored whole and either judged every key
+    (HOP_KEY_CURRENCY, a full sweep, every group PASSED or FAILED) or stored new partition states
+    (T1_PARTITION_DRIFT)."""
+    if not tainted or not complete:
+        return []
+    check_id, results = evaluation.planned.check.check_id, evaluation.results
+    if check_id == "HOP_KEY_CURRENCY":
+        established = (evaluation.ctx is not None and evaluation.ctx.full_sweep
+                       and all(r.state in ("PASSED", "FAILED") for r in results))
+    else:
+        established = any(r.partition_state for r in results)
+    return integrity.rebaseline_records(run, evaluation.planned.dataset.dataset, check_id, tainted) if established else []
+
+
+def integrity_sweep(spark: SparkSession, config: Config, run: runs.Run) -> list[str]:
+    """The integrity sweep, when due (R1): FULL (every commit whose evidence is still kept) at the
+    first run at or after rule_run_at on integrity_full_sweep_day, otherwise DAILY (the last
+    integrity_sweep_days days) at the first run at or after rule_run_at each day; a failed sweep is
+    due again at the next run. Never stops the run: a failure is recorded as a FAILED sweep."""
+    from hcsc.datalake.dre.store.commits import add_months
+
+    d = config.defaults
+    db = d.dq_database
+    try:
+        latest = {r.scope: as_utc(r.at) for r in spark.sql(
+            f"SELECT scope, MAX(recorded_at) AS at FROM {db}.dq_integrity "
+            f"WHERE record = '{integrity.SWEEP}' AND status = '{integrity.COMPLETED}' GROUP BY scope").collect()}
+    except Exception as exc:
+        log.error("could not read the integrity sweeps: %s", error_detail(exc))
+        return [f"integrity sweep: not run ({type(exc).__name__}); the next run tries again"]
+    done_since = lambda moment: any(at >= moment for at in latest.values())  # noqa: E731
+    today = run.run_date
+    scope = None
+    if d.integrity_full_sweep_day is not None:
+        weekly = due_moment("weekly", run.started_at, d.rule_run_at, d.timezone, d.integrity_full_sweep_day)
+        if weekly is not None and latest.get(integrity.FULL, datetime.min.replace(tzinfo=timezone.utc)) < weekly:
+            scope, start = integrity.FULL, add_months(today, -max(d.retention_months.values()))
+    if scope is None:
+        daily = due_moment("daily", run.started_at, d.rule_run_at, d.timezone, "MONDAY")
+        if daily is None or done_since(daily):
+            return []
+        scope, start = integrity.DAILY, today - timedelta(days=d.integrity_sweep_days)
+    try:
+        outcome = integrity.sweep(spark, db, run, scope, start, today, today)
+    except Exception as exc:
+        log.error("integrity sweep failed: %s", error_detail(exc))
+        return [f"integrity sweep ({scope.lower()}): FAILED ({type(exc).__name__}); what it covers is UNKNOWN "
+                "until a sweep completes; the next run tries again"]
+    return [f"integrity sweep ({scope.lower()}, run_date {start.isoformat()} to {today.isoformat()}): "
+            f"{outcome.mismatches} new evidence mismatch(es), {outcome.conflicts} new commit conflict(s)"]
+
+
 def stored_outcomes(spark: SparkSession, db: str, jobs: list[Job]) -> dict[str, tuple[Any, ...]]:
     """evaluation_id -> the OUTCOME of its latest stored result row, for the jobs' events. Read by
     dataset and the span the events cover (one predicate however many events), then kept for the
-    jobs' event ids in Python."""
+    jobs' event ids in Python. A latest row whose evidence is INVALID is not "stored": a RERUN of its
+    window writes and publishes the evaluation again, which is how such a result is repaired."""
     if not jobs:
         return {}
     ids = {event.event_id for _, event in jobs}
@@ -815,7 +944,8 @@ def stored_outcomes(spark: SparkSession, db: str, jobs: list[Job]) -> dict[str, 
     rows = spark.sql(
         f"SELECT evaluation_id, event_id, {columns} FROM (SELECT r.*, ROW_NUMBER() OVER (PARTITION BY evaluation_id "
         f"ORDER BY evaluated_at DESC, run_id DESC) AS rn FROM {db}.v_committed_result r "
-        f"WHERE dataset IN ({datasets}) AND window_start >= {lo} AND window_end <= {hi}) latest WHERE rn = 1").collect()
+        f"WHERE dataset IN ({datasets}) AND window_start >= {lo} AND window_end <= {hi}) latest "
+        f"WHERE rn = 1 AND evidence_state <> 'INVALID'").collect()
     return {r.evaluation_id: tuple(r[c] for c in OUTCOME) for r in rows if r.event_id in ids}
 
 
@@ -932,7 +1062,15 @@ def run(spark: SparkSession, conf: str, feed_id: str | None = None, selection: S
     print(f"dre run: started {run_record.run_id} ({kind} run, {run_record.started_at:%Y-%m-%d %H:%M} UTC)")
     written = expected = 0
     investigations = Investigations()
-    publisher = Publisher(spark, db, run_record, config.defaults.commit_batch, investigations)
+    publisher = Publisher(spark, db, run_record, config.defaults.commit_batch, investigations,
+                          dict(config.defaults.retention_months))
+    # Checks whose baseline rests on evidence found INVALID after it was published (R1): the hop's
+    # open keys are judged by a full sweep instead, and partition drift cannot pass, until a later
+    # evaluation re-establishes the baseline (REBASELINED). Unreadable: every such check counts.
+    compromised = integrity.compromised_baselines(spark, db)
+    if compromised.unknown:
+        print("integrity: compromised baselines could not be read; hop checks run as full sweeps and "
+              "partition drift cannot pass this run")
     explained: set[str] = set()  # evaluation ids this run already investigated
     try:
         planned_all = plan(config, feed_id, per_table=False)
@@ -957,8 +1095,13 @@ def run(spark: SparkSession, conf: str, feed_id: str | None = None, selection: S
             budget = None
             if config.defaults.compute_budget_scope == "dataset":
                 budget = config.dataset_settings(ds_id).compute_budget_minutes - spent.get((ds_id, event.event_id), 0.0)
+            check_id = planned.check.check_id
+            tainted = compromised.of(ds_id, check_id)
             evaluation = evaluate(spark, config, planned, event, landing, key_secret, budget,
-                                  record_key_events=normal)
+                                  record_key_events=normal,
+                                  force_full_sweep=tainted is not None and check_id == "HOP_KEY_CURRENCY")
+            if tainted is not None and check_id == "T1_PARTITION_DRIFT":
+                evaluation = without_pass(evaluation)
             spent[(ds_id, event.event_id)] = spent.get((ds_id, event.event_id), 0.0) + evaluation.duration_ms / 60000
             remaining = investigation_budget(config, ds_id, spent.get((ds_id, event.event_id), 0.0))
             rows = result_rows(evaluation, run_record, kind)
@@ -969,7 +1112,7 @@ def run(spark: SparkSession, conf: str, feed_id: str | None = None, selection: S
                 continue
             stored_rows, complete, commits = write_evaluation(spark, db, evaluation, rows, run_record,
                                                               WRITE_BUDGET_MINUTES)
-            publisher.add(commits, complete)
+            publisher.add(commits, complete, after=rebaselines(run_record, evaluation, tainted, complete))
             rows = stored_rows
             explained.update(r["evaluation_id"] for r in rows)
             for line in describe(evaluation) + explain_failures(spark, config, evaluation, rows, run_record,
@@ -986,6 +1129,8 @@ def run(spark: SparkSession, conf: str, feed_id: str | None = None, selection: S
                 log.error("could not retry pending investigations: %s", error_detail(exc))
                 print(f"pending cause investigations not retried ({type(exc).__name__}); the next run retries them")
             publisher.flush()  # the retried investigations' commits, before the digest reads this run's causes
+            for line in integrity_sweep(spark, config, run_record):
+                print(line)
     except Exception as exc:
         log.error("run %s failed: %s", run_record.run_id, error_detail(exc))
         publisher.flush()  # what was stored completely before the failure is published; nothing else is

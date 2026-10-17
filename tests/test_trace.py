@@ -93,7 +93,8 @@ def test_a_retried_investigation_s_cause_is_shown(spark, tmp_path, capsys) -> No
         "evaluation_id": "e1", "run_id": "r1", "dataset": "gold_member_coverage", "check_id": "HOP_KEY_CURRENCY",
         "state": "FAILED", "evaluated_at": datetime(2026, 1, 15, 12), "run_date": date(2026, 1, 15)}])
     append_rows(spark, replay.dq, "dq_cause_result", [{  # the retry, a day later, under its own run id
-        "run_id": "r2", "result_run_id": "r1", "evaluation_id": "e1", "failure_ref": ref,
+        "run_id": "r2", "result_run_id": "r1", "result_run_date": date(2026, 1, 15), "evaluation_id": "e1",
+        "failure_ref": ref,
         "hop": "example_curated_enrollment->gold_member_coverage", "cause_check_id": "builtin", "order_no": 1,
         "state": "CONFIRMED", "cause_code": "NOT_RUN", "evidence": "{}", "evaluated_at": datetime(2026, 1, 16, 12),
         "run_date": date(2026, 1, 16)}])

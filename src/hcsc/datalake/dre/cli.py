@@ -136,7 +136,7 @@ def retention(conf: str, apply: bool) -> int:
         return 3
     d = config.defaults
     return retention_command(get_spark(), d.dq_database, d.retention_months, apply,
-                             datetime.now(timezone.utc).date())
+                             datetime.now(timezone.utc).date(), d.retention_holds)
 
 
 def configure_logging() -> None:

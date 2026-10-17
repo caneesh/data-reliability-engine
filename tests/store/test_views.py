@@ -48,7 +48,7 @@ def test_latest_result_keeps_every_group_of_the_latest_evaluation(spark, store) 
 
 
 def key_event(key_hash: str, event: str, day: int):
-    return {"run_date": D, "run_id": f"r{day}", "evaluation_id": f"e{day}", "dataset": "gold_member_coverage",
+    return {"run_date": D, "run_id": f"kr{day}", "evaluation_id": f"ke{day}", "dataset": "gold_member_coverage",
             "check_id": "HOP_KEY_CURRENCY", "key_hash": key_hash, "key_value": "synthetic-key",
             "event": event, "state_detail": "STALE", "observed_at": ts(day)}
 

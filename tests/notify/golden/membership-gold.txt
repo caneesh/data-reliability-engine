@@ -31,3 +31,4 @@ Report only (proposed rules)
 - gold_member_coverage one_open_row_per_coverage [src_sys_nm=SRC_A]: FAILED, 2 violations (was 0)
 
 Passing checks: 2
+store integrity: not verified yet (no completed integrity sweep)

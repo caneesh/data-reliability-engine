@@ -40,6 +40,7 @@ REASONS: dict[str, str] = {
     "hdfs_unavailable": "PLATFORM",
     "query_failed": "PLATFORM",
     "evidence_incomplete": "PLATFORM",  # the result was stored but its key events were not: evaluated again
+    "evidence_invalid": "PLATFORM",  # its baseline's evidence was found compromised after publication (R1)
     "table_missing": "CONFIGURATION",
     "column_missing": "CONFIGURATION",
     "incompatible_type": "CONFIGURATION",

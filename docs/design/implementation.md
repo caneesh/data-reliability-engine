@@ -135,7 +135,7 @@ Elsewhere:
 
 ## Step 2: commit rows and committed-only views (ADR-07)
 
-Built 2026-10-17 (`d8db1ad`), revised after the checkpoint 2 review the same day (cause commits, verification before commit, repair after a failed commit write, the REPLAY list from committed results, `commit_batch`). The revised checkpoint 2 awaits review.
+Built 2026-10-17 (`d8db1ad`), revised after the checkpoint 2 review the same day (cause commits, verification before commit, repair after a failed commit write, the REPLAY list from committed results, `commit_batch`). Corrected after the second review (R1 to R3: evidence states, the integrity sweep, evidence lifetimes and holds, confirmed repair, cause dates). Checkpoint 2 awaits independent verification and sign-off.
 
 ### What it adds
 
@@ -174,14 +174,15 @@ written += publisher.published        # checks_written counts committed evaluati
   - `flush`:
     1. **Verify** (`_verified`): `store/commits.stored_counts` counts, in one query over the run's own rows, what the batch's commits vouch for; `mismatches` compares. A unit with any mismatch is withheld whole (`withheld`), printed as `integrity: ... withheld`. A batch that cannot be counted is withheld.
     2. **Write** the verified units' commits in one append of one file.
-    3. **Repair** (`_repaired`) if the write raised: read back the run's commit identities (`stored_commits`), append the missing ones once; if that fails, keep only units whose commits are all stored.
-    4. **Count** the stored units: `published` (checks written) and `tally.done` (investigations).
+    3. **Repair** (`_repaired`) if the write raised: read back the run's commit rows (`stored_commits`: identity -> the distinct contents stored), append the missing ones once, read back again. A unit is CONFIRMED when every commit is stored with exactly its own contents (`Commit.contents`); absent and conflicting units, and every unit when a readback fails, are not published (`unconfirmed`). Conflicts are recorded as COMMIT\_CONFLICT incidents.
+    4. **Count** the confirmed units: `published` (checks written) and `tally.done` (investigations), then append their `after` rows (REBASELINED) to `dq_integrity`.
+  - With `retention` (the run passes `retention_months`), `add` sets each commit's `evidence_kept_until` (`Commit.with_lifetime`).
 - **WINDOW_GAP rows** are committed like results.
 - **When the run fails,** the `except` path flushes what was stored completely before reporting FAILED.
 
 ### The commit table (`store/commits.py`, `store/ddl.sql`)
 
-`dq_commit`: `run_id`, `evaluation_id`, `dataset`, `check_id`, `kind` (result or cause), `result_run_id`, `result_rows`, `key_event_rows`, `partition_state_rows`, `cause_rows`, `committed_at`, partitioned by `run_date`. `append_commits` writes a batch in one append of one file (`coalesce(1)`) through `store/writer.py`, so a batch is stored whole or not at all. A commit's identity is (run, evaluation id, kind); a duplicate row publishes nothing more.
+`dq_commit`: `run_id`, `evaluation_id`, `dataset`, `check_id`, `kind` (result or cause), `result_run_id`, `result_run_date`, `result_rows`, `key_event_rows`, `partition_state_rows`, `cause_rows`, `evidence_kept_until`, `committed_at`, partitioned by `run_date`. `append_commits` writes a batch in one append of one file (`coalesce(1)`) through `store/writer.py`, so a batch is stored whole or not at all. A commit's identity is (run, evaluation id, kind); a duplicate row publishes nothing more.
 
 Retention:
 - `conf/defaults.yaml` keeps it 84 months.
@@ -191,14 +192,15 @@ Retention:
 
 | View | Rows shown |
 | --- | --- |
-| `v_committed_result` | `dq_check_result` rows with a result commit of the same `run_id`, `evaluation_id` and `run_date` |
-| `v_committed_key_event` | `dq_key_event` rows with such a commit whose `key_event_rows > 0` |
-| `v_committed_partition_state` | `dq_partition_state` rows with a result commit of the same run, dataset and `run_date`, for `T1_PARTITION_DRIFT`, with `partition_state_rows > 0` |
-| `v_committed_cause` | `dq_cause_result` rows with a cause commit of the same run, evaluation id and `run_date` (`cause_rows > 0`) whose named result (`result_run_id`, evaluation id) has a result commit; adds `result_run_id`. No timestamps |
-| `v_commit_integrity` | Audit only: commits whose stored rows now differ from their declaration (expired evidence included); query with a `run_date` bound |
+| `v_commit_state` | One row per commit identity (run, evaluation id, kind, run\_date) with its declared counts, `evidence_kept_until`, `versions` (distinct contents stored) and `evidence_state` (INVALID, EXPIRED, UNKNOWN, VALID; spec section 5, item 7) |
+| `v_committed_result` | `dq_check_result` rows with a result commit of the same `run_id`, `evaluation_id` and `run_date`, plus `evidence_state` |
+| `v_committed_key_event` | `dq_key_event` rows of such a commit whose `key_event_rows > 0` and whose state is not INVALID |
+| `v_committed_partition_state` | `dq_partition_state` rows with a result commit of the same run, dataset and `run_date`, for `T1_PARTITION_DRIFT`, with `partition_state_rows > 0`, not INVALID |
+| `v_committed_cause` | `dq_cause_result` rows with a cause commit of the same run, evaluation id and `run_date` (`cause_rows > 0`, not INVALID) whose named result (`result_run_id`, `result_run_date`, evaluation id) has a result commit; adds `result_run_id`, `result_run_date`, `evidence_state`. No timestamps |
+| `v_commit_integrity` | Commits whose stored rows now differ from their declaration, with `evidence_kept_until` and `evidence_state`; read by the integrity sweep; query with a `run_date` bound |
 
 These views are rebuilt on top of them:
-- `v_latest_result` on `v_committed_result`;
+- `v_latest_result` on `v_committed_result`, with `evidence_state` and `healthy` (PASSED and VALID: the one definition of healthy);
 - `v_open_keys` on `v_committed_key_event`;
 - `v_latest_partition_state` on `v_committed_partition_state`.
 
@@ -212,6 +214,11 @@ Each view is a `LEFT SEMI JOIN` on `dq_commit`. A `run_date` predicate on the vi
 | --- | --- |
 | Digest (`notify/digest.py`): this run's results, earlier results, causes, key-hash samples | committed views |
 | `dre trace` (`trace.py`) | `v_committed_cause` joined to `v_committed_result` on evaluation id and `result_run_id` |
+| Digest: current results whose evidence is INVALID or UNKNOWN, and the integrity line | `v_committed_result` (ranked as `v_latest_result`, within the history lookback); `store/integrity.freshness` |
+| Watchdog: integrity freshness and the hour's incidents | `dq_integrity`, `dq_run` (its own SQL) |
+| Compromised baselines (`store/integrity.compromised_baselines`) | `v_commit_state` anti joined to REBASELINED |
+| Integrity sweep (`store/integrity.sweep`) | `v_commit_integrity`, `v_commit_state` |
+| Retention (`store/retention.droppable`) | `dq_commit.evidence_kept_until`, `retention_holds` |
 | The hop's open keys (`checks/sql/hop_common.sql.j2`) | `v_committed_key_event` |
 | T1_VOLUME history, T1_SCHEMA_DRIFT history | `v_committed_result` |
 | Rule schedule (`checks/rules/schedule.py`) | `v_committed_result` |
@@ -233,6 +240,10 @@ Each view is a `LEFT SEMI JOIN` on `dq_commit`. A `run_date` predicate on the vi
 | Stored rows differ from a commit's declaration | Everything the unit wrote | Nothing of that unit | The same |
 | The commit write fails after its file landed | Evidence, results, commits | Everything, once the read-back finds the commits (or the repair appends them) | Nothing to redo |
 | Cause rows partly stored, then the write fails | Partial cause rows | Nothing of them (no cause commit) | The next NORMAL run retries the investigation |
+| A commit write fails and the readback fails | Commits possibly stored | Whatever landed is complete, but nothing is counted (uncertain) | The run is PARTIAL; the window is evaluated again, and the precedence rule gives one current result |
+| A conflicting commit identity | Two contents of one identity | The unit is INVALID in every view; a COMMIT\_CONFLICT incident is recorded | Not counted; evaluated again |
+| Evidence changed or lost after publication (outside DRE) | The changed rows | The result stays, INVALID, not healthy; its evidence rows hidden | The sweep records EVIDENCE\_MISMATCH; the hop runs full sweeps, drift cannot pass, until REBASELINED; a RERUN republishes |
+| The integrity sweep fails | A SWEEP FAILED row | Results in its scope UNKNOWN, not healthy | The next run sweeps again |
 
 A dead run's STARTED row blocks NORMAL runs for `watchdog_grace_minutes`, as before.
 
@@ -243,7 +254,8 @@ A dead run's STARTED row blocks NORMAL runs for `watchdog_grace_minutes`, as bef
 | `test_commit_protocol.py`, four boundary tests | Each interruption publishes nothing in all seven views, and the next run publishes the window once |
 | `test_commit_protocol.py`, unit tests | An unpublished result does not make a RERUN skip; an unpublished partition state is not a baseline; causes attach by identity, never by time; batching and counting |
 | `test_commit_protocol.py`, revision tests | A partly stored cause set and its retry; a marker over partly stored results; a unit withheld whole; a batch that cannot be counted; a failed commit write after none, some or all rows; a failed repair; the integrity view; the REPLAY list |
-| `test_trace.py::test_a_retried_investigation_s_cause_is_shown` | Trace joins causes through `result_run_id` |
+| `test_trace.py::test_a_retried_investigation_s_cause_is_shown` | Trace joins causes through `result_run_id` and `result_run_date` |
+| `test_evidence_integrity.py` | Corrections R1 to R3, one test or more per failure-injection row F01 to F09: evidence states, late threads, lifetimes and holds, compromised baselines, confirmed repair, cause dates, precedence, the digest, the watchdog |
 | `store/test_install.py::test_apply_replaces_views_left_by_an_older_release` | The upgrade path |
 | `config/test_validate.py` (`commit-retention-short`, `commit-batch-zero`) | The retention rule; the batch size's range |
 | `tests/store/conftest.append_rows(commit=True)` | Synthetic store rows in tests are committed as a run would commit them. `commit=False` leaves them unpublished |
@@ -254,6 +266,8 @@ A dead run's STARTED row blocks NORMAL runs for `watchdog_grace_minutes`, as bef
   1. Write it inside the evidence step of `write_evaluation`.
   2. Add its count to `Commit` and `dq_commit`, and count it in `stored_counts` and `mismatches`.
   3. Read it only through a committed view whose join requires that count to be above 0.
-- **Publishing something new** (another kind of commit): give it its own `kind`, verify its rows before the commit, and join its readers by identity, never by time.
+- **Publishing something new** (another kind of commit): give it its own `kind`, verify its rows before the commit, give it a lifetime in `with_lifetime` and a `_VOUCHED` condition in `store/retention.py`, count it in `v_commit_integrity`, and join its readers by identity, never by time.
+- **Building a check on earlier evidence:** add it to `integrity.BASELINE_CHECKS` and say how it behaves on a compromised baseline (run without the baseline, or refuse to pass) and when it re-establishes the baseline (`runner.rebaselines`).
+- **Reporting status:** use `v_latest_result.healthy`; never treat PASSED alone as healthy.
 - **Reading results, events, partition states or causes:** use the committed views, never the tables. The guard tests do not enforce this yet; review does.
 - **Changing a view:** edit `store/ddl.sql`, then run `dre install --apply` on each store. `dre install --check` shows which views differ.

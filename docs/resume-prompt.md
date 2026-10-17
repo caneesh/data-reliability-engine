@@ -15,7 +15,7 @@ Before doing anything else, read these files in order:
 5. `docs/architecture.md`: the guarantees, the limits, and what is deliberately open.
 6. `docs/design/outside-in-evidence.md` (release 4, in progress) and `docs/design/target-architecture.md` with `docs/design/reconciliation-model.md` (the Phase 1 design, approved and frozen; it supersedes the release 5 plan), `docs/design/checkpoints.md` (each build step's review) and `docs/design/implementation.md` (how each built step is implemented): the current plans.
 
-Then tell me in a few lines where things stand and what you think is next, and wait for my instruction. The work is a controlled implementation of the frozen Phase 1 design: one build step at a time, each ending at a checkpoint I review before the next starts. Checkpoint 2 was reviewed (changes required) and revised; the revised checkpoint 2 is waiting for my review.
+Then tell me in a few lines where things stand and what you think is next, and wait for my instruction. The work is a controlled implementation of the frozen Phase 1 design: one build step at a time, each ending at a checkpoint I review before the next starts. Checkpoint 2 was reviewed twice; the corrections R1 to R3 are built and wait for my independent verification and sign-off (`docs/design/checkpoints.md`, "Checkpoint 2 corrections R1 to R3", and `docs/design/evidence/checkpoint2-corrections.md`).
 
 The rules from earlier work that still apply:
 

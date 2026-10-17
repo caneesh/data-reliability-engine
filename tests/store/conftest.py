@@ -27,8 +27,8 @@ def append_rows(spark, database: str, table: str, rows: list[dict[str, Any]], co
     """Append rows (missing columns become null) through the engine's writer. Result, key-event and
     partition-state rows stand for a stored evaluation, so they are committed too (ADR-07: only
     committed rows are visible); commit=False leaves them uncommitted, as a run that died would.
-    Cause rows are published by a cause commit naming the result's run: a row's "result_run_id"
-    (not a column of the table), or its own run."""
+    Cause rows are published by a cause commit naming the result: a row's "result_run_id" and
+    "result_run_date" (not columns of the table), or its own run and run_date."""
     schema = spark.table(f"{database}.{table}").schema
     data = [tuple(row.get(f.name) for f in schema.fields) for row in rows]
     writer.append(spark.createDataFrame(data, schema), database, table)
@@ -49,16 +49,17 @@ def commit_rows(spark, database: str, table: str, rows: list[dict[str, Any]]) ->
     elif table == "dq_key_event":
         keyed = Counter((r.get("run_id"), r.get("evaluation_id"), r.get("dataset"), r.get("check_id"), r.get("run_date"))
                         for r in rows)
-        make = lambda run, ev, ds, check, n: Commit(run, ev, ds, check, 0, key_event_rows=n)  # noqa: E731
+        make = lambda run, ev, ds, check, n: Commit(  # noqa: E731
+            run, ev, ds, check, _uncommitted_results(spark, database, run, ev), key_event_rows=n)
     elif table == "dq_partition_state":
         keyed = Counter((r.get("run_id"), f"partition-state-{r.get('run_id')}", r.get("dataset"), "T1_PARTITION_DRIFT",
                          r.get("run_date")) for r in rows)
         make = lambda run, ev, ds, check, n: Commit(run, ev, ds, check, 0, partition_state_rows=n)  # noqa: E731
     elif table == "dq_cause_result":
         keyed = Counter((r.get("run_id"), r.get("evaluation_id"), r.get("result_run_id") or r.get("run_id"),
-                         None, r.get("run_date")) for r in rows)
-        make = lambda run, ev, result_run, _, n: Commit(run, ev, "", "", 0, kind="cause",  # noqa: E731
-                                                       result_run_id=result_run, cause_rows=n)
+                         r.get("result_run_date") or r.get("run_date"), r.get("run_date")) for r in rows)
+        make = lambda run, ev, result_run, result_day, n: Commit(  # noqa: E731
+            run, ev, "", "", 0, kind="cause", result_run_id=result_run, result_run_date=result_day, cause_rows=n)
     else:
         return
     by_day: dict[Any, list[Commit]] = {}
@@ -66,3 +67,15 @@ def commit_rows(spark, database: str, table: str, rows: list[dict[str, Any]]) ->
         by_day.setdefault(day, []).append(make(run, ev, ds, check, n))
     for day, commits in by_day.items():
         append_commits(spark, database, commits, datetime(2026, 1, 1, tzinfo=timezone.utc), day)
+
+
+def _uncommitted_results(spark, database: str, run_id: str, evaluation_id: str) -> int:
+    """The result rows an evaluation's key events go with: one commit vouches for both, as a run
+    writes it. Append such results with commit=False first; a result already committed would make
+    the key events' commit a second, different commit of one identity (a COMMIT_CONFLICT)."""
+    committed = spark.sql(f"SELECT 1 FROM {database}.dq_commit WHERE run_id = '{run_id}' "
+                          f"AND evaluation_id = '{evaluation_id}' AND kind = 'result'").count()
+    assert not committed, (f"{evaluation_id}: its results are committed already; append them with commit=False "
+                           "before the key events, so one commit vouches for both")
+    return spark.sql(f"SELECT 1 FROM {database}.dq_check_result WHERE run_id = '{run_id}' "
+                     f"AND evaluation_id = '{evaluation_id}'").count()

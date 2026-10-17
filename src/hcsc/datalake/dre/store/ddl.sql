@@ -59,13 +59,30 @@ CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_partition_state (
 -- once the rows it vouches for were counted in the store. Every view of current state shows only
 -- committed rows, so an evaluation interrupted anywhere before its commit is invisible, and its
 -- window is evaluated again. Evidence rows of a commit with a count of 0 stay invisible (an
--- evidence_incomplete marker commits its result rows only). result_run_id names the run whose
--- committed result the row publishes (a result commit: its own run) or explains (a cause commit).
+-- evidence_incomplete marker commits its result rows only). result_run_id and result_run_date
+-- name the run whose committed result the row publishes (a result commit: its own run) or
+-- explains (a cause commit). evidence_kept_until is the last day the rows it vouches for are kept:
+-- run_date plus the shortest retention among the tables they are in; retention refuses to drop
+-- them sooner.
 CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_commit (
   run_id STRING, evaluation_id STRING, dataset STRING, check_id STRING,
-  kind STRING, result_run_id STRING,
+  kind STRING, result_run_id STRING, result_run_date DATE,
   result_rows INT, key_event_rows BIGINT, partition_state_rows INT, cause_rows INT,
-  committed_at TIMESTAMP
+  evidence_kept_until DATE, committed_at TIMESTAMP
+) PARTITIONED BY (run_date DATE) STORED AS ORC;
+
+-- Checkpoint 2 corrections (R1, R2): what DRE learned about its own store after publishing.
+-- record: SWEEP (an integrity sweep: status COMPLETED or FAILED, scope DAILY or FULL over
+-- scope_from to scope_to), EVIDENCE_MISMATCH (a commit's stored rows no longer match it before its
+-- evidence_kept_until), COMMIT_CONFLICT (one commit identity stored with different contents), or
+-- REBASELINED (a later evaluation re-established the baseline an INVALID unit fed). The
+-- subject columns name the commit. Observations, not evaluations: not commit-gated.
+CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_integrity (
+  run_id STRING, record STRING, status STRING,
+  subject_run_id STRING, subject_run_date DATE, evaluation_id STRING, commit_kind STRING,
+  dataset STRING, check_id STRING,
+  scope STRING, scope_from DATE, scope_to DATE,
+  detail STRING, recorded_at TIMESTAMP
 ) PARTITIONED BY (run_date DATE) STORED AS ORC;
 
 -- A run's state is its latest dq_run row: the final row (COMPLETED, PARTIAL or
@@ -83,61 +100,123 @@ FROM (
 ) ranked
 WHERE latest_rank = 1;
 
+-- One row per commit identity (run, evaluation id, kind, run_date), with its evidence state:
+-- INVALID: the identity was stored with different contents, or a sweep recorded its rows lost or
+--   in conflict (dq_integrity) - compromised; never used as a baseline, never healthy;
+-- EXPIRED: past evidence_kept_until - its evidence rows may be gone by retention, as documented;
+-- UNKNOWN: the latest integrity sweep covering its run_date failed and no later completed sweep
+--   covers it - not verified since; never healthy;
+-- VALID: verified when published, and not found lost since.
+CREATE OR REPLACE VIEW {{ dq_database }}.v_commit_state AS
+WITH c AS (
+  SELECT run_id, evaluation_id, kind, run_date,
+         MAX(dataset) AS dataset, MAX(check_id) AS check_id,
+         MAX(result_run_id) AS result_run_id, MAX(result_run_date) AS result_run_date,
+         MAX(result_rows) AS result_rows, MAX(key_event_rows) AS key_event_rows,
+         MAX(partition_state_rows) AS partition_state_rows, MAX(cause_rows) AS cause_rows,
+         MIN(evidence_kept_until) AS evidence_kept_until,
+         COUNT(DISTINCT concat_ws('|', CAST(result_rows AS STRING), CAST(key_event_rows AS STRING),
+                                  CAST(partition_state_rows AS STRING), CAST(cause_rows AS STRING),
+                                  result_run_id, CAST(result_run_date AS STRING),
+                                  CAST(evidence_kept_until AS STRING))) AS versions
+  FROM {{ dq_database }}.dq_commit
+  GROUP BY run_id, evaluation_id, kind, run_date
+),
+lost AS (
+  SELECT DISTINCT subject_run_id, subject_run_date, evaluation_id, commit_kind
+  FROM {{ dq_database }}.dq_integrity
+  WHERE record IN ('EVIDENCE_MISMATCH', 'COMMIT_CONFLICT')
+),
+latest_sweep AS (
+  SELECT scope, status, scope_from, scope_to, recorded_at FROM (
+    SELECT scope, status, scope_from, scope_to, recorded_at,
+           ROW_NUMBER() OVER (PARTITION BY scope ORDER BY recorded_at DESC, run_id DESC) AS rn
+    FROM {{ dq_database }}.dq_integrity WHERE record = 'SWEEP'
+  ) s WHERE rn = 1
+),
+sweeps AS (
+  SELECT MAX(CASE WHEN scope = 'DAILY' THEN status END) AS d_status,
+         MAX(CASE WHEN scope = 'DAILY' THEN scope_from END) AS d_from,
+         MAX(CASE WHEN scope = 'DAILY' THEN scope_to END) AS d_to,
+         MAX(CASE WHEN scope = 'DAILY' THEN recorded_at END) AS d_at,
+         MAX(CASE WHEN scope = 'FULL' THEN status END) AS f_status,
+         MAX(CASE WHEN scope = 'FULL' THEN scope_from END) AS f_from,
+         MAX(CASE WHEN scope = 'FULL' THEN scope_to END) AS f_to,
+         MAX(CASE WHEN scope = 'FULL' THEN recorded_at END) AS f_at
+  FROM latest_sweep
+)
+SELECT c.run_id, c.evaluation_id, c.kind, c.run_date, c.dataset, c.check_id, c.result_run_id,
+       c.result_run_date, c.result_rows, c.key_event_rows, c.partition_state_rows, c.cause_rows,
+       c.evidence_kept_until, c.versions,
+       CASE WHEN c.versions > 1 OR l.evaluation_id IS NOT NULL THEN 'INVALID'
+            WHEN c.evidence_kept_until < current_date() THEN 'EXPIRED'
+            WHEN (s.d_status = 'FAILED' AND c.run_date BETWEEN s.d_from AND s.d_to
+                  AND NOT coalesce(s.f_status = 'COMPLETED' AND s.f_at > s.d_at
+                                   AND c.run_date BETWEEN s.f_from AND s.f_to, FALSE))
+              OR (s.f_status = 'FAILED' AND c.run_date BETWEEN s.f_from AND s.f_to
+                  AND NOT coalesce(s.d_status = 'COMPLETED' AND s.d_at > s.f_at
+                                   AND c.run_date BETWEEN s.d_from AND s.d_to, FALSE)) THEN 'UNKNOWN'
+            ELSE 'VALID' END AS evidence_state
+FROM c
+LEFT JOIN lost l
+  ON l.subject_run_id = c.run_id AND l.subject_run_date = c.run_date AND l.evaluation_id = c.evaluation_id
+  AND l.commit_kind = c.kind
+CROSS JOIN sweeps s;
+
 -- Committed rows only (ADR-07). Every reader of results, key events, partition states and causes
 -- reads these, never the tables, except the window history, which holds every event of a run
--- that did not finish COMPLETED (a stricter rule that also covers uncommitted rows).
+-- that did not finish COMPLETED (a stricter rule that also covers uncommitted rows). A committed
+-- result is kept whatever happens to its evidence later, with its evidence state; evidence rows of
+-- an INVALID unit are never shown, so no baseline is built on compromised evidence.
 CREATE OR REPLACE VIEW {{ dq_database }}.v_committed_result AS
-SELECT r.*
+SELECT r.*, c.evidence_state
 FROM {{ dq_database }}.dq_check_result r
-LEFT SEMI JOIN {{ dq_database }}.dq_commit c
+JOIN {{ dq_database }}.v_commit_state c
   ON c.kind = 'result' AND c.run_id = r.run_id AND c.evaluation_id = r.evaluation_id AND c.run_date = r.run_date;
 
 CREATE OR REPLACE VIEW {{ dq_database }}.v_committed_key_event AS
 SELECT e.*
 FROM {{ dq_database }}.dq_key_event e
-LEFT SEMI JOIN {{ dq_database }}.dq_commit c
+LEFT SEMI JOIN {{ dq_database }}.v_commit_state c
   ON c.kind = 'result' AND c.run_id = e.run_id AND c.evaluation_id = e.evaluation_id AND c.run_date = e.run_date
-  AND c.key_event_rows > 0;
+  AND c.key_event_rows > 0 AND c.evidence_state <> 'INVALID';
 
 CREATE OR REPLACE VIEW {{ dq_database }}.v_committed_partition_state AS
 SELECT s.*
 FROM {{ dq_database }}.dq_partition_state s
-LEFT SEMI JOIN {{ dq_database }}.dq_commit c
+LEFT SEMI JOIN {{ dq_database }}.v_commit_state c
   ON c.kind = 'result' AND c.run_id = s.run_id AND c.dataset = s.dataset AND c.run_date = s.run_date
-  AND c.check_id = 'T1_PARTITION_DRIFT' AND c.partition_state_rows > 0;
+  AND c.check_id = 'T1_PARTITION_DRIFT' AND c.partition_state_rows > 0 AND c.evidence_state <> 'INVALID';
 
--- A cause row counts only with a cause commit of its own run and evaluation id, and only while the
--- result that commit names (result_run_id, evaluation_id) has a result commit: explicit identity,
--- no timestamps. A cause left by a run that never committed it stays out, whichever run later
--- commits the same evaluation id. result_run_id says which committed result the cause explains.
+-- A cause row counts only with a cause commit of its own run, evaluation id and run_date that is
+-- not INVALID, and only while the result that commit names (result_run_id, result_run_date,
+-- evaluation_id) has a result commit: explicit identity, no timestamps. A cause left by a run that
+-- never committed it, or naming a result that was never committed, stays out. An INVALID cause set
+-- is not a valid cause: the next run investigates the result again.
 CREATE OR REPLACE VIEW {{ dq_database }}.v_committed_cause AS
-SELECT x.*, c.result_run_id
+SELECT x.*, k.result_run_id, k.result_run_date, k.evidence_state
 FROM {{ dq_database }}.dq_cause_result x
 JOIN (
-  SELECT DISTINCT k.run_id, k.evaluation_id, k.run_date, k.result_run_id
-  FROM {{ dq_database }}.dq_commit k
-  LEFT SEMI JOIN {{ dq_database }}.dq_commit r
-    ON r.kind = 'result' AND r.run_id = k.result_run_id AND r.evaluation_id = k.evaluation_id
-  WHERE k.kind = 'cause' AND k.cause_rows > 0
-) c ON c.run_id = x.run_id AND c.evaluation_id = x.evaluation_id AND c.run_date = x.run_date;
+  SELECT s.run_id, s.evaluation_id, s.run_date, s.result_run_id, s.result_run_date, s.evidence_state
+  FROM {{ dq_database }}.v_commit_state s
+  LEFT SEMI JOIN {{ dq_database }}.v_commit_state r
+    ON r.kind = 'result' AND r.run_id = s.result_run_id AND r.run_date = s.result_run_date
+    AND r.evaluation_id = s.evaluation_id
+  WHERE s.kind = 'cause' AND s.cause_rows > 0 AND s.evidence_state <> 'INVALID'
+) k ON k.run_id = x.run_id AND k.evaluation_id = x.evaluation_id AND k.run_date = x.run_date;
 
--- Audit (no run reads it): commits whose stored rows now differ from what they declare. A run
--- checks the counts before it writes a commit, so a row here means rows were lost afterwards,
--- including evidence past its table's retention (partition states are kept for less time than
--- results). Query it with a run_date bound.
+-- Audit: commits whose stored rows now differ from what they declare, with their evidence
+-- state and how long their evidence is kept. A run checks the counts before it writes a commit,
+-- so a row here means rows were lost (or added) afterwards; an EXPIRED row is evidence past its
+-- documented retention. The integrity sweep reads it. Query it with a run_date bound.
 CREATE OR REPLACE VIEW {{ dq_database }}.v_commit_integrity AS
 SELECT c.run_id, c.evaluation_id, c.dataset, c.check_id, c.kind, c.run_date,
        c.result_rows, coalesce(r.n, 0) AS stored_result_rows,
        c.key_event_rows, coalesce(e.n, 0) AS stored_key_event_rows,
        c.partition_state_rows, coalesce(s.n, 0) AS stored_partition_state_rows,
-       c.cause_rows, coalesce(x.n, 0) AS stored_cause_rows
-FROM (
-  SELECT run_id, evaluation_id, dataset, check_id, kind, run_date,
-         MAX(result_rows) AS result_rows, MAX(key_event_rows) AS key_event_rows,
-         MAX(partition_state_rows) AS partition_state_rows, MAX(cause_rows) AS cause_rows
-  FROM {{ dq_database }}.dq_commit
-  GROUP BY run_id, evaluation_id, dataset, check_id, kind, run_date
-) c
+       c.cause_rows, coalesce(x.n, 0) AS stored_cause_rows,
+       c.evidence_kept_until, c.evidence_state
+FROM {{ dq_database }}.v_commit_state c
 LEFT JOIN (SELECT run_id, evaluation_id, run_date, COUNT(*) AS n FROM {{ dq_database }}.dq_check_result
            GROUP BY run_id, evaluation_id, run_date) r
   ON c.kind = 'result' AND r.run_id = c.run_id AND r.evaluation_id = c.evaluation_id AND r.run_date = c.run_date
@@ -157,14 +236,16 @@ WHERE (c.kind = 'result' AND (coalesce(r.n, 0) <> c.result_rows
    OR (c.kind = 'cause' AND coalesce(x.n, 0) <> c.cause_rows);
 
 -- Every row of the latest evaluation per (dataset, check_id): one row for an
--- ungrouped check, one row per group for a grouped one. Latest = the latest window, then
+-- ungrouped check, one row per group for a grouped one. healthy is the one definition of a
+-- healthy result: PASSED with VALID evidence (never INVALID, UNKNOWN or EXPIRED). Latest = the latest window, then
 -- the latest evaluation of it, so a RERUN or REPLAY of an older window never becomes the
 -- current state, while a RERUN of the current window replaces it.
 CREATE OR REPLACE VIEW {{ dq_database }}.v_latest_result AS
 SELECT evaluation_id, run_id, event_id, window_start, window_end, execution_type, feed, dataset, check_id,
        expectation_version, state, reason_category, reason_code, population,
        violations, observed, expected, group_values, severity, evaluated_at,
-       duration_ms, detail, run_date
+       duration_ms, detail, run_date, evidence_state,
+       state = 'PASSED' AND evidence_state = 'VALID' AS healthy
 FROM (
   SELECT r.*,
          DENSE_RANK() OVER (
