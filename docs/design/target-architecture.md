@@ -236,7 +236,7 @@ Answered on 2026-10-16 (`docs/decisions.md`, "Developer answers on the reconcili
 
 ## 7. After approval: the build order
 
-Each step ends at an architectural checkpoint (`docs/design/checkpoints.md`) that the user reviews before the next step starts.
+Each step ends at an architectural checkpoint (`docs/design/checkpoints.md`) that the user reviews before the next step starts. How each built step is implemented (modules, data flow, tables, views, tests) is in `docs/design/implementation.md`.
 
 1. **Contract schema and validation.** `grain`, mapping kinds, the versioned exclusions, `reject_policy`, `deletion`, `history`, and the aliases for today's fields. `dre validate` lists unsupported edges and blind spots. **Built 2026-10-16; checkpoint 1.**
 2. **Commit rows and committed-only views (ADR-07).** These go first among the store changes because every later result depends on them. **Built 2026-10-17; checkpoint 2.**
