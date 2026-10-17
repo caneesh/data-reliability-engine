@@ -61,7 +61,7 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
 | Implementation guide `docs/design/implementation.md` (steps 1 and 2) | `029bdda` | #80 |
 | Handoff for compaction | `fcaa98f` | #81 |
 | Checkpoint 2 CI line | `8129f75` | #82 |
-| Checkpoint 2 revision after the user's review: cause commits by identity, verification before commit, repair after a failed commit write, REPLAY list from committed results, `commit_batch`, CI test report | (this commit) | |
+| Checkpoint 2 revision after the user's review: cause commits by identity, verification before commit, repair after a failed commit write, REPLAY list from committed results, `commit_batch`, CI test report | `3112889` | #83 |
 
 Each row has a section in `docs/decisions.md` saying what was decided and why.
 
@@ -69,7 +69,7 @@ Each row has a section in `docs/decisions.md` saying what was decided and why.
 
 **Next action**, in this order unless the user says otherwise:
 
-0. **Confirm CI** for the checkpoint 2 revision commit with `actions_list`, fill its history row and the revised checkpoint's CI line, and push that docs-only change. The `test` job now keeps a `test-report` artifact (JUnit XML) and `e2e` keeps `e2e-logs`.
+0. ~~Confirm CI for the checkpoint 2 revision.~~ Run #83 on `3112889`, green, with the `test-report` (JUnit XML) and `e2e-logs` artifacts kept.
 1. **Wait for the user's review of the revised checkpoint 2** (`docs/design/checkpoints.md`, "Checkpoint 2, revised": findings and their answers, E1 to E6 now, the review's exit criteria). Record their verdict in `docs/decisions.md` before starting step 3.
 2. **Step 3, HOP_LEDGER and `dq_reconciliation`**, on the user's word. Start by stating the plan: files, tests, spec sections. It is bound by:
    - **the D6 conditions:**

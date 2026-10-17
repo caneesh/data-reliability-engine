@@ -197,7 +197,7 @@ Recorded in `docs/decisions.md`, "Phase 1 build step 2", item 4.
 
 ## Checkpoint 2, revised: identity, verification and repair (2026-10-17)
 
-**Status:** built; awaiting the user's review. **CI:** see the handoff's history table (row "Checkpoint 2 revision"). **Decisions:** `docs/decisions.md`, "Checkpoint 2 reviewed" (the review, E1 to E6 verdicts, my assessment) and "Checkpoint 2 revision" (what was built).
+**Status:** built; awaiting the user's review. **CI:** run #83 on `3112889`, green (`test`, `e2e`, `package`), with the `test-report` (JUnit XML, every test by name) and `e2e-logs` artifacts kept with the run. **Decisions:** `docs/decisions.md`, "Checkpoint 2 reviewed" (the review, E1 to E6 verdicts, my assessment) and "Checkpoint 2 revision" (what was built).
 
 ### Findings and what answers them
 
@@ -250,6 +250,6 @@ Recorded in `docs/decisions.md`, "Phase 1 build step 2", item 4.
 ### Gate to step 3 (HOP_LEDGER and `dq_reconciliation`)
 
 1. The user reviews this revision, or asks for changes.
-2. CI is green on the revision commit, with the test report kept.
+2. ~~CI is green on the revision commit, with the test report kept.~~ Run #83, green, both artifacts kept.
 3. Step 3 is bound by the D6 conditions from checkpoint 1.
 
