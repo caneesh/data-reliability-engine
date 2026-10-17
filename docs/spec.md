@@ -26,7 +26,7 @@ Repository copy: production paths, file names, and database and table names are 
 
 **Release 4 (outside-in evidence, October 2026; `docs/design/outside-in-evidence.md`):** read-only checks that see what an in-pipeline audit sees from inside the jobs, without touching a job. Built so far: T1\_PARTITION\_DRIFT (section 6; a partition rewritten outside the window, detected from each partition's files and confirmed by counting that partition alone; its state in `dq_partition_state`, section 5). Planned: T1\_FILE\_RECORD\_COUNT, T1\_SEQUENCE\_GAP, HOP\_ROW\_PARITY and HOP\_CARDINALITY. Still out, by nature: the reason a job itself rejected a record, and a merge's inserted-versus-updated split.
 
-**Phase 1 design (approved and frozen 2026-10-16; `docs/design/target-architecture.md`, `docs/design/reconciliation-model.md`):** every hop gets a reconciliation contract, and the engine will account for every due record in exactly one disposition. Built in steps (the architecture's section 7). Built so far: step 1, the contract schema and its validation: `grain` and `contracts` on a dataset, `yarn_queue` and `protected_queues` in `defaults.yaml` (section 3); hop checks read a hop's exclusions through its contract (section 6); `dre validate` reports each hop's kind and blind spots (section 3, "Validation"). Step 2, commit rows: an evaluation becomes visible only once its `dq_commit` row is stored, and every reader reads committed rows (section 5, "Commit protocol"). Not built yet: the ledger (dispositions, volume guards, the reject policy, tolerance), evaluation modes, attribution and contribution checks, the chain, run budgets.
+**Phase 1 design (approved and frozen 2026-10-16; `docs/design/target-architecture.md`, `docs/design/reconciliation-model.md`):** every hop gets a reconciliation contract, and the engine will account for every due record in exactly one disposition. Built in steps (the architecture's section 7). Built so far: step 1, the contract schema and its validation: `grain` and `contracts` on a dataset, `yarn_queue` and `protected_queues` in `defaults.yaml` (section 3); hop checks read a hop's exclusions through its contract (section 6); `dre validate` reports each hop's kind and blind spots (section 3, "Validation"). Step 2, commit rows: an evaluation or a cause investigation becomes visible only once its `dq_commit` rows are stored, after the rows they vouch for were counted, and every reader reads committed rows (section 5, "Commit protocol"; revised after the checkpoint 2 review). Not built yet: the ledger (dispositions, volume guards, the reject policy, tolerance), evaluation modes, attribution and contribution checks, the chain, run budgets.
 
 ## 2. Stack and repository layout
 
@@ -319,6 +319,8 @@ The engine adds `record_ts` and `load_ts` (UTC): the latest record and load time
 
 **Watchdog** (in `defaults.yaml`): `watchdog_grace_minutes` (default 30).
 
+**Commit batches** (in `defaults.yaml`, Phase 1 design ADR-07): `commit_batch` (default 25, 1 to 1000), how many evaluations and investigations a run publishes per append of commit rows (section 5, "Commit protocol").
+
 **Isolation** (in `defaults.yaml`, Phase 1 design ADR-08): `yarn_queue`, DRE's own YARN queue (a platform value; null until confirmed), and `protected_queues`, the queues DRE must never run in (the production pipelines'). Both are production values, kept in the deployed configuration only. `dre validate` rejects a `yarn_queue` listed in `protected_queues`. The run budget, the kill switch and the check at run start come in build step 8.
 
 **Partition pruning.** A windowed check filters on the parsed load time, which Spark cannot push down to a partition column. A dataset that sets `partition_column` and `partition_format` (a Spark date pattern of `yyyy`, `MM`, `dd`, `HH` and separators, at least to the day, such as `yyyy-MM-dd` or `yyyyMMdd`) gets a second predicate on every windowed scan (T1\_ON\_TIME, T1\_ZERO\_ROWS, T1\_VOLUME, T1\_KEY\_NULLS, T1\_COLUMN\_RANGE, and NO\_UPSTREAM\_DATA's upstream count): `partition_column IN (...)`, every partition value the window could touch in the load time's zone, widened by one granule on each side. It only narrows what is read; the parsed-time predicate stays, so a partition value that does not match its rows' load times costs speed, never correctness. A span listing more than 1000 partitions, a pattern the engine cannot write, or a column without a format gets no predicate (`dre validate` warns on the last). The real values are platform-confirmed (section 11); until then both stay `null`.
@@ -461,39 +463,48 @@ CREATE TABLE dq.dq_partition_state (
   observed_at TIMESTAMP, run_id STRING
 ) PARTITIONED BY (run_date DATE) STORED AS ORC;
 
--- Phase 1 design, ADR-07: one row per committed evaluation id (each result row is its own id).
--- The counts say what the commit vouches for; evidence rows of a commit with a count of 0 stay
--- invisible.
+-- Phase 1 design, ADR-07: one row per committed evaluation id (each result row is its own id),
+-- and one per committed cause investigation. The counts say what the commit vouches for, and were
+-- checked against the stored rows before the commit was written; evidence rows of a commit with a
+-- count of 0 stay invisible.
 CREATE TABLE dq.dq_commit (
   run_id STRING, evaluation_id STRING, dataset STRING, check_id STRING,
-  result_rows INT, key_event_rows BIGINT, partition_state_rows INT,
+  kind STRING,                          -- result | cause
+  result_run_id STRING,                 -- the run whose committed result this publishes or explains
+  result_rows INT, key_event_rows BIGINT, partition_state_rows INT, cause_rows INT,
   committed_at TIMESTAMP
 ) PARTITIONED BY (run_date DATE) STORED AS ORC;
 ```
 
 **Commit protocol** (Phase 1 design, ADR-07). Hive has no transaction across tables, so an evaluation is published by a commit row written last:
 
-1. **Order.** The run writes an evaluation's evidence (key events, partition states), then its result rows, then, in a batch with other evaluations, one `dq_commit` row per evaluation id. The commit rows are appended every 25 evaluations and at the end of the run, also when the run fails, so the store gains one small file per batch, not one per evaluation.
-2. **Visibility.** Every reader of results, key events, partition states and causes reads the committed views below, never the tables:
-   - results and key events count only with a commit of the same run and evaluation id;
-   - partition states count only with a commit of the same run, dataset and T1\_PARTITION\_DRIFT;
-   - causes count once their evaluation id was committed by the investigating run, or before a later run's retry investigated it.
+1. **Order.** The run writes an evaluation's evidence (key events, partition states), then its result rows, then, in a batch with other evaluations, one `dq_commit` row per evaluation id (`kind` result, `result_run_id` the run itself). A cause investigation writes its `dq_cause_result` rows, then one `dq_commit` row (`kind` cause, `result_run_id` the run whose committed result it explains, which differs from the run for a retried investigation), in the same batches. The commit rows are appended every `commit_batch` units (an evaluation or an investigation; `defaults.yaml`, default 25) and at the end of the run, also when the run fails, so the store gains one small file per batch, not one per evaluation. Each batch is written as one file.
+2. **Verification.** Before a batch's commit rows are written, the rows they vouch for are counted in the store, in one query over the run's own rows: each result commit's result rows, and its key events and partition states when it declares any; each cause commit's cause rows. A unit (an evaluation, with every row and group it wrote, or an investigation) whose stored rows differ from what its commits declare is withheld whole: none of its commits is written, the run says so (`integrity: ... withheld`), it does not count as written or done, and its window is held and evaluated again (an investigation is retried). A batch that cannot be counted is withheld the same way.
+3. **Visibility.** Every reader of results, key events, partition states and causes reads the committed views below, never the tables:
+   - results and key events count only with a result commit of the same run and evaluation id;
+   - partition states count only with a result commit of the same run, dataset and T1\_PARTITION\_DRIFT;
+   - causes count only with a cause commit of the same run and evaluation id, and only while the result it names (`result_run_id`, evaluation id) has a result commit. No timestamp decides it, so a cause left by a run that never committed, or written on a host whose clock is off, never attaches to another run's result.
 
-   The window history is the one exception. It reads `dq_check_result` itself and holds every event of a run that did not finish COMPLETED (section 4), which is stricter: a run is COMPLETED only once all its evaluations are committed.
-3. **Failures.** An evaluation interrupted before its commit is invisible. This covers a process that dies, a write that fails, and a commit that cannot be stored. Its run is not COMPLETED, so its window is held and evaluated again, and evaluation ids are deterministic (section 4), so the retry publishes the same ids under its own run.
-   - **Evidence cannot be stored.** The results are not written. An evidence\_incomplete DID\_NOT\_RUN row for every row of the evaluation is written and committed with evidence counts of 0, so the current state says so, and the partial evidence stays invisible.
-   - **Results cannot be stored.** The same marker is tried.
-   - **Counting.** An evaluation counts in `checks_written` only once its commit is stored.
-4. **Retention.** `dq_commit` must be kept at least as long as every table it gates (`dq_check_result`, `dq_cause_result`, `dq_key_event`, `dq_partition_state`), or results would disappear with their commits; `dre validate` checks it.
+   The window history is the one exception. It reads `dq_check_result` itself and holds every event of a run that did not finish COMPLETED (section 4), which is stricter: a run is COMPLETED only once all its evaluations are committed. The REPLAY window list reads committed results only, so a window that was attempted and never committed is not replayed.
+4. **Failures.** An evaluation interrupted before its commit is invisible. This covers a process that dies, a write that fails, and a commit that cannot be stored. Its run is not COMPLETED, so its window is held and evaluated again, and evaluation ids are deterministic (section 4), so the retry publishes the same ids under its own run.
+   - **Evidence cannot be stored.** The results are not written. An evidence\_incomplete DID\_NOT\_RUN row for every row of the evaluation is written and committed with evidence counts of 0, so the current state says so, and the partial evidence stays invisible. No cause is investigated for it.
+   - **Results cannot be stored.** The same marker is tried. If the failed result write left rows behind, the marker's stored count differs from its declaration and verification withholds it.
+   - **A commit write fails.** The run reads back which of the batch's commit rows were stored (a write can fail after its file landed), counts those units, and appends the missing rows once more. Duplicate commit rows are harmless: every view only asks whether a matching commit exists. A unit whose commits are still not all stored does not count.
+   - **Counting.** An evaluation counts in `checks_written`, and an investigation in `investigations_done`, only once its commits are stored.
+5. **Retention.** `dq_commit` must be kept at least as long as every table it gates (`dq_check_result`, `dq_cause_result`, `dq_key_event`, `dq_partition_state`), or results would disappear with their commits; `dre validate` checks it.
+6. **What is guaranteed.** A visible evaluation's rows were all stored, and counted, when it was published. Afterwards they last as long as their tables' retention: partition states are kept 13 months and results 84, so an older T1\_PARTITION\_DRIFT result outlives the states it compared. `dq.v_commit_integrity` lists every commit whose stored rows now differ from its declaration (expired evidence included); query it with a `run_date` bound.
+
+**Observations are not evaluations.** `dq_run` and `dq_file` are not commit-gated. A `dq_run` row records a run's state as it happens, and a `dq_file` row records that DRE saw a file at a time, which stays true whether or not the run that saw it finishes; a first-seen time must survive a run that dies. Neither is a result or evidence of one: what the checks conclude from the file registry (T1\_FILES\_NOT\_LOADED, the landing causes) is published through the commit protocol like every other result. `dq.v_file_status` and `dq.v_latest_run` show observations, not committed outcomes.
 
 Views derive current state. They are `CREATE OR REPLACE`, so `dre install --apply` replaces them after an upgrade; they hold no data:
 
-- `dq.v_committed_result`, `dq.v_committed_key_event`, `dq.v_committed_partition_state`, `dq.v_committed_cause`: the committed rows of each table (commit protocol above)
+- `dq.v_committed_result`, `dq.v_committed_key_event`, `dq.v_committed_partition_state`, `dq.v_committed_cause`: the committed rows of each table (commit protocol above); a committed cause row also carries `result_run_id`
+- `dq.v_commit_integrity`: commits whose stored rows differ from what they declare (commit protocol, item 6); an audit view no run reads
 
 - `dq.v_latest_run`: each run's latest `dq_run` row (its final row once written, otherwise STARTED)
 - `dq.v_latest_result`: the latest committed evaluation per (dataset, check\_id), by `window_end` and then `evaluated_at` (so a RERUN or REPLAY of an older window never becomes the current state): one row for an ungrouped check, one row per group for a grouped one
 - `dq.v_open_keys`: keys whose latest committed `dq_key_event` at a hop is FLAGGED or STILL\_FLAGGED, with first flagged date (per dataset, check, hop and key)
-- `dq.v_file_status`: one row per file path with first-seen time and latest size
+- `dq.v_file_status`: one row per file path with first-seen time and latest size (observations, not commit-gated)
 - `dq.v_latest_partition_state`: the latest committed `dq_partition_state` row per dataset and partition (release 4)
 
 `key_hash` is HMAC-SHA256 of the normalised key, with the secret read from a protected file named in config, never from the repository. Emails use counts and, only if enabled, `key_hash`; `key_value` is never written to logs or emails.

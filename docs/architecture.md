@@ -103,7 +103,8 @@ These stay counts and key states, not new result states: every check still write
 **How:**
 
 - **Deterministic ids.** `evaluation_id` is a hash of (event, check, expectation version, engine version, group). Re-evaluating the same window gives the same ids.
-- **Commit rows** (Phase 1 design, ADR-07; spec section 5, "Commit protocol"). An evaluation's evidence (key events, partition states) is written first, then its results, then its `dq_commit` row, in batches of 25 and at the end of the run. Every view of current state, and every reader of results, key events, partition states and causes, sees committed rows only. A run that dies, or a write that fails, anywhere before the commit leaves nothing visible.
+- **Commit rows** (Phase 1 design, ADR-07; spec section 5, "Commit protocol"). An evaluation's evidence (key events, partition states) is written first, then its results, then its `dq_commit` row, in batches (`commit_batch`, default 25) and at the end of the run; a cause investigation's rows are published by a cause commit naming the result it explains. Before a batch is written, the rows its commits vouch for are counted, and a unit whose rows differ is withheld whole. Every view of current state, and every reader of results, key events, partition states and causes, sees committed rows only, and causes attach to results by identity, never by time. A run that dies, or a write that fails, anywhere before the commit leaves nothing visible; a commit write that fails after its file landed is read back and completed.
+- **What is guaranteed.** A visible evaluation's rows were all stored, and counted, when it was published. Afterwards they last as long as their tables' retention (partition states 13 months, results 84). `v_commit_integrity` audits it. `dq_run` and `dq_file` record observations, not evaluations, and are not commit-gated.
 - **Current state.** Each evaluation's current state is its newest committed row in the views. `v_latest_result` orders by window, then by evaluation time.
 - **Partial writes:**
   - **Evidence not stored.** The results are not written. A DID\_NOT\_RUN / PLATFORM / `evidence_incomplete` row is written and committed, with no evidence vouched for, so the partial evidence stays invisible, and the run ends PARTIAL.
@@ -121,6 +122,8 @@ These stay counts and key states, not new result states: every check still write
 - it dies before the commit;
 - the commit is refused;
 - the evidence is partly stored.
+
+The checkpoint 2 revision added: a partly stored cause set, a marker over partly stored results, stored rows that differ from a commit, a commit write that fails after none, some or all of its rows, and causes stamped after another run's commit (by identity, they stay out).
 
 **Open.** Hive/ORC still has no transaction across tables, so an interrupted run leaves rows in the tables. They are invisible, not absent, until retention removes them. Concurrency stays as before: one NORMAL run at a time.
 

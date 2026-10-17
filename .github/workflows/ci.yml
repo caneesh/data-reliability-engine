@@ -23,7 +23,15 @@ jobs:
       - name: Validate sample config
         run: dre validate --conf conf/
       - name: All tests
-        run: pytest
+        # The per-test report (every test by name, with its outcome) is kept with the run, so a
+        # reviewer can see a named test pass on the exact commit without running anything.
+        run: pytest --junitxml=reports/junit.xml
+      - name: Keep the test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report
+          path: reports/junit.xml
 
   e2e:
     # dre install and dre run end to end, as separate processes, on both synthetic feeds.
@@ -44,9 +52,17 @@ jobs:
       - name: dre install
         run: cd e2e && dre install --conf conf --apply
       - name: dre run
-        run: cd e2e && dre run --conf conf
+        run: cd e2e && set -o pipefail && dre run --conf conf | tee run.log
       - name: Verify results
-        run: cd e2e && python ../tests/e2e/verify.py
+        run: cd e2e && set -o pipefail && python ../tests/e2e/verify.py | tee verify.log
+      - name: Keep the e2e logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs
+          path: |
+            e2e/run.log
+            e2e/verify.log
 
   package:
     # Build the release artifacts, then run dre through spark-submit from them alone, on a Python

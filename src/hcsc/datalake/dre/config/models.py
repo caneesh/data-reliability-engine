@@ -258,6 +258,8 @@ class Defaults(SettingsOverride):
     rule_weekly_day: Weekday | None = None  # weekly rules' day; null: the dataset's full_sweep_day
     # The watchdog (spec section 8) expects the hourly run's dq_run rows this long after the hour.
     watchdog_grace_minutes: int = Field(default=30, ge=1, le=59)
+    # ADR-07: evaluations and investigations a run publishes per append of commit rows.
+    commit_batch: int = Field(default=25, ge=1, le=1000)
     # How far back a run looks for FAILED results whose cause investigation never finished, to retry it.
     investigation_retry_days: int = Field(default=7, ge=1)
     # How far back (run_date) the hourly reads of the dq store look: the window history, the rule

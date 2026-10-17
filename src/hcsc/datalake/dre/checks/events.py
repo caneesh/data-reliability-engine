@@ -185,17 +185,19 @@ def fixed_window(dataset: Dataset, start: datetime, end: datetime, default_tz: s
 
 def recorded_windows(spark: SparkSession, dq_database: str, datasets: list[str], start: datetime,
                      end: datetime) -> dict[str, list[tuple[datetime, datetime]]]:
-    """Each dataset's NORMAL event windows (not rule results, not WINDOW_GAP records) lying inside
-    [start, end), oldest first."""
+    """Each dataset's committed NORMAL event windows (not rule results, not WINDOW_GAP records) lying
+    inside [start, end), oldest first. Committed only (ADR-07): a window that was attempted and never
+    committed is evaluated again by the next NORMAL run, usually with other bounds, so it is not one
+    of the dataset's windows."""
     validate_dq_database(dq_database)
     found: dict[str, list[tuple[datetime, datetime]]] = {d: [] for d in datasets}
-    if not datasets or not spark.catalog.tableExists(f"{dq_database}.dq_check_result"):
+    if not datasets or not spark.catalog.tableExists(f"{dq_database}.v_committed_result"):
         return found
     names = ", ".join(f"'{validate_identifier(d, 'dataset id')}'" for d in sorted(set(datasets)))
     lo = as_utc(start).strftime("%Y-%m-%d %H:%M:%S.%f")
     hi = as_utc(end).strftime("%Y-%m-%d %H:%M:%S.%f")
     rows = spark.sql(
-        f"SELECT DISTINCT dataset, window_start, window_end FROM {dq_database}.dq_check_result "
+        f"SELECT DISTINCT dataset, window_start, window_end FROM {dq_database}.v_committed_result "
         f"WHERE dataset IN ({names}) AND execution_type = 'NORMAL' AND severity IS NULL "
         f"AND check_id <> '{GAP_CHECK_ID}' "
         f"AND window_start >= TIMESTAMP '{lo}' AND window_end <= TIMESTAMP '{hi}' "

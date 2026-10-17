@@ -55,7 +55,7 @@ from hcsc.datalake.dre.notify.sinks import deliver, from_digests
 from hcsc.datalake.dre.sources.hdfs import LandingError, list_landing
 from hcsc.datalake.dre.store import runs
 from hcsc.datalake.dre.store.causes import append_cause_results
-from hcsc.datalake.dre.store.commits import Commit, append_commits
+from hcsc.datalake.dre.store.commits import CAUSE, Commit, append_commits, mismatches, stored_commits, stored_counts
 from hcsc.datalake.dre.store.files import register_files
 from hcsc.datalake.dre.store.install import missing_objects
 from hcsc.datalake.dre.store.names import validate_identifier
@@ -459,44 +459,109 @@ def commits_for(rows: list[dict[str, Any]], run: runs.Run,
                    *evidence.get(r["evaluation_id"], (0, 0))) for r in rows]
 
 
-# Evaluations whose commit rows are appended together (ADR-07, amended on approval: one append per
-# batch, not a small file per evaluation). The run's remaining commits are appended at its end.
+# Units (evaluations, investigations) whose commit rows are appended together, unless
+# defaults.commit_batch says otherwise (ADR-07, amended on approval: one append per batch, not a small
+# file per evaluation). The run's remaining commits are appended at its end.
 COMMIT_BATCH = 25
+
+
+@dataclass(frozen=True)
+class Unit:
+    """What is published or withheld whole: an evaluation (every row and group it stored) or a
+    cause investigation. `complete` counts in checks_written, `investigated` in investigations_done."""
+
+    commits: list[Commit]
+    complete: int = 0
+    investigated: int = 0
 
 
 @dataclass
 class Publisher:
-    """Collects stored evaluations' commits and appends them in batches. An evaluation counts as
-    written (dq_run.checks_written) only once its commit is stored, so a commit that cannot be
-    stored makes the run PARTIAL and holds its windows, like any other failed write."""
+    """Collects stored units' commits and appends them in batches (ADR-07). Before a batch is
+    written, the rows its commits vouch for are counted in the store, and a unit whose stored rows
+    differ is withheld whole. A unit counts (checks_written, investigations_done) only once its
+    commits are stored, so a commit that cannot be stored makes the run PARTIAL and holds its
+    windows, like any other failed write. After a failed write the run reads back what was stored
+    (a write can fail after its file landed) and appends the missing rows once more."""
 
     spark: SparkSession
     db: str
     run: runs.Run
     batch: int = COMMIT_BATCH
-    pending: list[tuple[list[Commit], int]] = field(default_factory=list)
+    tally: Investigations | None = None
+    pending: list[Unit] = field(default_factory=list)
     published: int = 0  # evaluations counted as written
+    withheld: int = 0  # units held back by verification
 
-    def add(self, commits: list[Commit], complete: int) -> None:
+    def add(self, commits: list[Commit], complete: int, investigated: int = 0) -> None:
         if not commits:  # an evaluation with no result rows (a grouped check with no groups): nothing to publish
-            self.published += complete
+            self._count([Unit(commits, complete, investigated)])
             return
-        self.pending.append((commits, complete))
+        self.pending.append(Unit(commits, complete, investigated))
         if len(self.pending) >= self.batch:
             self.flush()
+
+    def _count(self, units: list[Unit]) -> None:
+        self.published += sum(u.complete for u in units)
+        if self.tally is not None:
+            self.tally.done += sum(u.investigated for u in units)
+
+    def _verified(self, units: list[Unit]) -> list[Unit]:
+        """The units whose stored rows match what their commits declare; the others are withheld."""
+        try:
+            counts = stored_counts(self.spark, self.db, self.run.run_id, self.run.run_date,
+                                   [c for u in units for c in u.commits])
+        except Exception as exc:
+            log.error("could not count the rows of %d unit(s) before their commits: %s", len(units), error_detail(exc))
+            print(f"integrity: {len(units)} unit(s) withheld: their stored rows could not be counted "
+                  f"({type(exc).__name__}); their windows are evaluated again")
+            self.withheld += len(units)
+            return []
+        kept = []
+        for unit in units:
+            problems = [p for c in unit.commits for p in mismatches(c, counts)]
+            if not problems:
+                kept.append(unit)
+                continue
+            first = unit.commits[0]
+            log.error("integrity: %s %s (%s) withheld: %s", first.dataset, first.check_id, first.kind, "; ".join(problems))
+            print(f"integrity: {first.dataset} {first.check_id} ({first.kind}) withheld: its stored rows differ "
+                  f"from what its commits declare ({'; '.join(problems)}); it is evaluated again")
+            self.withheld += 1
+        return kept
+
+    def _repaired(self, units: list[Unit], commits: list[Commit]) -> list[Unit]:
+        """After a failed write: the units whose commits are all stored, once the missing rows are
+        appended again (duplicates are harmless)."""
+        stored: set[tuple[str, str, str]] = set()
+        try:
+            stored = stored_commits(self.spark, self.db, self.run.run_id, self.run.run_date)
+            missing = [c for c in commits if c.identity not in stored]
+            if missing:
+                append_commits(self.spark, self.db, missing, datetime.now(timezone.utc), self.run.run_date)
+            print(f"commit write failed after storing {len(commits) - len(missing)} of its {len(commits)} rows; "
+                  f"{len(missing)} appended again")
+            return units
+        except Exception as exc:
+            log.error("could not repair the commit batch: %s", error_detail(exc))
+        done = [u for u in units if all(c.identity in stored for c in u.commits)]
+        print(f"commit rows not stored ({len(units) - len(done)} unit(s) stay unpublished); "
+              "their windows are evaluated again")
+        return done
 
     def flush(self) -> None:
         if not self.pending:
             return
-        commits = [c for batch, _ in self.pending for c in batch]
+        units, self.pending = self._verified(self.pending), []
+        commits = [c for u in units for c in u.commits]
+        if not commits:
+            return
         try:
             append_commits(self.spark, self.db, commits, datetime.now(timezone.utc), self.run.run_date)
-            self.published += sum(complete for _, complete in self.pending)
         except Exception as exc:
             log.error("could not write %d commit rows: %s", len(commits), error_detail(exc))
-            print(f"commit rows not stored ({type(exc).__name__}): {len(self.pending)} evaluation(s) stay unpublished; "
-                  "their windows are evaluated again")
-        self.pending.clear()
+            units = self._repaired(units, commits)
+        self._count(units)
 
 
 @dataclass
@@ -510,13 +575,16 @@ class Investigations:
 
 def explain_failures(spark: SparkSession, config: Config, evaluation: Evaluation, rows: list[dict[str, Any]],
                      run: runs.Run, tally: Investigations | None = None,
-                     budget_minutes: float | None = None) -> list[str]:
-    """Run the cause engine for each FAILED result, append its dq_cause_result rows, and return
-    one line per resolved cause (codes and counts only, hard rule 6). A failed investigation
-    never stops the run or changes the check: it is counted in `tally` as not done, reported by
-    the watchdog and retried by the next NORMAL run (retry_investigations). With a budget (the
-    dataset's compute budget, less what its checks spent), an investigation that runs past it is
-    cancelled and counted the same way; a spent budget skips it."""
+                     budget_minutes: float | None = None, publisher: Publisher | None = None) -> list[str]:
+    """Run the cause engine for each stored FAILED result row, append its dq_cause_result rows, and
+    return one line per resolved cause (codes and counts only, hard rule 6). The rows are published
+    by a cause commit naming the result's run (ADR-07): through `publisher`, which counts the
+    investigation as done once the commit is stored, or, without one, appended at once. A failed
+    investigation never stops the run or changes the check: it is counted in `tally` as not done,
+    reported by the watchdog and retried by the next NORMAL run (retry_investigations). With a
+    budget (the dataset's compute budget, less what its checks spent), an investigation that runs
+    past it is cancelled and counted the same way; a spent budget skips it. An evidence_incomplete
+    marker stored in place of a FAILED result is not investigated: no FAILED result was published."""
     from collections import Counter
 
     p = evaluation.planned
@@ -524,8 +592,9 @@ def explain_failures(spark: SparkSession, config: Config, evaluation: Evaluation
     if ft is None or evaluation.ctx is None:
         return []
     lines = []
+    db = config.defaults.dq_database
     for result, row in zip(evaluation.results, rows):
-        if result.state != "FAILED":
+        if result.state != "FAILED" or row["state"] != "FAILED":
             continue
         upstream = result.group_values.get("upstream") if p.check.check_id.startswith("HOP_") else None
         cx = CauseContext(evaluation.ctx, evaluation.event, config, p.check.check_id, upstream)
@@ -537,7 +606,9 @@ def explain_failures(spark: SparkSession, config: Config, evaluation: Evaluation
 
         def investigate() -> list[dict[str, Any]]:
             found = explain(cx, result, row["evaluation_id"], run.run_id, run.run_date, datetime.now(timezone.utc))
-            append_cause_results(spark, config.defaults.dq_database, found)
+            append_cause_results(spark, db, found)
+            if publisher is None:
+                append_commits(spark, db, cause_commits(found, row, run), datetime.now(timezone.utc), run.run_date)
             return found
         try:
             cause_rows = within_budget(spark, budget_minutes, investigate) if budget_minutes is not None else investigate()
@@ -549,18 +620,29 @@ def explain_failures(spark: SparkSession, config: Config, evaluation: Evaluation
             log.error("could not explain %s for %s: %s", p.check.check_id, p.dataset.dataset, error_detail(exc))
             lines.append(f"  cause investigation incomplete ({type(exc).__name__}); the next run retries it")
             continue
-        if tally is not None:
+        if publisher is not None:  # done once the cause commit is stored
+            publisher.add(cause_commits(cause_rows, row, run), 0, investigated=1)
+        elif tally is not None:
             tally.done += 1
         counts = Counter(line.text() for line in summarise(cause_rows, ft).values())
         lines += [f"  {text} [{n} failing]" for text, n in sorted(counts.items())]
     return lines
 
 
+def cause_commits(cause_rows: list[dict[str, Any]], row: dict[str, Any], run: runs.Run) -> list[Commit]:
+    """The commit that publishes one investigation's cause rows, naming the run whose committed
+    result they explain (this run's, or the original run's for a retry). None without cause rows."""
+    if not cause_rows:
+        return []
+    return [Commit(run.run_id, row["evaluation_id"], row["dataset"], row["check_id"], 0, kind=CAUSE,
+                   result_run_id=row["run_id"], cause_rows=len(cause_rows))]
+
+
 def pending_investigations(spark: SparkSession, config: Config, since: date,
                            skip: set[str]) -> list[dict[str, Any]]:
     """FAILED NORMAL results since `since` that are still their check's (and group's) latest result
-    and have no dq_cause_result rows: investigations a run could not finish. Both scans are bounded
-    by run_date."""
+    and have no committed cause naming that result (its run and evaluation id): investigations a
+    run could not finish. The result and cause scans are bounded by run_date."""
 
     db = config.defaults.dq_database
     day = f"DATE'{since.isoformat()}'"
@@ -568,14 +650,15 @@ def pending_investigations(spark: SparkSession, config: Config, since: date,
         f"SELECT r.* FROM (SELECT d.*, ROW_NUMBER() OVER (PARTITION BY dataset, check_id, {GROUPS_SQL} "
         f"  ORDER BY window_end DESC, evaluated_at DESC, run_id DESC) AS rn "
         f"  FROM {db}.v_committed_result d WHERE run_date >= {day} AND execution_type = 'NORMAL') r "
-        f"LEFT ANTI JOIN (SELECT DISTINCT evaluation_id FROM {db}.v_committed_cause WHERE run_date >= {day}) c "
-        f"  ON c.evaluation_id = r.evaluation_id "
+        f"LEFT ANTI JOIN (SELECT DISTINCT evaluation_id, result_run_id FROM {db}.v_committed_cause "
+        f"  WHERE run_date >= {day}) c "
+        f"  ON c.evaluation_id = r.evaluation_id AND c.result_run_id = r.run_id "
         f"WHERE r.rn = 1 AND r.state = 'FAILED'").collect()
     return [r.asDict() for r in rows if r.evaluation_id not in skip]
 
 
 def retry_investigations(spark: SparkSession, config: Config, run: runs.Run, key_secret: bytes | None,
-                         tally: Investigations, skip: set[str]) -> list[str]:
+                         tally: Investigations, skip: set[str], publisher: Publisher | None = None) -> list[str]:
     """Explain again, against the data as it is now, the FAILED results whose investigation a run
     could not finish (pending_investigations). Each counts in this run's tally."""
 
@@ -602,7 +685,7 @@ def retry_investigations(spark: SparkSession, config: Config, run: runs.Run, key
         ctx = replace(ctx, judge_open_keys=True)  # the failing judgement included open keys: list them again
         evaluation = Evaluation(planned, event, [result], datetime.now(timezone.utc), 0, ctx)
         explained = explain_failures(spark, config, evaluation, [row], run, tally,
-                                     config.dataset_settings(row["dataset"]).compute_budget_minutes)
+                                     config.dataset_settings(row["dataset"]).compute_budget_minutes, publisher)
         lines += [f"{row['dataset']} {row['check_id']}: cause investigation retried"] + explained
     return lines
 
@@ -848,8 +931,8 @@ def run(spark: SparkSession, conf: str, feed_id: str | None = None, selection: S
     run_record = runs.start_run(spark, db, conf_dir=conf, execution_type=kind)
     print(f"dre run: started {run_record.run_id} ({kind} run, {run_record.started_at:%Y-%m-%d %H:%M} UTC)")
     written = expected = 0
-    publisher = Publisher(spark, db, run_record)
     investigations = Investigations()
+    publisher = Publisher(spark, db, run_record, config.defaults.commit_batch, investigations)
     explained: set[str] = set()  # evaluation ids this run already investigated
     try:
         planned_all = plan(config, feed_id, per_table=False)
@@ -890,17 +973,19 @@ def run(spark: SparkSession, conf: str, feed_id: str | None = None, selection: S
             rows = stored_rows
             explained.update(r["evaluation_id"] for r in rows)
             for line in describe(evaluation) + explain_failures(spark, config, evaluation, rows, run_record,
-                                                                investigations, remaining):
+                                                                investigations, remaining, publisher):
                 print(line)
             drop_judged_views(spark, evaluation)
         publisher.flush()  # the run's remaining commits, before anything reads this run's results
         if normal:
             try:
-                for line in retry_investigations(spark, config, run_record, key_secret, investigations, explained):
+                for line in retry_investigations(spark, config, run_record, key_secret, investigations, explained,
+                                                 publisher):
                     print(line)
             except Exception as exc:  # every check is written by now: the retries are not worth a FAILED run
                 log.error("could not retry pending investigations: %s", error_detail(exc))
                 print(f"pending cause investigations not retried ({type(exc).__name__}); the next run retries them")
+            publisher.flush()  # the retried investigations' commits, before the digest reads this run's causes
     except Exception as exc:
         log.error("run %s failed: %s", run_record.run_id, error_detail(exc))
         publisher.flush()  # what was stored completely before the failure is published; nothing else is

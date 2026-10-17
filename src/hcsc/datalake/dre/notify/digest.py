@@ -164,7 +164,7 @@ def read_run(spark: SparkSession, dq_database: str, run_id: str, run_date: date 
             f"  ON l.dataset = h.dataset AND l.check_id = h.check_id AND l.run_id = h.run_id").collect():
         previous_groups.setdefault((r.dataset, r.check_id), {})[r.groups] = r.state
     causes = [r.asDict() for r in spark.sql(
-        f"SELECT * FROM {dq_database}.v_committed_cause WHERE {this_run}").collect()]
+        f"SELECT * FROM {dq_database}.v_committed_cause WHERE {this_run} AND result_run_id = '{run_id}'").collect()]
     samples: dict[str, list[str]] = {}
     sample_rows = spark.sql(
         f"SELECT evaluation_id, key_hash FROM ("

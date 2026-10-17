@@ -26,7 +26,9 @@ def ts(day: int, hour: int = 0) -> datetime:
 def append_rows(spark, database: str, table: str, rows: list[dict[str, Any]], commit: bool = True) -> None:
     """Append rows (missing columns become null) through the engine's writer. Result, key-event and
     partition-state rows stand for a stored evaluation, so they are committed too (ADR-07: only
-    committed rows are visible); commit=False leaves them uncommitted, as a run that died would."""
+    committed rows are visible); commit=False leaves them uncommitted, as a run that died would.
+    Cause rows are published by a cause commit naming the result's run: a row's "result_run_id"
+    (not a column of the table), or its own run."""
     schema = spark.table(f"{database}.{table}").schema
     data = [tuple(row.get(f.name) for f in schema.fields) for row in rows]
     writer.append(spark.createDataFrame(data, schema), database, table)
@@ -52,6 +54,11 @@ def commit_rows(spark, database: str, table: str, rows: list[dict[str, Any]]) ->
         keyed = Counter((r.get("run_id"), f"partition-state-{r.get('run_id')}", r.get("dataset"), "T1_PARTITION_DRIFT",
                          r.get("run_date")) for r in rows)
         make = lambda run, ev, ds, check, n: Commit(run, ev, ds, check, 0, partition_state_rows=n)  # noqa: E731
+    elif table == "dq_cause_result":
+        keyed = Counter((r.get("run_id"), r.get("evaluation_id"), r.get("result_run_id") or r.get("run_id"),
+                         None, r.get("run_date")) for r in rows)
+        make = lambda run, ev, result_run, _, n: Commit(run, ev, "", "", 0, kind="cause",  # noqa: E731
+                                                       result_run_id=result_run, cause_rows=n)
     else:
         return
     by_day: dict[Any, list[Commit]] = {}

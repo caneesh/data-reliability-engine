@@ -505,6 +505,56 @@ The traceability matrix comes before code (exit criterion 6).
    - **Backpressure:** at 80% of the budget the next run defers the full sweep.
    - **Load test:** on a representative cluster, which needs the platform team.
 
+## Checkpoint 2 revision: identity, verification and repair (2026-10-17)
+
+Built after the checkpoint 2 review below, on the user's approval of the proposed changes. Revised checkpoint 2 (`docs/design/checkpoints.md`) waits for the user's review; step 3 stays blocked until then.
+
+1. **Causes attach by identity (E3 revised; CP2-03).**
+   - A cause investigation is published by its own `dq_commit` row: `kind` cause, the investigating run, the evaluation id, `result_run_id` (the run whose committed result it explains) and `cause_rows`. Result commits carry `kind` result and their own run as `result_run_id`.
+   - `v_committed_cause` shows a cause row only with a cause commit of its own run and evaluation id, and only while the named result has a result commit. It exposes `result_run_id`. No timestamp is compared.
+   - Readers join by it: `dre trace` (`r.run_id = c.result_run_id`; it used to require the cause's run to be the result's, so a retried cause was never shown, a defect older than step 2), the retry of investigations (an anti join on evaluation id and result run), the digest (this run's causes of this run's results).
+   - An investigation counts in `investigations_done` only once its cause commit is stored. A partly stored cause set has no commit, stays invisible, and the next run retries it.
+   - An evidence_incomplete marker stored in place of a FAILED result is not investigated: no FAILED result was published for a cause to explain.
+   - `dq_commit` is new in step 2 and not yet released, so its columns changed without altering a released table.
+2. **Stored rows are counted before a commit (CP2-01, E2's condition).**
+   - Before each batch is written, one query over the run's own rows counts what the batch's commits vouch for: result rows; key events and partition states where a commit declares any; cause rows. A table no commit declares rows in is not read.
+   - A unit (an evaluation with every row and group it stored, or an investigation) whose stored rows differ is withheld whole, said in the run's output (`integrity: ... withheld`) and the log, not counted, and evaluated again. A batch that cannot be counted is withheld.
+   - This closes a hole of the first build: a result write that stored its rows and then failed was followed by a marker under the same evaluation id, and the semi join published both. Now two rows are stored where one is declared, and the marker is withheld.
+   - Counting at read time was rejected: every reader would count `dq_key_event`, the largest table. The run pays one aggregate query per batch instead, over its own rows (ORC stripe statistics on `run_id` skip other runs' files).
+   - The narrower guarantee is documented (spec section 5, "What is guaranteed"): a visible evaluation's rows were all stored and counted when it was published; afterwards they last as long as their tables' retention. `v_commit_integrity` is an audit view listing commits whose stored rows now differ, expired evidence included (partition states are kept 13 months, results 84).
+3. **A failed commit write is read back and completed (CP2-02).**
+   - A batch's commit rows are written as one file, so a write stores all of them or none. A write can still fail after its file landed.
+   - After a failed write the run reads back this run's commit rows, counts the units whose commits are all stored, and appends the missing rows once more. A commit's identity is (run, evaluation id, kind); a duplicate row publishes nothing more, because every view only asks whether a matching commit exists.
+   - If the repair fails too, only units whose commits are all stored count. Tested with failures after none, some and all of a batch's rows were stored, and with a repair that fails.
+4. **The REPLAY window list reads committed results only (E1's condition).** The window history keeps reading the raw table: it must see uncommitted attempts to hold their windows, and it labels them by their run's status. A window that was attempted and never committed is not replayed: the next NORMAL run evaluated it again, usually with other bounds.
+5. **`commit_batch` (E6).** A setting in `defaults.yaml`, default 25, 1 to 1000, instead of a constant.
+6. **Observations are not evaluations (CP2-04).** `dq_run` and `dq_file` are not commit-gated, documented in spec section 5: a `dq_file` row records that a file was seen at a time, true whether or not the run finishes, and a first-seen time must survive a run that dies. What the checks conclude from it is published through the commit protocol.
+7. **Run evidence a reviewer can inspect.** CI keeps the per-test report (`test-report`, JUnit XML) and the e2e logs (`e2e-logs`) with each run.
+8. **Tests** (`tests/test_commit_protocol.py` unless named): causes by identity, never by time (an orphan cause stamped after the other run's commit stays out); a partly stored cause set and its retry; a marker over partly stored results; a unit withheld whole (a missing group, a key-event count short); a batch that cannot be counted; a failed commit write after none, some or all rows, and a failed repair; the integrity view; the REPLAY list; `tests/test_trace.py::test_a_retried_investigation_s_cause_is_shown`; `config/test_validate.py` case commit-batch-zero.
+
+## Checkpoint 2 reviewed: changes required (2026-10-17)
+
+The user's review of checkpoint 2 ("DRE Checkpoint 2 Architecture Implementation Review", 2026-10-17): **changes required before step 3**. The evidence-first, result-second, commit-last direction is accepted. The review is a static review; it does not claim to have run the failure-injection suite.
+
+1. **Findings.**
+   - **CP2-01 (high):** a commit's existence does not prove its evidence is complete. Verify persisted evidence against the declared counts, or document a narrower guarantee with integrity monitoring.
+   - **CP2-02 (high):** a commit write may persist some rows and then raise. Define commit identities, read back what was stored, and test failures after none, some and all rows.
+   - **CP2-03 (high):** associating causes with evaluations by timestamp is fragile. Use an explicit identity.
+   - **CP2-04 (medium):** the file registry is not commit-gated; document its different publication semantics.
+2. **E1 to E6.**
+   - **E1 approved with conditions:** distinguish incomplete attempts from committed evaluations where raw history is used.
+   - **E2 approved with conditions:** zero or positive counts are not proof of durable evidence.
+   - **E3 not approved as written:** use an explicit committed evaluation or investigation identity.
+   - **E4 approved:** validate replacement against existing readers.
+   - **E5 approved:** commit metadata kept at least as long as what depends on it.
+   - **E6 approved:** treat the batch size as tunable; test load, retry and partial writes.
+3. **My assessment, given to the user before building:**
+   - CP2-01 is partly right. On the error path a partial evidence write is never published (the marker commits counts of 0, already tested). What was unproven: a write that returns with fewer rows stored, rows lost afterwards (partition states outlive by retention, 13 months against 84), and a partly stored result followed by a marker, which the first build published. Verification at publication, not at read time.
+   - CP2-02 can happen, but a stored subset of commits publishes only fully written evaluations; the harm is the count, a held window and a second publication. Fixed by single-file batches, a read-back and a repair.
+   - CP2-03 is right, and more: clock skew between hosts, partly stored cause sets, and a `dre trace` defect older than step 2.
+   - CP2-04: documentation only.
+4. **Before step 3, the review requires:** cause identity (E3), recovery from ambiguous commit writes, verification or a narrowed guarantee with monitoring, the file registry's semantics, tests of ambiguous outcomes and evidence mismatch, and this record with CI results and implementation references. The user approved building them ("Yes"); the revision is the entry above.
+
 ## Phase 1 build step 2: commit rows and committed-only views (2026-10-17)
 
 ADR-07, authorised by the checkpoint 1 ratification. Checkpoint 2 (`docs/design/checkpoints.md`) waits for the user's review.
@@ -528,11 +578,11 @@ ADR-07, authorised by the checkpoint 1 ratification. Checkpoint 2 (`docs/design/
    - RERUN idempotency (`stored_outcomes`), so an unpublished row never makes a RERUN skip its window;
    - the retry of investigations.
 4. **Decisions beyond the ADR's text, for checkpoint 2:**
-   1. **The window history reads `dq_check_result` itself.** It already holds every event of a run that did not finish COMPLETED, and a run is COMPLETED only once every evaluation is committed. Holding is therefore stricter than committed-only reading, and it keeps the `max_window_hours` limit and the WINDOW_GAP record. The REPLAY window list reads the table too, for the same reason.
+   1. **The window history reads `dq_check_result` itself.** It already holds every event of a run that did not finish COMPLETED, and a run is COMPLETED only once every evaluation is committed. Holding is therefore stricter than committed-only reading, and it keeps the `max_window_hours` limit and the WINDOW_GAP record. The REPLAY window list reads the table too, for the same reason. *(Changed at the checkpoint 2 revision: the REPLAY list reads committed results.)*
    2. **A commit's evidence counts gate its evidence.** Key events and partition states of a commit with a count of 0 stay invisible. This is what keeps a marker from publishing partial evidence.
-   3. **Causes are gated by timing.** A cause row counts once its evaluation id is committed, by the investigating run or before a later run's retry. A cause left by a run that never committed stays out, even after another run commits the same deterministic id.
+   3. **Causes are gated by timing.** *(Not approved at the checkpoint 2 review; replaced by cause commits, see "Checkpoint 2 revision".)* A cause row counts once its evaluation id is committed, by the investigating run or before a later run's retry. A cause left by a run that never committed stays out, even after another run commits the same deterministic id.
    4. **Views are `CREATE OR REPLACE`.** Tables stay IF NOT EXISTS. Views hold no data, so `dre install --apply` replaces older definitions; that is the upgrade path for an installed store. The guard already allowed CREATE OR REPLACE VIEW in `store/ddl.sql` only.
-   5. **Batch size 25**, a constant. The ADR said "per batch" without a size.
+   5. **Batch size 25**, a constant. The ADR said "per batch" without a size. *(Now the `commit_batch` setting, default 25.)*
 5. **Tests.**
    - `tests/test_commit_protocol.py`, the acceptance condition: failure injection at four write boundaries, each followed by recovery, plus unit tests of the committed views.
    - `store/test_install.py`: replacing older views.

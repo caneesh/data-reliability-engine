@@ -120,7 +120,7 @@ provider_roster_raw->provider_directory: dedup (inferred from key_map)
 
 ## Checkpoint 2: commit rows and committed-only views (2026-10-17)
 
-**Status:** built; awaiting the user's review. **CI:** run #79 on `d8db1ad`, green (`test`, `e2e`, `package`).
+**Status:** built; **reviewed by the user on 2026-10-17: changes required before step 3** (`docs/decisions.md`, "Checkpoint 2 reviewed"). Revised below, "Checkpoint 2, revised". **CI of the first build:** run #79 on `d8db1ad`, green (`test`, `e2e`, `package`).
 
 **Acceptance condition** (checkpoint 1 ratification): failure-injection and recovery tests proving that no incomplete evaluation becomes visible as a committed result. The proving tests are in `tests/test_commit_protocol.py`:
 
@@ -157,7 +157,7 @@ Recorded in `docs/decisions.md`, "Phase 1 build step 2", item 4.
 | --- | --- | --- |
 | E1 | The window history (and the REPLAY window list) reads `dq_check_result` itself, not the committed view | It holds every event of a run that did not finish COMPLETED, which is stricter, and it keeps the `max_window_hours` limit and the WINDOW_GAP record |
 | E2 | A commit's evidence counts gate its evidence: a count of 0 keeps the evidence rows invisible | So an evidence_incomplete marker can be published without publishing partial evidence |
-| E3 | Causes are gated by timing: the evaluation must be committed by the investigating run, or before a retry | Evaluation ids are deterministic, so a plain join on the id would publish an orphan run's causes once another run commits the same id |
+| E3 | *(Not approved; replaced in the revision by cause commits.)* Causes are gated by timing: the evaluation must be committed by the investigating run, or before a retry | Evaluation ids are deterministic, so a plain join on the id would publish an orphan run's causes once another run commits the same id |
 | E4 | Views are `CREATE OR REPLACE`; tables stay IF NOT EXISTS | The upgrade path for an installed store: views hold no data. The guard already allowed it in `store/ddl.sql` only |
 | E5 | `dq_commit` must be retained at least as long as every table it gates, checked by `dre validate` | Otherwise results would disappear when their commit rows expire |
 | E6 | Batch size 25, a constant | The ADR left the size open. The e2e run (38 evaluations) is two batches |
@@ -191,6 +191,65 @@ Recorded in `docs/decisions.md`, "Phase 1 build step 2", item 4.
 
 ### Gate to step 3 (HOP_LEDGER and `dq_reconciliation`)
 
-1. The user ratifies E1 to E6, or asks for changes.
+1. ~~The user ratifies E1 to E6, or asks for changes.~~ Changes required (2026-10-17); see the revision below.
 2. ~~CI is green on the step 2 commit.~~ Run #79, green.
 3. Step 3 is bound by the D6 conditions from checkpoint 1: contract-proven claims only under a declared contract, no aggregation reconciliation from an inferred aggregate, and unsupported mappings and blind spots on each result's scope.
+
+## Checkpoint 2, revised: identity, verification and repair (2026-10-17)
+
+**Status:** built; awaiting the user's review. **CI:** see the handoff's history table (row "Checkpoint 2 revision"). **Decisions:** `docs/decisions.md`, "Checkpoint 2 reviewed" (the review, E1 to E6 verdicts, my assessment) and "Checkpoint 2 revision" (what was built).
+
+### Findings and what answers them
+
+| Finding | Change | Code | Proving tests (`tests/test_commit_protocol.py` unless named) |
+| --- | --- | --- | --- |
+| CP2-01: a commit does not prove its evidence | Stored rows are counted before each batch of commits; a unit whose rows differ is withheld whole. The guarantee is stated (spec section 5, "What is guaranteed") and audited by `v_commit_integrity` | `store/commits.py` (`stored_counts`, `mismatches`), `runner.Publisher._verified`, `store/ddl.sql` | `test_a_unit_whose_stored_rows_differ_from_its_commits_is_withheld_whole`, `test_a_batch_whose_rows_cannot_be_counted_is_withheld`, `test_a_marker_over_partly_stored_results_is_withheld`, `test_the_integrity_view_lists_commits_whose_rows_were_lost` |
+| CP2-02: a commit write that partly succeeds | A batch is one file (stored whole or not at all). After a failed write the run reads back its commits and appends the missing ones; commit identity is (run, evaluation id, kind), duplicates are harmless | `store/commits.py` (`append_commits`, `stored_commits`), `runner.Publisher._repaired` | `test_a_failed_commit_write_is_read_back_and_completed[none, some, all]`, `test_a_unit_left_split_by_a_failed_repair_does_not_count`, and the first build's boundary tests |
+| CP2-03, E3: causes by timestamp | Cause commits (`kind` cause, `result_run_id`); the view joins by identity only; trace, retry and digest join through `result_run_id` | `store/ddl.sql` (`v_committed_cause`), `runner.explain_failures`, `cause_commits`, `pending_investigations`, `trace.py`, `notify/digest.py` | `test_a_cause_attaches_to_a_result_by_identity_never_by_time`, `test_a_partly_stored_cause_set_is_never_published_and_the_next_run_retries_it`, `tests/test_trace.py::test_a_retried_investigation_s_cause_is_shown` |
+| CP2-04: the file registry | Documented: `dq_run` and `dq_file` record observations, not evaluations; conclusions drawn from them are commit-gated | spec section 5, "Observations are not evaluations" | (documentation) |
+
+### E1 to E6 after the review
+
+| # | Verdict | Status now |
+| --- | --- | --- |
+| E1 | Approved with conditions | The window history holds every event of a run that did not finish COMPLETED and labels it by run status (`run_partial`, `run_started`). The REPLAY window list now reads committed results only: `test_the_replay_window_list_has_committed_windows_only` |
+| E2 | Approved with conditions | Counts are now checked against the stored rows before the commit (CP2-01) |
+| E3 | Not approved as written | Replaced by cause commits (CP2-03) |
+| E4 | Approved | Unchanged; `store/test_install.py::test_apply_replaces_views_left_by_an_older_release`; every reader and its view: `docs/design/implementation.md` |
+| E5 | Approved | Unchanged, enforced by `dre validate`; the shorter evidence retention is documented and audited |
+| E6 | Approved, tunable | `commit_batch` in `defaults.yaml` (default 25, 1 to 1000); `config/test_validate.py` case commit-batch-zero. Retry and partial writes are tested above; load is untested (no representative cluster, ADR-08) |
+
+### The review's exit criteria
+
+| Criterion | Where it stands |
+| --- | --- |
+| Every committed result is linked to one unambiguous evaluation identity | Result commits: (run, evaluation id). Cause commits: (run, evaluation id) naming (result run, evaluation id) |
+| Publication cannot falsely claim complete evidence after partial or ambiguous writes | Verification before every commit; partial evidence, partial results under a marker, partial cause sets and failed commit writes are each tested |
+| Retries are idempotent across evidence, result, cause and commit rows | Evidence, results and causes of an interrupted unit stay invisible; the retry publishes under its own run with deterministic ids; duplicate commit rows publish nothing more |
+| Committed-only views are validated for failure, concurrency and recovery | Failure and recovery: the tests above, and the first build's four boundary tests, which check all seven committed views. Concurrency is unchanged: one NORMAL run at a time (`runs.in_progress`); a run still STARTED past `watchdog_grace_minutes` counts as dead and no longer blocks, as before |
+| The guarantee and its limits are documented | Spec section 5, "What is guaranteed" and "Observations are not evaluations" |
+| A reviewer can inspect the tests and run evidence | CI keeps `test-report` (JUnit XML, every test by name) and `e2e-logs` with each run |
+
+### Invariants re-verified
+
+- **Hard constraints.** Writes go through `store/writer.py` only, to the dq store only, append only; the new view is in `store/ddl.sql`; the guard tests pass.
+- **Three result states.** No new state. A withheld unit is not a result: its window is held and evaluated again, as after any failed write.
+- **Existing behaviour.** The e2e run gives the same results, COMPLETED, every check written.
+- **Tests restated, none weakened:**
+  - `test_a_cause_from_a_run_that_never_committed_stays_hidden` became `test_a_cause_attaches_to_a_result_by_identity_never_by_time`: the same orphan case, now with the orphan's timestamp after the other run's commit, which the timing rule let through.
+  - `test_an_evaluation_with_no_result_rows_counts_as_written_and_commits_are_batched` stores the result rows its commits vouch for, since a commit with no stored rows is now withheld.
+  - `tests/store/conftest.append_rows` publishes synthetic cause rows by a cause commit, as the run does.
+
+### Risks and notes
+
+1. **Read cost.** `v_committed_cause` semi joins the cause commits on the result commits, which has no `run_date` bound on the result side (a retry explains an older day's result). `dq_commit` has one small row per evaluation; the first build's view had the same unbounded join.
+2. **Write cost.** One aggregate query per batch over the run's own rows, plus one read-back after a failed write only.
+3. **A withheld unit repeats until its rows match.** If something kept making counts differ (a writer defect), the window would be held until `max_window_hours`, then become a WINDOW_GAP, as for any persistent write failure. The run's output says `integrity: ... withheld` each time.
+4. **`v_commit_integrity` lists expired evidence too.** Query it with a `run_date` bound inside the shortest retention to see only real losses.
+
+### Gate to step 3 (HOP_LEDGER and `dq_reconciliation`)
+
+1. The user reviews this revision, or asks for changes.
+2. CI is green on the revision commit, with the test report kept.
+3. Step 3 is bound by the D6 conditions from checkpoint 1.
+

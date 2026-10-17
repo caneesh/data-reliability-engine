@@ -73,6 +73,35 @@ def test_the_cause_line_is_the_gap_hop_s_own(spark, tmp_path, capsys) -> None:
     assert lines[-1] == "cause: not evaluated (no failed HOP_KEY_CURRENCY for this key at this hop in the dq store)"
 
 
+def test_a_retried_investigation_s_cause_is_shown(spark, tmp_path, capsys) -> None:
+    """Checkpoint 2 review (CP2-03): a retry investigates a result another run committed and stores its
+    causes under its own run id. The trace finds them through the cause commit's result_run_id; it
+    used to require the cause's run to be the result's, so a retried cause was never shown."""
+    from datetime import date, datetime
+
+    from hcsc.datalake.dre.checks.hop.common import key_hash
+    from tests.store.conftest import append_rows
+
+    secret = tmp_path / "hmac.secret"
+    secret.write_bytes(b"synthetic-trace-secret\n")
+    replay = replay_conf(spark, tmp_path, "trace_retried", {
+        "defaults.yaml": [("hmac_secret_file: null", f"hmac_secret_file: {secret}")]})
+    create_table(spark, replay.curated, CURATED_COLUMNS, [curated_row(updated=curated_load_time(12))])
+    create_table(spark, replay.gold, GOLD_COLUMNS)
+    ref = key_hash(b"synthetic-trace-secret", "123401|01|2026-01-01|AGR-A")
+    append_rows(spark, replay.dq, "dq_check_result", [{
+        "evaluation_id": "e1", "run_id": "r1", "dataset": "gold_member_coverage", "check_id": "HOP_KEY_CURRENCY",
+        "state": "FAILED", "evaluated_at": datetime(2026, 1, 15, 12), "run_date": date(2026, 1, 15)}])
+    append_rows(spark, replay.dq, "dq_cause_result", [{  # the retry, a day later, under its own run id
+        "run_id": "r2", "result_run_id": "r1", "evaluation_id": "e1", "failure_ref": ref,
+        "hop": "example_curated_enrollment->gold_member_coverage", "cause_check_id": "builtin", "order_no": 1,
+        "state": "CONFIRMED", "cause_code": "NOT_RUN", "evidence": "{}", "evaluated_at": datetime(2026, 1, 16, 12),
+        "run_date": date(2026, 1, 16)}])
+    code, lines = trace(replay, capsys)
+    assert code == 0
+    assert lines[-1] == "cause: NOT_RUN (confirmed)"
+
+
 def test_the_key_can_come_from_a_file_or_stdin_and_never_enters_sql_text(spark, tmp_path, capsys, monkeypatch) -> None:
     """--key-file keeps the key off the command line; either way the key is data in a one-row temp
     view, so no SQL the trace runs carries it as a literal."""

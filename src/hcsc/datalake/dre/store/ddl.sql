@@ -53,15 +53,18 @@ CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_partition_state (
   observed_at TIMESTAMP, run_id STRING
 ) PARTITIONED BY (run_date DATE) STORED AS ORC;
 
--- Phase 1 design, ADR-07: one row per committed evaluation id. An evaluation's evidence (key
--- events, partition states) and its result rows are written first; its commit row last. Every
--- view of current state shows only committed rows, so an evaluation interrupted anywhere before
--- its commit is invisible, and its window is evaluated again. A row's evidence counts say what
--- the commit vouches for: evidence rows of a commit with a count of 0 stay invisible (an
--- evidence_incomplete marker commits its result rows only).
+-- Phase 1 design, ADR-07: one row per committed evaluation id (kind result) and one per committed
+-- cause investigation (kind cause). An evaluation's evidence (key events, partition states) and
+-- its result rows are written first, an investigation's cause rows first; the commit row last,
+-- once the rows it vouches for were counted in the store. Every view of current state shows only
+-- committed rows, so an evaluation interrupted anywhere before its commit is invisible, and its
+-- window is evaluated again. Evidence rows of a commit with a count of 0 stay invisible (an
+-- evidence_incomplete marker commits its result rows only). result_run_id names the run whose
+-- committed result the row publishes (a result commit: its own run) or explains (a cause commit).
 CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_commit (
   run_id STRING, evaluation_id STRING, dataset STRING, check_id STRING,
-  result_rows INT, key_event_rows BIGINT, partition_state_rows INT,
+  kind STRING, result_run_id STRING,
+  result_rows INT, key_event_rows BIGINT, partition_state_rows INT, cause_rows INT,
   committed_at TIMESTAMP
 ) PARTITIONED BY (run_date DATE) STORED AS ORC;
 
@@ -87,30 +90,71 @@ CREATE OR REPLACE VIEW {{ dq_database }}.v_committed_result AS
 SELECT r.*
 FROM {{ dq_database }}.dq_check_result r
 LEFT SEMI JOIN {{ dq_database }}.dq_commit c
-  ON c.run_id = r.run_id AND c.evaluation_id = r.evaluation_id AND c.run_date = r.run_date;
+  ON c.kind = 'result' AND c.run_id = r.run_id AND c.evaluation_id = r.evaluation_id AND c.run_date = r.run_date;
 
 CREATE OR REPLACE VIEW {{ dq_database }}.v_committed_key_event AS
 SELECT e.*
 FROM {{ dq_database }}.dq_key_event e
 LEFT SEMI JOIN {{ dq_database }}.dq_commit c
-  ON c.run_id = e.run_id AND c.evaluation_id = e.evaluation_id AND c.run_date = e.run_date
+  ON c.kind = 'result' AND c.run_id = e.run_id AND c.evaluation_id = e.evaluation_id AND c.run_date = e.run_date
   AND c.key_event_rows > 0;
 
 CREATE OR REPLACE VIEW {{ dq_database }}.v_committed_partition_state AS
 SELECT s.*
 FROM {{ dq_database }}.dq_partition_state s
 LEFT SEMI JOIN {{ dq_database }}.dq_commit c
-  ON c.run_id = s.run_id AND c.dataset = s.dataset AND c.run_date = s.run_date
+  ON c.kind = 'result' AND c.run_id = s.run_id AND c.dataset = s.dataset AND c.run_date = s.run_date
   AND c.check_id = 'T1_PARTITION_DRIFT' AND c.partition_state_rows > 0;
 
--- A cause row counts once its evaluation is committed: by the run that investigated it, or
--- before a later run's retry investigated it. A cause left by a run that never committed its
--- evaluation stays out, even after another run commits the same evaluation id.
+-- A cause row counts only with a cause commit of its own run and evaluation id, and only while the
+-- result that commit names (result_run_id, evaluation_id) has a result commit: explicit identity,
+-- no timestamps. A cause left by a run that never committed it stays out, whichever run later
+-- commits the same evaluation id. result_run_id says which committed result the cause explains.
 CREATE OR REPLACE VIEW {{ dq_database }}.v_committed_cause AS
-SELECT x.*
+SELECT x.*, c.result_run_id
 FROM {{ dq_database }}.dq_cause_result x
-LEFT SEMI JOIN {{ dq_database }}.dq_commit c
-  ON c.evaluation_id = x.evaluation_id AND (c.run_id = x.run_id OR c.committed_at <= x.evaluated_at);
+JOIN (
+  SELECT DISTINCT k.run_id, k.evaluation_id, k.run_date, k.result_run_id
+  FROM {{ dq_database }}.dq_commit k
+  LEFT SEMI JOIN {{ dq_database }}.dq_commit r
+    ON r.kind = 'result' AND r.run_id = k.result_run_id AND r.evaluation_id = k.evaluation_id
+  WHERE k.kind = 'cause' AND k.cause_rows > 0
+) c ON c.run_id = x.run_id AND c.evaluation_id = x.evaluation_id AND c.run_date = x.run_date;
+
+-- Audit (no run reads it): commits whose stored rows now differ from what they declare. A run
+-- checks the counts before it writes a commit, so a row here means rows were lost afterwards,
+-- including evidence past its table's retention (partition states are kept for less time than
+-- results). Query it with a run_date bound.
+CREATE OR REPLACE VIEW {{ dq_database }}.v_commit_integrity AS
+SELECT c.run_id, c.evaluation_id, c.dataset, c.check_id, c.kind, c.run_date,
+       c.result_rows, coalesce(r.n, 0) AS stored_result_rows,
+       c.key_event_rows, coalesce(e.n, 0) AS stored_key_event_rows,
+       c.partition_state_rows, coalesce(s.n, 0) AS stored_partition_state_rows,
+       c.cause_rows, coalesce(x.n, 0) AS stored_cause_rows
+FROM (
+  SELECT run_id, evaluation_id, dataset, check_id, kind, run_date,
+         MAX(result_rows) AS result_rows, MAX(key_event_rows) AS key_event_rows,
+         MAX(partition_state_rows) AS partition_state_rows, MAX(cause_rows) AS cause_rows
+  FROM {{ dq_database }}.dq_commit
+  GROUP BY run_id, evaluation_id, dataset, check_id, kind, run_date
+) c
+LEFT JOIN (SELECT run_id, evaluation_id, run_date, COUNT(*) AS n FROM {{ dq_database }}.dq_check_result
+           GROUP BY run_id, evaluation_id, run_date) r
+  ON c.kind = 'result' AND r.run_id = c.run_id AND r.evaluation_id = c.evaluation_id AND r.run_date = c.run_date
+LEFT JOIN (SELECT run_id, evaluation_id, run_date, COUNT(*) AS n FROM {{ dq_database }}.dq_key_event
+           GROUP BY run_id, evaluation_id, run_date) e
+  ON c.kind = 'result' AND e.run_id = c.run_id AND e.evaluation_id = c.evaluation_id AND e.run_date = c.run_date
+LEFT JOIN (SELECT run_id, dataset, run_date, COUNT(*) AS n FROM {{ dq_database }}.dq_partition_state
+           GROUP BY run_id, dataset, run_date) s
+  ON c.kind = 'result' AND c.check_id = 'T1_PARTITION_DRIFT' AND s.run_id = c.run_id AND s.dataset = c.dataset
+  AND s.run_date = c.run_date
+LEFT JOIN (SELECT run_id, evaluation_id, run_date, COUNT(*) AS n FROM {{ dq_database }}.dq_cause_result
+           GROUP BY run_id, evaluation_id, run_date) x
+  ON c.kind = 'cause' AND x.run_id = c.run_id AND x.evaluation_id = c.evaluation_id AND x.run_date = c.run_date
+WHERE (c.kind = 'result' AND (coalesce(r.n, 0) <> c.result_rows
+                              OR (c.key_event_rows > 0 AND coalesce(e.n, 0) <> c.key_event_rows)
+                              OR (c.partition_state_rows > 0 AND coalesce(s.n, 0) <> c.partition_state_rows)))
+   OR (c.kind = 'cause' AND coalesce(x.n, 0) <> c.cause_rows);
 
 -- Every row of the latest evaluation per (dataset, check_id): one row for an
 -- ungrouped check, one row per group for a grouped one. Latest = the latest window, then

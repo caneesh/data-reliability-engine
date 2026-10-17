@@ -15,10 +15,10 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
   - **Approval.** The user approved all eight ADRs on 2026-10-16, and the design is frozen. `docs/design/traceability-matrix.md` maps every requirement to its code and tests.
   - **Controlled implementation.** Each build step ends at an architectural checkpoint (`docs/design/checkpoints.md`): plan against delivered, conformance by ADR, deviations to ratify, invariants, evidence, risks, the gate. Then **stop for the user's review**. Each step also updates `docs/design/implementation.md` (how it is built) and the matrix in the same commit.
   - **Step 1** (the contract schema and its validation) is built (`f9d86d4`, CI #76). **Checkpoint 1 was ratified on 2026-10-17, approved with conditions.** D1 to D5 are approved. D6, inferring a hop's kind from `key_map`, is approved for backward compatibility on four conditions that bind steps 3 and 6 (`docs/decisions.md`, "Checkpoint 1 ratified").
-  - **Step 2** (commit rows and committed-only views, ADR-07) is built (`d8db1ad`, CI #79 pending at handoff). **Checkpoint 2 awaits the user's review of decisions E1 to E6.** Its acceptance tests, failure injection at four write boundaries plus recovery, are in `tests/test_commit_protocol.py`.
-  - **Step 3** (HOP_LEDGER and `dq_reconciliation`) is next, only on the user's word, after checkpoint 2 is ratified.
+  - **Step 2** (commit rows and committed-only views, ADR-07) is built (`d8db1ad`, CI #79). **The user reviewed checkpoint 2 on 2026-10-17: changes required before step 3** (CP2-01 to CP2-04; E3 not approved; E1 and E2 approved with conditions; E4 to E6 approved). On the user's "Yes" to the proposed changes, **the revision is built**: cause commits naming the result they explain (no timestamps), stored rows counted before every commit (a unit withheld whole when they differ), a failed commit write read back and completed, single-file commit batches, the REPLAY list from committed results, `commit_batch`, the observation tables documented, CI keeping the per-test report. **The revised checkpoint 2 awaits the user's review** (`docs/design/checkpoints.md`, "Checkpoint 2, revised"; `docs/decisions.md`, "Checkpoint 2 reviewed" and "Checkpoint 2 revision").
+  - **Step 3** (HOP_LEDGER and `dq_reconciliation`) is next, only on the user's word, after the revised checkpoint 2 is accepted.
 - **Context from 2026-10-15 and 16.** The user's team is building a temporary in-pipeline audit (control table, rejects table, filter rule ids, audit log lines) that modifies the jobs; DRE stays outside the jobs. `docs/evidence-contract.md` fixes what that audit writes so DRE's probes read it by configuration (also a Claude Doc, "DRE Evidence Contract"). A feature catalogue of the engine is a Claude Doc, "DRE: Feature Catalogue" (https://claude.ai/code/artifact/4831d1d5-a7fd-427e-9a49-e67b4dc62e39). The real flow: a scheduled process loads HDFS files up to a hand-off layer (merge or gcf), a continuous process moves them into gold temp, and gold main merges on its own schedule; whether the hand-off table is written by insert-overwrite per batch partition is still unknown (it decides where partition drift matters first).
-- **Tests:** 746 (`pytest --collect-only -q | tail -1` gives the exact count). A full local run takes about 25 minutes; CI about 20. Replay scenarios R01 to R13 all pass, plus a three-layer acceptance test. Proof scenarios R14 to R23 are planned (traceability matrix, section 4); PS8 is already covered by `tests/test_commit_protocol.py`.
+- **Tests:** 758 (`pytest --collect-only -q | tail -1` gives the exact count). A full local run takes about 25 minutes; CI about 20. Replay scenarios R01 to R13 all pass, plus a three-layer acceptance test. Proof scenarios R14 to R23 are planned (traceability matrix, section 4); PS8 is already covered by `tests/test_commit_protocol.py`.
 
 ## History, in order (each step green in CI)
 
@@ -58,8 +58,10 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
 | Phase 1 build step 1: the contract schema and its validation (`grain`, `contracts`, protected queues, hop exclusions through the contract, `dre validate`'s hop report); checkpoint 1 in `docs/design/checkpoints.md` | `f9d86d4` | #76 |
 | Checkpoint 1 ratified with conditions (D6 conditions bind steps 3 and 6); inferred hop kinds labelled | `5e7830f` | #78 |
 | Phase 1 build step 2: commit rows and committed-only views (ADR-07), failure-injection tests; checkpoint 2 | `d8db1ad` | #79 |
-| Implementation guide `docs/design/implementation.md` (steps 1 and 2) | `029bdda` | #80 (running when #79 was recorded) |
-| Handoff for compaction | `fcaa98f` | #81 (running when #79 was recorded) |
+| Implementation guide `docs/design/implementation.md` (steps 1 and 2) | `029bdda` | #80 |
+| Handoff for compaction | `fcaa98f` | #81 |
+| Checkpoint 2 CI line | `8129f75` | #82 |
+| Checkpoint 2 revision after the user's review: cause commits by identity, verification before commit, repair after a failed commit write, REPLAY list from committed results, `commit_batch`, CI test report | (this commit) | |
 
 Each row has a section in `docs/decisions.md` saying what was decided and why.
 
@@ -67,16 +69,8 @@ Each row has a section in `docs/decisions.md` saying what was decided and why.
 
 **Next action**, in this order unless the user says otherwise:
 
-0. **Confirm CI** for `d8db1ad` (#79) and `029bdda` (#80) with `actions_list`, fill their history rows, and push that docs-only change. A check-in scheduled for about 09:04 UTC on 2026-10-17 may already have done it.
-1. **Wait for the user's review of checkpoint 2.** They ratify or amend E1 to E6 (`docs/design/checkpoints.md`, checkpoint 2):
-   - E1: the window history reads the table, not the committed view.
-   - E2: a commit's evidence counts gate its evidence.
-   - E3: causes are gated by commit timing.
-   - E4: views are CREATE OR REPLACE.
-   - E5: dq_commit is retained at least as long as the tables it gates.
-   - E6: batch size 25.
-
-   Record the ratification in `docs/decisions.md` (as for checkpoint 1) before starting step 3.
+0. **Confirm CI** for the checkpoint 2 revision commit with `actions_list`, fill its history row and the revised checkpoint's CI line, and push that docs-only change. The `test` job now keeps a `test-report` artifact (JUnit XML) and `e2e` keeps `e2e-logs`.
+1. **Wait for the user's review of the revised checkpoint 2** (`docs/design/checkpoints.md`, "Checkpoint 2, revised": findings and their answers, E1 to E6 now, the review's exit criteria). Record their verdict in `docs/decisions.md` before starting step 3.
 2. **Step 3, HOP_LEDGER and `dq_reconciliation`**, on the user's word. Start by stating the plan: files, tests, spec sections. It is bound by:
    - **the D6 conditions:**
      - a result's claim is contract-proven only under a declared contract; an inferred hop is scoped "inferred contract";
@@ -85,7 +79,7 @@ Each row has a section in `docs/decisions.md` saying what was decided and why.
    - **the model's identity** (`docs/design/reconciliation-model.md`, section 3), asserted on every evaluation, with `ledger_unbalanced` as DID_NOT_RUN;
    - **tolerance** on `missing`, `stale` and `divergent` only;
    - **the volume guards** (`max_share`) and the reject policy, both of which apply from this step;
-   - **the commit protocol:** `dq_reconciliation` rows are evidence, written before the result and gated by the commit like the others (`docs/design/implementation.md`, "Changing this code").
+   - **the commit protocol:** `dq_reconciliation` rows are evidence, written before the result, counted by `stored_counts` before the commit, and gated by the commit like the others (`docs/design/implementation.md`, "Changing this code").
 
    End at checkpoint 3.
 3. **Later steps** (`docs/design/target-architecture.md`, section 7):
@@ -228,8 +222,8 @@ Production table, column and path names stay null: CLAUDE.md forbids inventing t
   - NO_UPSTREAM_DATA looks at the load's business window (previous slot to deadline) and comes after WRONG_PARTITION in the cause order.
 - **Store** (`store/`). Append-only, written only through `writer.append`.
   - Tables: `dq_run`, `dq_check_result`, `dq_cause_result`, `dq_key_event`, `dq_file`, `dq_partition_state` (release 4) and `dq_commit` (Phase 1 step 2).
-  - **Commit protocol** (ADR-07; spec section 5; `docs/design/implementation.md`, step 2). An evaluation writes its evidence, then its results, then commit rows, in batches of 25 and at the run's end. Nothing is visible before its commit.
-  - Views: `v_committed_result`, `v_committed_key_event`, `v_committed_partition_state` and `v_committed_cause`; `v_latest_run`; `v_latest_result` (latest committed window first); `v_open_keys`; `v_file_status`; `v_latest_partition_state`. **Every reader uses the committed views.** The one exception is the window history (`checks/events.py`), which reads `dq_check_result` and holds runs that did not finish COMPLETED (decision E1).
+  - **Commit protocol** (ADR-07; spec section 5; `docs/design/implementation.md`, step 2). An evaluation writes its evidence, then its results, then commit rows (`kind` result); an investigation writes its cause rows, then a commit (`kind` cause, `result_run_id` naming the result it explains). `runner.Publisher` batches them (`commit_batch`, default 25), counts the stored rows against the commits before writing (a unit that differs is withheld whole), writes each batch as one file, and after a failed write reads back and appends what is missing. Nothing is visible before its commit; causes attach by identity, never by time.
+  - Views: `v_committed_result`, `v_committed_key_event`, `v_committed_partition_state` and `v_committed_cause` (with `result_run_id`); `v_commit_integrity` (audit only); `v_latest_run`; `v_latest_result` (latest committed window first); `v_open_keys`; `v_file_status` (observations, not commit-gated); `v_latest_partition_state`. **Every reader uses the committed views.** The one exception is the window history (`checks/events.py`), which reads `dq_check_result` and holds runs that did not finish COMPLETED (decision E1); the REPLAY window list reads committed results.
   - DDL is applied only by `dre install --apply`. Tables are IF NOT EXISTS; views are CREATE OR REPLACE, so `--apply` upgrades a store. `dre retention [--apply]` runs weekly.
 - **Email, trace and watchdog.**
   - `notify/` builds the digest; the golden files are in `tests/notify/golden/`.
