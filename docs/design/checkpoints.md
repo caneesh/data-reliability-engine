@@ -255,7 +255,7 @@ Recorded in `docs/decisions.md`, "Phase 1 build step 2", item 4.
 
 ## Checkpoint 2 corrections R1 to R3 (2026-10-17)
 
-**Status:** built; awaiting independent verification and the user's sign-off. Checkpoint 2 stays open and step 3 blocked until then. **CI:** see the handoff's history table (row "Checkpoint 2 corrections R1 to R3"). **Decisions:** `docs/decisions.md`, "Checkpoint 2 corrections R1 to R3". **Evidence package:** `docs/design/evidence/checkpoint2-corrections.md` (commands, committed-view and integrity-view output, residual risks).
+**Status:** built; awaiting independent verification and the user's sign-off. Checkpoint 2 stays open and step 3 blocked until then. **CI:** run #85 on `ce7a283`, green (`test`, `e2e`, `package`), with the `test-report` (JUnit XML) and `e2e-logs` artifacts kept with the run. **Decisions:** `docs/decisions.md`, "Checkpoint 2 corrections R1 to R3". **Evidence package:** `docs/design/evidence/checkpoint2-corrections.md` (commands, committed-view and integrity-view output, residual risks).
 
 ### Corrections and their proof
 
@@ -307,6 +307,6 @@ Precedence (the acceptance list): `test_normal_rerun_and_replay_precedence` (a R
 ### Gate to step 3
 
 1. Independent verification of R1 to R3 and F01 to F10 (each Verified or Reopened).
-2. CI green on the corrections commit, with the test report kept.
+2. ~~CI green on the corrections commit, with the test report kept.~~ Run #85, green, both artifacts kept.
 3. The user signs off checkpoint 2.
 

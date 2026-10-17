@@ -4,7 +4,7 @@ For the reviewer of checkpoint 2 (the user's "Checkpoint 2 — Architecture Rati
 
 ## (a) Source changes
 
-The commit that carries this file, on branch `claude/claude-md-documentation-a2lxt0` (its SHA and CI run are in `docs/handoff.md`, history row "Checkpoint 2 corrections R1 to R3"). The diff against `2c0f3f7` (the revised checkpoint 2) is the change set: `git diff 2c0f3f7 <sha>`.
+Commit `ce7a283` on branch `claude/claude-md-documentation-a2lxt0`, CI run #85 (green: `test`, `e2e`, `package`; artifacts `test-report` and `e2e-logs`). The diff against `2c0f3f7` (the revised checkpoint 2) is the change set: `git diff 2c0f3f7 ce7a283`.
 
 | Area | Files |
 | --- | --- |

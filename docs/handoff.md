@@ -64,7 +64,7 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
 | Checkpoint 2 CI line | `8129f75` | #82 |
 | Checkpoint 2 revision after the user's review: cause commits by identity, verification before commit, repair after a failed commit write, REPLAY list from committed results, `commit_batch`, CI test report | `3112889` | #83 |
 | Revised checkpoint 2 CI line | `2c0f3f7` | #84 |
-| Checkpoint 2 corrections R1 to R3: evidence states, integrity sweep, lifetimes and holds, confirmed repair, `result_run_date`, freshness reporting; evidence package | (this commit) | |
+| Checkpoint 2 corrections R1 to R3: evidence states, integrity sweep, lifetimes and holds, confirmed repair, `result_run_date`, freshness reporting; evidence package | `ce7a283` | #85 |
 
 Each row has a section in `docs/decisions.md` saying what was decided and why.
 
@@ -72,7 +72,7 @@ Each row has a section in `docs/decisions.md` saying what was decided and why.
 
 **Next action**, in this order unless the user says otherwise:
 
-0. **Confirm CI** for the corrections commit with `actions_list` (and the `test-report` and `e2e-logs` artifacts), fill its history row, the CI line of "Checkpoint 2 corrections R1 to R3" in `docs/design/checkpoints.md`, and push that docs-only change.
+0. ~~Confirm CI for the corrections commit.~~ Run #85 on `ce7a283`, green, with the `test-report` and `e2e-logs` artifacts kept.
 1. **Wait for the user's independent verification and sign-off of checkpoint 2** (each of R1 to R3 Verified or Reopened; F01 to F10). Record their verdict in `docs/decisions.md` before starting step 3. If something is reopened, fix it in the same controlled way (failing test first, spec, code, docs, full suite, e2e).
 2. **Step 3, HOP_LEDGER and `dq_reconciliation`**, on the user's word. Start by stating the plan: files, tests, spec sections. It is bound by:
    - **the D6 conditions:**
