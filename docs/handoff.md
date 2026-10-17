@@ -57,9 +57,9 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
 | ADR-06 to ADR-08 approved; Phase 1 design frozen | `c3b90ec` | #74 |
 | Phase 1 build step 1: the contract schema and its validation (`grain`, `contracts`, protected queues, hop exclusions through the contract, `dre validate`'s hop report); checkpoint 1 in `docs/design/checkpoints.md` | `f9d86d4` | #76 |
 | Checkpoint 1 ratified with conditions (D6 conditions bind steps 3 and 6); inferred hop kinds labelled | `5e7830f` | #78 |
-| Phase 1 build step 2: commit rows and committed-only views (ADR-07), failure-injection tests; checkpoint 2 | `d8db1ad` | #79 (running at handoff) |
-| Implementation guide `docs/design/implementation.md` (steps 1 and 2) | `029bdda` | #80 (running at handoff) |
-| Handoff for compaction | (this commit) | |
+| Phase 1 build step 2: commit rows and committed-only views (ADR-07), failure-injection tests; checkpoint 2 | `d8db1ad` | #79 |
+| Implementation guide `docs/design/implementation.md` (steps 1 and 2) | `029bdda` | #80 (running when #79 was recorded) |
+| Handoff for compaction | `fcaa98f` | #81 (running when #79 was recorded) |
 
 Each row has a section in `docs/decisions.md` saying what was decided and why.
 

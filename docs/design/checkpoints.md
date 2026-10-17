@@ -120,7 +120,7 @@ provider_roster_raw->provider_directory: dedup (inferred from key_map)
 
 ## Checkpoint 2: commit rows and committed-only views (2026-10-17)
 
-**Status:** built; awaiting the user's review. **CI:** see the handoff's history table (row "Phase 1 build step 2").
+**Status:** built; awaiting the user's review. **CI:** run #79 on `d8db1ad`, green (`test`, `e2e`, `package`).
 
 **Acceptance condition** (checkpoint 1 ratification): failure-injection and recovery tests proving that no incomplete evaluation becomes visible as a committed result. The proving tests are in `tests/test_commit_protocol.py`:
 
@@ -192,5 +192,5 @@ Recorded in `docs/decisions.md`, "Phase 1 build step 2", item 4.
 ### Gate to step 3 (HOP_LEDGER and `dq_reconciliation`)
 
 1. The user ratifies E1 to E6, or asks for changes.
-2. CI is green on the step 2 commit.
+2. ~~CI is green on the step 2 commit.~~ Run #79, green.
 3. Step 3 is bound by the D6 conditions from checkpoint 1: contract-proven claims only under a declared contract, no aggregation reconciliation from an inferred aggregate, and unsupported mappings and blind spots on each result's scope.
