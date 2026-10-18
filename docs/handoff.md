@@ -67,7 +67,7 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
 | Checkpoint 2 corrections R1 to R3: evidence states, integrity sweep, lifetimes and holds, confirmed repair, `result_run_date`, freshness reporting; evidence package | `ce7a283` | #85 |
 | Checkpoint 2 corrections CI line | `7fe029d` | #86 |
 | Checkpoint 2 signed off for controlled development; step 3 authorised | `3d3f3c2` | #87 |
-| Phase 1 build step 3: HOP_LEDGER, `dq_reconciliation`, `rejects` on contracts, the scope line; checkpoint 3 | see checkpoint 3 | see checkpoint 3 |
+| Phase 1 build step 3: HOP_LEDGER, `dq_reconciliation`, `rejects` on contracts, the scope line; checkpoint 3 | `1f30227` | #88 |
 
 Each row has a section in `docs/decisions.md` saying what was decided and why.
 
@@ -75,7 +75,7 @@ Each row has a section in `docs/decisions.md` saying what was decided and why.
 
 **Next action**, in this order unless the user says otherwise:
 
-0. Confirm CI for the step 3 commit (the CI line in checkpoint 3).
+0. ~~Confirm CI for the step 3 commit.~~ Run #88 on `1f30227`, green, with the `test-report` and `e2e-logs` artifacts kept.
 1. **Wait for the user's review of checkpoint 3** (`docs/design/checkpoints.md`, "Checkpoint 3"): ratify or change deviations L1 to L15 (`docs/decisions.md`, "Phase 1 build step 3"). Record the verdict in `docs/decisions.md` before starting step 4. A change asked for is built the controlled way (failing test first, spec, code, docs, full suite, e2e).
 2. **Step 4, evaluation modes and AS_OF_REPLAY**, on the user's word. Start by stating the plan.
 3. **Later steps** (`docs/design/target-architecture.md`, section 7):

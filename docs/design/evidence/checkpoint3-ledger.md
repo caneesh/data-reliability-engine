@@ -4,7 +4,7 @@ For the reviewer of checkpoint 3. It shows the step 3 requirements of the author
 
 ## (a) Source changes
 
-The step 3 commit on branch `claude/claude-md-documentation-a2lxt0` (its SHA and CI run are in `docs/design/checkpoints.md`, "Checkpoint 3"). The change set is its diff against `3d3f3c2`.
+Commit `1f30227` on branch `claude/claude-md-documentation-a2lxt0`, CI run #88 (green: `test`, `e2e`, `package`; artifacts `test-report` and `e2e-logs`). The change set is `git diff 3d3f3c2 1f30227`.
 
 | Area | Files |
 | --- | --- |

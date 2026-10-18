@@ -313,7 +313,7 @@ Precedence (the acceptance list): `test_normal_rerun_and_replay_precedence` (a R
 
 ## Checkpoint 3: HOP_LEDGER and dq_reconciliation (2026-10-18)
 
-**Status:** built; **awaits the user's review.** Step 4 is blocked until then. **CI:** pending (the CI line is added once the run finishes). **Decisions:** `docs/decisions.md`, "Phase 1 build step 3". **Implementation:** `docs/design/implementation.md`, "Step 3". **Evidence package:** `docs/design/evidence/checkpoint3-ledger.md` (committed-view and integrity-view output from the end-to-end store).
+**Status:** built; **awaits the user's review.** Step 4 is blocked until then. **CI:** run #88 on `1f30227`, green (`test`, `e2e`, `package`), with the `test-report` (JUnit XML) and `e2e-logs` artifacts kept with the run. **Decisions:** `docs/decisions.md`, "Phase 1 build step 3". **Implementation:** `docs/design/implementation.md`, "Step 3". **Evidence package:** `docs/design/evidence/checkpoint3-ledger.md` (committed-view and integrity-view output from the end-to-end store).
 
 ### Planned and delivered
 
@@ -389,5 +389,5 @@ L1 to L15, each with its reason, in `docs/decisions.md`, "Phase 1 build step 3".
 
 ### Gate to step 4
 
-1. CI green on the step 3 commit, with the test report kept.
+1. ~~CI green on the step 3 commit, with the test report kept.~~ Run #88, green, both artifacts kept.
 2. The user reviews checkpoint 3 and ratifies or changes L1 to L15.
