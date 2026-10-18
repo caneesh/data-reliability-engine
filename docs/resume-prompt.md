@@ -15,7 +15,7 @@ Before doing anything else, read these files in order:
 5. `docs/architecture.md`: the guarantees, the limits, and what is deliberately open.
 6. `docs/design/outside-in-evidence.md` (release 4, in progress) and `docs/design/target-architecture.md` with `docs/design/reconciliation-model.md` (the Phase 1 design, approved and frozen; it supersedes the release 5 plan), `docs/design/checkpoints.md` (each build step's review) and `docs/design/implementation.md` (how each built step is implemented): the current plans.
 
-Then tell me in a few lines where things stand and what you think is next, and wait for my instruction. The work is a controlled implementation of the frozen Phase 1 design: one build step at a time, each ending at a checkpoint I review before the next starts. Checkpoint 2 was reviewed twice; the corrections R1 to R3 are built and wait for my independent verification and sign-off (`docs/design/checkpoints.md`, "Checkpoint 2 corrections R1 to R3", and `docs/design/evidence/checkpoint2-corrections.md`).
+Then tell me in a few lines where things stand and what you think is next, and wait for my instruction. The work is a controlled implementation of the frozen Phase 1 design: one build step at a time, each ending at a checkpoint I review before the next starts. Checkpoint 2 was signed off on 2026-10-18 for controlled development (not production certification). Step 3 (HOP_LEDGER and `dq_reconciliation`) is built and checkpoint 3 waits for my review (`docs/design/checkpoints.md`, "Checkpoint 3"; deviations L1 to L15 in `docs/decisions.md`, "Phase 1 build step 3"). Step 4 is blocked until I review it.
 
 The rules from earlier work that still apply:
 

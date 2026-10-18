@@ -41,13 +41,16 @@ REASONS: dict[str, str] = {
     "query_failed": "PLATFORM",
     "evidence_incomplete": "PLATFORM",  # the result was stored but its key events were not: evaluated again
     "evidence_invalid": "PLATFORM",  # its baseline's evidence was found compromised after publication (R1)
+    "ledger_unbalanced": "PLATFORM",  # HOP_LEDGER: the dispositions do not add up to the due population (an engine defect)
     "table_missing": "CONFIGURATION",
     "column_missing": "CONFIGURATION",
     "incompatible_type": "CONFIGURATION",
     "invalid_config": "CONFIGURATION",
+    "unsupported_mapping": "CONFIGURATION",  # HOP_LEDGER: the hop's mapping kind is not judged (ADR-02)
     "budget_exceeded": "BUDGET",
     "upstream_check_failed": "DEPENDENCY",
     "premise_unconfirmed": "DEPENDENCY",
+    "insufficient_evidence": "DEPENDENCY",  # HOP_LEDGER: evidence the contract requires cannot be read
     "insufficient_history": "BASELINE",
 }
 
@@ -84,6 +87,9 @@ class CheckResult:
     # T1_PARTITION_DRIFT: the partitions' states to append to dq_partition_state (store/partitions.py),
     # written by the runner with the run id after the result, like key events.
     partition_state: tuple[Any, ...] = field(default=(), compare=False, repr=False)
+    # HOP_LEDGER: the ledger's lines to append to dq_reconciliation (store/reconciliation.py), written by
+    # the runner with the run and evaluation ids before the result, like key events.
+    reconciliation: tuple[dict[str, Any], ...] = field(default=(), compare=False, repr=False)
 
 
 def release_checkpoint(frame: Any) -> None:

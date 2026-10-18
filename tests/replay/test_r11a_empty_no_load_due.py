@@ -40,10 +40,11 @@ def test_r11a_no_load_due_everything_did_not_run(spark, tmp_path) -> None:
     # ... so the scenario forces it, as an operator would with --feed.
     assert main(["run", "--conf", str(replay.conf), "--feed", "example_realtime"]) == 0
     rows = [row for (ds, _), group in latest(spark, replay).items() if ds in REALTIME_DATASETS for row in group]
-    # gold: 7 Tier 1 (T1_FRESHNESS is configured in the sample) + HOP_KEY_CURRENCY + HOP_VALUE_AGREEMENT + 4 rules = 13;
-    # curated 6; the table-wide
+    # gold: 7 Tier 1 (T1_FRESHNESS is configured in the sample) + HOP_KEY_CURRENCY + HOP_VALUE_AGREEMENT + HOP_LEDGER
+    # + 4 rules = 14; curated 6; the table-wide
     # dataset's rule from the first run (rules run on their own schedule) 1. --feed runs no table-wide checks.
-    assert len(rows) == 20
+    assert len(rows) == 21
+    assert "HOP_LEDGER" in {r.check_id for r in rows}
     for row in rows:
         assert row.state == "DID_NOT_RUN", row
         expected = "insufficient_history" if row.check_id == "T1_SCHEMA_DRIFT" else "empty_population"

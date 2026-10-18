@@ -15,6 +15,7 @@ checks:
   - HOP_FILE_COMPLETENESS
   - HOP_KEY_CURRENCY
   - HOP_VALUE_AGREEMENT
+  - HOP_LEDGER        # build step 3: one result per hop of kind identity, dedup, merge or union_partition
 
 # Cause checks per failure type, in order (spec section 7); see file_cyclic.yaml.
 causes:

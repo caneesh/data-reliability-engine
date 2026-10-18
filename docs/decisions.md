@@ -505,6 +505,44 @@ The traceability matrix comes before code (exit criterion 6).
    - **Backpressure:** at 80% of the budget the next run defers the full sweep.
    - **Load test:** on a representative cluster, which needs the platform team.
 
+## Phase 1 build step 3: HOP_LEDGER and dq_reconciliation (2026-10-18)
+
+Built under the step 3 authorisation below. Waits for the user's review at checkpoint 3 (`docs/design/checkpoints.md`); step 4 stays blocked until then. Spec: section 6 ("HOP\_LEDGER"), section 5 (`dq_reconciliation`, `dq_commit.reconciliation_rows`, `v_committed_reconciliation`), section 3 (`rejects`), section 4 (reason codes), section 8 (the scope line).
+
+What was built:
+
+1. **HOP\_LEDGER** (`checks/hop/ledger.py`, `checks/sql/hop_ledger.sql.j2`), in the three feed patterns after HOP\_VALUE\_AGREEMENT. One result per hop. The SQL assesses every record once (one row per due record, pending, untimed and orphan key), materialised as a local checkpoint in a session view the runner drops; a summary query counts it per disposition and label. Only counts leave the session.
+2. **The eleven dispositions** in the model's precedence, with classes and evidence levels; overlaps among the explaining rules are diagnostics. **The identity is asserted** (no record unassigned, the buckets add up to the due records, each key in one bucket); otherwise DID\_NOT\_RUN / ledger\_unbalanced.
+3. **The outcome rules:** unassessable, breaches, defect rejects and orphans fail; tolerance only on `missing`, `stale`, `divergent`; volume guards (`max_share`) on each exclusion and each authorised reject reason; unsupported kinds DID\_NOT\_RUN / unsupported\_mapping, an inferred aggregate included (D6 condition 3).
+4. **Key collisions** (distinct raw keys sharing a normalised key, on either side) are unassessable.
+5. **Rejects:** a new optional contract field `rejects: {table, condition, reason_column, time_column}`, reported evidence. A declared table that is gone is DID\_NOT\_RUN / insufficient\_evidence. `dre validate`: an error on a kind not compared through `key_map`, a warning for a `reject_policy` without `rejects`.
+6. **Scope** on every result (JSON in `detail`) and every `dq_reconciliation` row: edge, kind, declared or inferred, contract hash, claim (`contract-proven` only under a declared contract; D6 conditions 1 and 2), population rule, window, cutoff, full sweep, grain, evidence levels, the claim ceiling, blind spots, unverified columns, orphans checked or not. The digest prints it in one line.
+7. **`dq_reconciliation`** (84 months), evidence of its result under ADR-07: written before the result, declared in `dq_commit.reconciliation_rows`, counted before the commit, visible only through `v_committed_reconciliation` (committed, not INVALID), checked by `v_commit_integrity` and the integrity sweep, kept by retention while a commit promises it.
+
+**Deviations from the model, for ratification at checkpoint 3** (the model is frozen, so each needs the user's word):
+
+- **L1. Due population: the deadline falls in the window.** The model's candidates are records loaded in W, and due those whose deadline is at or before C. With hourly windows and an 8-hour SLA, nothing loaded in W is ever due, and in the window where a record's deadline falls it is no longer a candidate, so read literally the population is always empty. Built: a key is due in the window where its version's deadline falls (at or before the window end on the full sweep), exactly as HOP\_KEY\_CURRENCY judges keys, so each record is judged once. Pending: the keys loaded in the judged range whose deadline is after the cutoff.
+- **L2. The cutoff is the window end.** A version loaded after it belongs to a later window, so a RERUN of a window judges the versions that window had (as far as the tables still hold them; spec section 4, "best effort").
+- **L3. Reject lineage.** The model wants the source key, the version or batch, the reason, the rule id and the rule version. The rejects table's layout is not confirmed (`docs/evidence-contract.md`), so a reject accounts for the version under judgement when its key matches (the upstream's key columns by name) and it was rejected at or after that version's load time and before the cutoff; the latest reject names the reason. No rule id or version is read. Rejects are reported evidence, so a PASS resting on one has the ceiling `reported`.
+- **L4. `identity` is judged like `dedup`:** the latest version per key. One-to-one is not asserted here (T1\_KEY\_DUPLICATES checks uniqueness).
+- **L5. `ledger_unbalanced` is filed under PLATFORM**, so it holds the window and the next run evaluates it again; there is no engine-defect category.
+- **L6. Orphans only where the rows here can be attributed to the hop:** the dataset has a `load_time` and one upstream, and a `union_partition` target has its `feed_filter` (decision D5). Otherwise the scope says "orphans not checked" and why.
+- **L7. Overlaps only among the explaining rules** (unassessable to rejected). `delivered` to `missing` describe what D shows when no rule explains the record, so "excluded and missing" is not an overlap.
+- **L8. Untimed records.** A normal run counts as untimed the candidate keys whose version has no load time (a key whose rows all lack one cannot be placed in any window). The full sweep puts every such key, and every keyless row with no load time, in the ledger as unassessable ("no load time"), so the model's "judged by the full sweep" fails them rather than passing them.
+- **L9. A soft-deleted record absent from D is `missing`,** not `deleted_not_applied` (the model's rule is "still shows the record as live").
+- **L10. Evidence level of `deleted` is `reconstructed`** (the model says observed + reconstructed): a combination takes its weaker level.
+- **L11. A declared contract with a `hop_exclusions` entry is not contract-proven** (the legacy exclusion is unapproved), and a declared `union_partition` is contract-proven while its attribution is unproven until step 5 (the scope lists it as a blind spot).
+- **L12. Transforms:** values are compared on `owned_columns` only (identity transforms); `{from, to}` transforms are not built, so `unverified_columns` is always empty and the blind spots say "other columns are not compared".
+- **L13. No cause investigation for HOP\_LEDGER:** no failure type in the packaged patterns. Its missing, stale and divergent records are the keys HOP\_KEY\_CURRENCY and HOP\_VALUE\_AGREEMENT flag and explain.
+- **L14. The release 1 hop checks keep running** beside the ledger; nothing they report changed.
+- **L15. `insufficient_evidence` is filed under DEPENDENCY**, which does not hold the window (like a missing table, which is CONFIGURATION).
+
+**A fix found while building.** `runner.pending_investigations` listed every FAILED result without causes, also for checks that have no failure type and are never investigated; only the retry loop skipped them. HOP\_LEDGER is the first such check that fails in the tests, and it would have stayed "pending" for good. It now lists only results of checks with a failure type (`tests/test_recovery.py::test_a_cause_investigation_that_cannot_be_stored_is_tracked_and_retried` asserts HOP\_LEDGER's FAILED result is not pending).
+
+**Tests restated, none weakened:** four result counts went up by one, the new check (R09, R11a, R11b, `test_runner.py::test_run_writes_results_and_windows_follow_on`), each now also asserting HOP\_LEDGER is among them, and the same test's list of hop checks reporting the configuration problem again; `test_runner.py::test_a_failed_key_event_write_makes_the_run_partial_and_the_result_is_still_explained` fails every evidence write, so HOP\_LEDGER's ledger write fails too and it publishes its own `evidence_incomplete` marker: two evaluations short instead of one, both asserted.
+
+Not built in step 3 (later steps or not in scope): `superseded` (survivorship, step 5), T1\_SOURCE\_ATTRIBUTION (step 5), evaluation modes and AS\_OF (step 4), the chain (step 6), aggregate reconciliation under a declared contract.
+
 ## Checkpoint 2 signed off for controlled development; step 3 authorised (2026-10-18)
 
 The user, after the corrections R1 to R3 (CI run #85 on `ce7a283`): **"This is authorization to proceed with controlled development, not production certification. The Step 3 implementation must still satisfy the previously approved reconciliation-contract, ledger, and evidence-scope requirements."**

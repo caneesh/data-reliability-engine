@@ -122,6 +122,11 @@ CASES = [
      f"{HOP}.exclusions[0].effective", "- { id: drop_test_members", "is not after effective.from", "set `to` after"),
     ("authorised-reject-needs-guard", GOLD, MAPPING, MAPPING + "    reject_policy: { INVALID_CODE: { disposition: authorised } }\n",
      f"{HOP}.reject_policy.INVALID_CODE", "reject_policy:", "needs max_share", "set max_share"),
+    ("rejects-need-a-key", GOLD, MAPPING, "    mapping: join_contribution\n    reference: { sub_id: subscriberidnumber }\n"
+     "    rejects: { table: example_db.enrollment_rejects }\n", f"{HOP}.rejects", "rejects:", "matched by key",
+     "remove rejects"),
+    ("rejects-need-a-table", GOLD, MAPPING, MAPPING + "    rejects: { condition: \"stage = 'x'\" }\n",
+     f"{HOP}.rejects.table", "rejects:", "missing", "add `table`"),
     ("bad-history", GOLD, "  history: mutable", "  history: sometimes", "grain.history", "history: sometimes",
      "not allowed", "append_only"),
     ("queue-is-protected", DEFAULTS, "hmac_secret_file: null", "hmac_secret_file: null\nyarn_queue: shared_q\n"
@@ -192,3 +197,24 @@ def test_a_derived_dataset_cannot_carry_contracts(conf: Path) -> None:
     _, errors, _ = validate_conf(conf)
     error = _find(errors, conf / "datasets/monthly_counts.yaml", "key_map")
     assert "cannot be a downstream" in error.problem and "contracts" in error.problem
+
+
+def test_a_reject_policy_without_rejects_evidence_is_a_warning(conf: Path) -> None:
+    """Build step 3: the policy classes reasons of rejects the ledger reads from the declared `rejects`
+    table; without one no record can be rejected, which validate says."""
+    policy = "    reject_policy: { PARSE_ERROR: { disposition: defect } }\n"
+    edit(conf, GOLD, MAPPING, MAPPING + policy)
+    config, errors, warnings = validate_conf(conf)
+    assert errors == []
+    warning = _find(warnings, conf / GOLD, f"{HOP}.reject_policy")
+    assert "counts as missing" in warning.problem and "set rejects" in warning.fix
+    [hop] = [h for h in hops(config) if h.dataset == "gold_member_coverage"]
+    assert "no rejects evidence: a record the pipeline rejected counts as missing (the reject policy cannot be " \
+        "applied)" in blind_spots(config, hop)
+    edit(conf, GOLD, policy, policy + "    rejects: { table: example_db.enrollment_rejects, condition: \"stage = 'x'\" }\n")
+    config, errors, warnings = validate_conf(conf)
+    assert errors == [] and not [w for w in warnings if w.field == f"{HOP}.reject_policy"]
+    [hop] = [h for h in hops(config) if h.dataset == "gold_member_coverage"]
+    assert hop.contract.rejects.table == "example_db.enrollment_rejects"
+    assert hop.contract.rejects.time_column.column == "rejected_at"
+    assert not any("no rejects evidence" in s for s in blind_spots(config, hop))

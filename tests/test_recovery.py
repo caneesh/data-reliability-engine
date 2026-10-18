@@ -78,6 +78,9 @@ def test_a_cause_investigation_that_cannot_be_stored_is_tracked_and_retried(spar
     pending = {r["check_id"] for r in runner.pending_investigations(
         spark, runner.load_config(str(replay.conf), "test"), run.run_date, set())}
     assert "T1_ZERO_ROWS" in pending
+    # HOP_LEDGER failed too (gold is missing the keys), but it has no failure type: nothing to retry
+    [ledger] = latest(spark, replay)[("gold_member_coverage", "HOP_LEDGER")]
+    assert ledger.state == "FAILED" and "HOP_LEDGER" not in pending
 
     monkeypatch.undo()
     assert main(["run", "--conf", str(replay.conf)]) == 0  # nothing new is due; the retry runs

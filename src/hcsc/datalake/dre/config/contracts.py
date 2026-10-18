@@ -31,7 +31,9 @@ LATER = {"join_contribution": 5, "survivorship": 5}
 UNSUPPORTED = ("fan_out",)
 # Kinds compared through key_map; join_contribution resolves a reference and fan_out cannot be keyed.
 KEYED = ("identity", "dedup", "merge", "union_partition", "survivorship", "aggregate")
-LEDGER_STEP = 3  # HOP_LEDGER: dispositions, volume guards, reject policy, tolerance
+# HOP_LEDGER judges these kinds (build step 3); the others are DID_NOT_RUN / unsupported_mapping
+# there, an inferred aggregate included (D6 condition 3).
+LEDGER_KINDS = ("identity", "dedup", "merge", "union_partition")
 
 
 @dataclass(frozen=True)
@@ -100,20 +102,18 @@ def blind_spots(config: Config, hop: Hop) -> list[str]:
         spots.append("attribution (each row here owned by exactly one source) is not proven until build step 5")
     if c.mapping == "aggregate":
         spots.append("contribution unavailable: judged at group level only")
+        spots.append("HOP_LEDGER does not reconcile aggregate hops yet: unsupported_mapping (group-level hop "
+                     "checks still run)")
     if c.mapping not in ("aggregate", *UNSUPPORTED):
         if c.deletion is None:
             spots.append("deletions not modelled: a deleted record is judged like any other version")
-        else:
-            spots.append(f"deletions declared ({c.deletion.applied_as}); counted as deleted from build step "
-                         f"{LEDGER_STEP}")
     if hop.legacy_exclusion is not None:
         spots.append("exclusion from hop_exclusions: no id, version, approval or volume guard (ADR-04)")
-    elif c.exclusions:
-        spots.append(f"exclusion volume guards (max_share) enforced from build step {LEDGER_STEP}")
-    if c.reject_policy:
-        spots.append(f"reject policy applied from build step {LEDGER_STEP}; until then a rejected record is missing")
-    if c.tolerance.model_dump() != {"missing": 0, "stale": 0, "divergent": 0}:
-        spots.append(f"tolerance applied from build step {LEDGER_STEP}; until then any deficit fails")
+    if c.mapping in LEDGER_KINDS and c.rejects is None:
+        spots.append("no rejects evidence: a record the pipeline rejected counts as missing"
+                     + (" (the reject policy cannot be applied)" if c.reject_policy else ""))
+    if c.mapping in LEDGER_KINDS:
+        spots.append("values compared: owned_columns only (identity transforms); other columns are not compared")
     for ds_id in (hop.upstream, hop.dataset):
         ds = config.datasets.get(ds_id)
         if ds is None:

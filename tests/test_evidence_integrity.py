@@ -196,7 +196,7 @@ def test_f01_a_cancelled_evidence_write_that_lands_late_stays_invisible(spark, t
         time.sleep(3)
         append_rows(spark_, db, "dq_key_event", key_event_rows(run_, rows_[0]["evaluation_id"], 1, "FLAGGED"),
                     commit=False)
-        return {rows_[0]["evaluation_id"]: (1, 0)}
+        return {rows_[0]["evaluation_id"]: (1, 0, 0)}
 
     monkeypatch.setattr(runner, "write_key_events", slow_write)
     stored, complete, commits = write_evaluation(spark, replay.dq, evaluation, rows, run, budget_minutes=0.01)

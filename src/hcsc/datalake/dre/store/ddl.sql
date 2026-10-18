@@ -68,7 +68,19 @@ CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_commit (
   run_id STRING, evaluation_id STRING, dataset STRING, check_id STRING,
   kind STRING, result_run_id STRING, result_run_date DATE,
   result_rows INT, key_event_rows BIGINT, partition_state_rows INT, cause_rows INT,
-  evidence_kept_until DATE, committed_at TIMESTAMP
+  reconciliation_rows INT, evidence_kept_until DATE, committed_at TIMESTAMP
+) PARTITIONED BY (run_date DATE) STORED AS ORC;
+
+-- Phase 1 build step 3: HOP_LEDGER's accounting, one row per line of an evaluation's ledger: the
+-- due, pending and untimed populations, each disposition (with its label: the exclusion rule@version
+-- or the reject reason), orphans, overlap diagnostics and volume guards. class: population, unknown,
+-- authorised, breach, defect, ok, deficit, diagnostic, guard. evidence_level: observed,
+-- reconstructed, reported, inferred, unavailable (ADR-06). scope: the result's scope (ADR-01), the
+-- same JSON on every row of the evaluation. Evidence of its result: written before it, committed with it.
+CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_reconciliation (
+  run_id STRING, evaluation_id STRING, dataset STRING, check_id STRING, upstream STRING,
+  line STRING, label STRING, class STRING, records BIGINT, evidence_level STRING, scope STRING,
+  recorded_at TIMESTAMP
 ) PARTITIONED BY (run_date DATE) STORED AS ORC;
 
 -- Checkpoint 2 corrections (R1, R2): what DRE learned about its own store after publishing.
@@ -114,11 +126,11 @@ WITH c AS (
          MAX(result_run_id) AS result_run_id, MAX(result_run_date) AS result_run_date,
          MAX(result_rows) AS result_rows, MAX(key_event_rows) AS key_event_rows,
          MAX(partition_state_rows) AS partition_state_rows, MAX(cause_rows) AS cause_rows,
-         MIN(evidence_kept_until) AS evidence_kept_until,
+         MAX(reconciliation_rows) AS reconciliation_rows, MIN(evidence_kept_until) AS evidence_kept_until,
          COUNT(DISTINCT concat_ws('|', CAST(result_rows AS STRING), CAST(key_event_rows AS STRING),
                                   CAST(partition_state_rows AS STRING), CAST(cause_rows AS STRING),
-                                  result_run_id, CAST(result_run_date AS STRING),
-                                  CAST(evidence_kept_until AS STRING))) AS versions
+                                  CAST(reconciliation_rows AS STRING), result_run_id,
+                                  CAST(result_run_date AS STRING), CAST(evidence_kept_until AS STRING))) AS versions
   FROM {{ dq_database }}.dq_commit
   GROUP BY run_id, evaluation_id, kind, run_date
 ),
@@ -147,7 +159,7 @@ sweeps AS (
 )
 SELECT c.run_id, c.evaluation_id, c.kind, c.run_date, c.dataset, c.check_id, c.result_run_id,
        c.result_run_date, c.result_rows, c.key_event_rows, c.partition_state_rows, c.cause_rows,
-       c.evidence_kept_until, c.versions,
+       c.reconciliation_rows, c.evidence_kept_until, c.versions,
        CASE WHEN c.versions > 1 OR l.evaluation_id IS NOT NULL THEN 'INVALID'
             WHEN c.evidence_kept_until < current_date() THEN 'EXPIRED'
             WHEN (s.d_status = 'FAILED' AND c.run_date BETWEEN s.d_from AND s.d_to
@@ -188,6 +200,14 @@ LEFT SEMI JOIN {{ dq_database }}.v_commit_state c
   ON c.kind = 'result' AND c.run_id = s.run_id AND c.dataset = s.dataset AND c.run_date = s.run_date
   AND c.check_id = 'T1_PARTITION_DRIFT' AND c.partition_state_rows > 0 AND c.evidence_state <> 'INVALID';
 
+-- HOP_LEDGER's accounting rows of committed evaluations whose commit vouches for them and is not INVALID.
+CREATE OR REPLACE VIEW {{ dq_database }}.v_committed_reconciliation AS
+SELECT x.*
+FROM {{ dq_database }}.dq_reconciliation x
+LEFT SEMI JOIN {{ dq_database }}.v_commit_state c
+  ON c.kind = 'result' AND c.run_id = x.run_id AND c.evaluation_id = x.evaluation_id AND c.run_date = x.run_date
+  AND c.reconciliation_rows > 0 AND c.evidence_state <> 'INVALID';
+
 -- A cause row counts only with a cause commit of its own run, evaluation id and run_date that is
 -- not INVALID, and only while the result that commit names (result_run_id, result_run_date,
 -- evaluation_id) has a result commit: explicit identity, no timestamps. A cause left by a run that
@@ -215,6 +235,7 @@ SELECT c.run_id, c.evaluation_id, c.dataset, c.check_id, c.kind, c.run_date,
        c.key_event_rows, coalesce(e.n, 0) AS stored_key_event_rows,
        c.partition_state_rows, coalesce(s.n, 0) AS stored_partition_state_rows,
        c.cause_rows, coalesce(x.n, 0) AS stored_cause_rows,
+       c.reconciliation_rows, coalesce(g.n, 0) AS stored_reconciliation_rows,
        c.evidence_kept_until, c.evidence_state
 FROM {{ dq_database }}.v_commit_state c
 LEFT JOIN (SELECT run_id, evaluation_id, run_date, COUNT(*) AS n FROM {{ dq_database }}.dq_check_result
@@ -230,9 +251,13 @@ LEFT JOIN (SELECT run_id, dataset, run_date, COUNT(*) AS n FROM {{ dq_database }
 LEFT JOIN (SELECT run_id, evaluation_id, run_date, COUNT(*) AS n FROM {{ dq_database }}.dq_cause_result
            GROUP BY run_id, evaluation_id, run_date) x
   ON c.kind = 'cause' AND x.run_id = c.run_id AND x.evaluation_id = c.evaluation_id AND x.run_date = c.run_date
+LEFT JOIN (SELECT run_id, evaluation_id, run_date, COUNT(*) AS n FROM {{ dq_database }}.dq_reconciliation
+           GROUP BY run_id, evaluation_id, run_date) g
+  ON c.kind = 'result' AND g.run_id = c.run_id AND g.evaluation_id = c.evaluation_id AND g.run_date = c.run_date
 WHERE (c.kind = 'result' AND (coalesce(r.n, 0) <> c.result_rows
                               OR (c.key_event_rows > 0 AND coalesce(e.n, 0) <> c.key_event_rows)
-                              OR (c.partition_state_rows > 0 AND coalesce(s.n, 0) <> c.partition_state_rows)))
+                              OR (c.partition_state_rows > 0 AND coalesce(s.n, 0) <> c.partition_state_rows)
+                              OR (c.reconciliation_rows > 0 AND coalesce(g.n, 0) <> c.reconciliation_rows)))
    OR (c.kind = 'cause' AND coalesce(x.n, 0) <> c.cause_rows);
 
 -- Every row of the latest evaluation per (dataset, check_id): one row for an

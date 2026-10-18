@@ -22,7 +22,7 @@ from pydantic_core import PydanticCustomError
 from hcsc.datalake.dre.store.names import DQ_TABLES, validate_dq_database
 
 # Tables whose rows are visible only through a commit row (ADR-07): dq_commit must outlive them.
-GATED_BY_COMMIT = ("dq_check_result", "dq_cause_result", "dq_key_event", "dq_partition_state")
+GATED_BY_COMMIT = ("dq_check_result", "dq_cause_result", "dq_key_event", "dq_partition_state", "dq_reconciliation")
 
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _HHMM = re.compile(r"([01]\d|2[0-3]):[0-5]\d")
@@ -565,10 +565,27 @@ class Tolerance(Model):
         return data
 
 
+class RejectsSource(Model):
+    """Where the pipeline's rejects evidence for a hop is (ADR-04; the rejects table of
+    docs/evidence-contract.md): reported evidence. Its key columns carry the upstream's names and
+    raw values (the hop's key_map columns, normalised as the upstream normalises them);
+    `reason_column` holds the reason code and `time_column` when the record was rejected (UTC
+    unless its `timezone` says otherwise). `condition` (SQL over the table) narrows it to the stage
+    that feeds this hop. A reject accounts for the version under judgement when its key matches
+    and it was rejected at or after that version's upstream load time, and before the window end."""
+
+    table: TableName
+    condition: SqlFragment | None = None
+    reason_column: Identifier = "reason_code"
+    time_column: TimeColumn = Field(default_factory=lambda: TimeColumn(column="rejected_at", timezone="UTC"))
+
+
 class EdgeContract(Model):
     """The reconciliation contract of one hop (this dataset, one upstream): reconciliation model
     sections 3 to 6. `reference` (join_contribution): this dataset's column -> the contributor's key
-    column. `precedence` (survivorship): the upstreams in order, the winner first."""
+    column. `precedence` (survivorship): the upstreams in order, the winner first. `rejects`: where
+    the rejects evidence the reject policy applies to is read (without it, a rejected record counts
+    as missing)."""
 
     mapping: MappingKind
     exclusions: list[Exclusion] = []
@@ -577,6 +594,7 @@ class EdgeContract(Model):
     tolerance: Tolerance = Tolerance()
     reference: dict[Identifier, Identifier] = {}
     precedence: list[Identifier] = []
+    rejects: RejectsSource | None = None
 
 
 class Dataset(SettingsOverride):

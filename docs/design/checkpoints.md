@@ -310,3 +310,84 @@ Precedence (the acceptance list): `test_normal_rerun_and_replay_precedence` (a R
 2. ~~CI green on the corrections commit, with the test report kept.~~ Run #85, green, both artifacts kept.
 3. The user signs off checkpoint 2.
 
+
+## Checkpoint 3: HOP_LEDGER and dq_reconciliation (2026-10-18)
+
+**Status:** built; **awaits the user's review.** Step 4 is blocked until then. **CI:** pending (the CI line is added once the run finishes). **Decisions:** `docs/decisions.md`, "Phase 1 build step 3". **Implementation:** `docs/design/implementation.md`, "Step 3". **Evidence package:** `docs/design/evidence/checkpoint3-ledger.md` (committed-view and integrity-view output from the end-to-end store).
+
+### Planned and delivered
+
+| Planned (the authorisation of 2026-10-18) | Delivered |
+| --- | --- |
+| The ledger: populations, the eleven dispositions in precedence, the asserted identity | HOP\_LEDGER, one result per hop; due, pending and untimed populations; eleven dispositions (`superseded` never assigned before step 5); identity asserted, `ledger_unbalanced` otherwise |
+| Tolerance on `missing`, `stale`, `divergent` only; volume guards; the reject policy; orphans; key collisions | All built; rejects need a declared `rejects` source (new contract field); orphans where the rows can be attributed (L6) |
+| The reconciliation contract and the D6 conditions | Claims `contract-proven` only under a declared contract; an inferred aggregate is never reconciled; unsupported kinds are DID\_NOT\_RUN / unsupported\_mapping with their scope |
+| The evidence scope: scope on every result, evidence levels, claim ceiling, blind spots | Scope JSON in `detail` and on every `dq_reconciliation` row; one line in the digest |
+| The commit protocol and evidence states of checkpoint 2 | `dq_reconciliation` is evidence: written before the result, declared in `dq_commit.reconciliation_rows`, counted before the commit, gated by `v_committed_reconciliation` (not INVALID), in `v_commit_integrity` and the sweep, kept by retention while promised |
+
+### Requirements and their proof
+
+| Requirement | Code | Proving tests (`tests/checks/test_hop_ledger.py` unless named) |
+| --- | --- | --- |
+| Every due record in exactly one disposition; the identity asserted | `hop_ledger.sql.j2` (`placed`), `ledger.counted` | `test_every_due_record_delivered_passes_and_the_ledger_balances`, `test_an_unbalanced_ledger_is_did_not_run_never_a_verdict`, `test_counted_finds_a_record_in_no_bucket_or_in_two`; `tests/store/test_reconciliation.py::test_a_run_publishes_each_hop_ledger_with_its_result` |
+| Due, pending, untimed; the version as of the cutoff | `up_cut`, `due_keys` | `test_the_latest_upstream_version_is_judged_and_a_later_one_waits`, `test_a_key_with_no_load_time_is_untimed_then_unassessable_on_the_full_sweep`, `test_the_full_sweep_judges_every_key_past_its_deadline`, `test_nothing_due_is_did_not_run_and_still_records_its_lines` |
+| Deficits fail; tolerance on named deficits only | `ledger.judge` | `test_missing_stale_and_divergent_records_fail`, `test_a_tolerance_lets_named_deficits_pass_up_to_its_count`; validation: `config/test_contracts.py::...[tolerance-on-unknown]` |
+| Unassessable: no record time, no key, key collisions | `judged.unknown_reason` | `test_a_key_collision_after_normalisation_is_unassessable`, `test_no_record_time_and_no_key_are_unassessable` |
+| Exclusions by rule and version, effective dates, breaches, volume guards, overlaps | `exclusion_terms`, `judge` | `test_an_approved_exclusion_accounts_for_an_absent_record`, `test_an_excluded_record_present_downstream_is_a_breach`, `test_an_exclusion_over_its_max_share_fails_its_volume_guard`, `test_overlapping_rules_are_recorded_as_diagnostics` |
+| Rejects under the policy (default defect), guards, missing evidence | `rejects`, `judge`, `ledger_params` | `test_a_reject_accounts_for_a_record_only_under_an_authorising_policy`, `test_without_rejects_evidence_a_rejected_record_is_missing_and_said_so`, `test_a_declared_rejects_table_that_is_gone_is_insufficient_evidence`; `config/test_contracts.py::test_a_reject_policy_without_rejects_evidence_is_a_warning`, `::...[rejects-need-a-key]`, `::...[rejects-need-a-table]` |
+| Deletions, soft and hard | `ledger` CTE | `test_a_soft_deletion_applied_is_deleted_and_one_not_applied_is_a_breach`, `test_deletions_pass_when_applied_soft_or_hard` |
+| Orphans, and where they cannot be checked | orphan lines, `orphans_unchecked` | `test_a_row_here_no_upstream_row_maps_to_is_an_orphan`, `test_orphans_are_not_checked_where_rows_here_cannot_be_attributed` |
+| Unsupported kinds visible; no reconciliation from an inferred aggregate (D6 condition 3) | `unsupported` | `test_kinds_the_ledger_does_not_judge_are_unsupported[aggregate, join_contribution, survivorship, fan_out]`, `test_an_inferred_aggregate_is_never_reconciled` |
+| The claim: contract-proven only under a declared contract (D6 conditions 1 and 2); the contract hash; the scope's fields | `scope_of`, `contract_hash` | `test_only_a_declared_contract_claims_contract_proven_completeness` |
+| Evidence levels and the claim ceiling | `LEVEL`, `ceiling` | `test_an_approved_exclusion_accounts_for_an_absent_record` (reconstructed), `test_a_reject_accounts_for_a_record_only_under_an_authorising_policy` (reported), `test_every_due_record_delivered_passes_and_the_ledger_balances` (observed) |
+| Three states; an exception is DID\_NOT\_RUN | `per_hop`, `run_check` | `test_a_missing_upstream_or_configuration_is_did_not_run`, `test_a_failure_inside_the_hop_is_did_not_run_with_a_reason` |
+| No key value outside the store | counts only in lines and scope | `test_no_key_value_leaves_the_check`; `notify/test_digest.py::test_the_digest_never_carries_a_key_value` |
+| Ledger lines are commit-gated evidence | `store/reconciliation.py`, `store/ddl.sql`, `store/commits.py` | `tests/store/test_reconciliation.py::test_ledger_lines_are_visible_only_under_a_commit_that_vouches_for_them`, `::test_a_unit_whose_ledger_lines_differ_from_its_commit_is_withheld`, `::test_lost_ledger_lines_are_listed_by_the_integrity_view_and_hidden_once_invalid` |
+| The scope in the digest | `notify/digest.scope_line` | `notify/test_digest.py::test_a_reconciliation_result_prints_its_scope_in_one_line`, the golden file |
+| End to end | `tests/e2e/verify.py` | Both feeds' HOP\_LEDGER PASSED, lines committed and balanced |
+
+### Conformance by ADR
+
+- **ADR-01 (scoped claims).** Each result stores its scope; tolerance only on named deficits; the identity asserted.
+- **ADR-02 (mapping kinds).** `identity`, `dedup`, `merge` and `union_partition` judged; the others unsupported, visibly. Collisions detected at run time. Transforms are identity only (L12).
+- **ADR-03 (multi-source).** A union target is read through its `feed_filter` (D5); attribution itself is proven in step 5. `superseded` waits for step 5.
+- **ADR-04 (exclusions, rejects, deletions).** Exclusions by rule and version within their dates and guards; rejects by policy, default defect, guarded; soft and hard deletions. Reject lineage by key and time (L3).
+- **ADR-05 (time).** The version as of the cutoff; evaluation modes are step 4.
+- **ADR-06 (evidence levels).** A level per disposition, the claim ceiling on the result.
+- **ADR-07 (commits).** `dq_reconciliation` follows the protocol and the evidence states of checkpoint 2 unchanged.
+- **ADR-08 (isolation).** Nothing new runs outside the check's compute budget; the ledger reads only what the hop checks read, plus the declared rejects table.
+
+### Deviations to ratify
+
+L1 to L15, each with its reason, in `docs/decisions.md`, "Phase 1 build step 3". In short: the due population by deadline in the window (L1), the cutoff at the window end (L2), reject lineage by key and time (L3), `identity` judged like `dedup` (L4), `ledger_unbalanced` under PLATFORM (L5), orphans only where attributable (L6), overlaps among explaining rules only (L7), untimed records and the full sweep (L8), a soft-deleted record absent is missing (L9), `deleted` at reconstructed (L10), the claim with a legacy exclusion or an unproven union (L11), identity transforms only (L12), no cause investigation for HOP\_LEDGER (L13), the release 1 hop checks unchanged (L14), `insufficient_evidence` under DEPENDENCY (L15).
+
+### Invariants re-verified
+
+- **Hard constraints.** Writes only through `store/writer.py`, append only, to the dq store; no pipeline change; nothing source-specific (the engine branches on the contract's kind, never on a dataset); guard tests pass.
+- **Three result states.** No new state; three new DID\_NOT\_RUN reasons (`ledger_unbalanced` PLATFORM, `unsupported_mapping` CONFIGURATION, `insufficient_evidence` DEPENDENCY). An empty population is DID\_NOT\_RUN.
+- **No member data outside the store.** Keys stay in a session view dropped with the evaluation; lines, scope, `observed` and the digest carry counts, codes and labels.
+- **Earlier decisions.** D1 to D6, E1 to E6 and the checkpoint 2 corrections unchanged. Tests restated, none weakened: the registry's list of built-in checks and the digest golden file gained HOP\_LEDGER; four result counts gained it (R09, R11a, R11b, `test_runner.py`), each asserting it is there; the failed-evidence-write test now expects two markers (HOP\_KEY\_CURRENCY and HOP\_LEDGER both carry evidence); `tests/e2e/verify.py` now requires HOP\_LEDGER.
+- **A pre-existing gap closed.** `runner.pending_investigations` listed FAILED results of checks that are never investigated (no failure type); it now lists only checks with one (`docs/decisions.md`, "Phase 1 build step 3").
+
+### What changed for existing configuration
+
+- Nothing is required. HOP\_LEDGER runs on every dataset with `key_map` or `contracts` in a feed pattern. An inferred hop is judged and scoped "inferred contract"; a hop of an unsupported kind reports DID\_NOT\_RUN / unsupported\_mapping on every run until its contract changes.
+- Optional: `contracts.<upstream>.rejects`, once the rejects table's layout is confirmed (`docs/evidence-contract.md`). A `reject_policy` without it is now a warning.
+- `dre install --apply` creates `dq_reconciliation` and replaces the views. It does not add `dq_commit.reconciliation_rows` to a `dq_commit` created before step 3 (`CREATE TABLE IF NOT EXISTS` leaves an existing table as it is); `dre install --check` reports that table as different. No store is deployed yet, so nothing is affected today; a deployed store will need a migration step (as for the checkpoint 2 columns).
+
+### Blind spots that remain
+
+- Reject rule id and version not read (L3); `{from, to}` transforms not compared (L12); attribution and `superseded` (step 5); evaluation modes and AS\_OF (step 4); the chain (step 6); aggregate reconciliation under a declared contract.
+- Proof scenarios are proven at check level; the replay tests R14 to R23 are still to add.
+
+### Risks
+
+1. **Cost.** The ledger reads every upstream row of each candidate key, as HOP\_KEY\_CURRENCY does, plus this dataset's rows for the due keys and, for orphans, this dataset's rows loaded in the window and the upstream's keys. On the full sweep it reads both tables whole. Not load-tested (ADR-08).
+2. **Two judgements of one hop.** HOP\_KEY\_CURRENCY and HOP\_LEDGER can disagree in wording (for example a soft void not applied is STALE for one and `deleted_not_applied` for the other); both fail, and the ledger's label is the more specific.
+3. **Rejects matched by key and time** attribute a reject of an earlier version to the version under judgement when it was recorded after that version loaded. Until the rejects table carries the version or batch (L3), this cannot be told apart; a reject is reported evidence, so a PASS resting on one has the ceiling `reported`.
+4. **Schema migration.** An existing store keeps its old `dq_commit` (see "What changed"); `dre install --check` finds it, but nothing migrates it yet.
+
+### Gate to step 4
+
+1. CI green on the step 3 commit, with the test report kept.
+2. The user reviews checkpoint 3 and ratifies or changes L1 to L15.

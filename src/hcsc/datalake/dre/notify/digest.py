@@ -65,6 +65,7 @@ class Item:
     causes: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     samples: list[str] = field(default_factory=list)
+    scope: str | None = None             # what a reconciliation result's claim covers, in one line
 
     @property
     def label(self) -> str:
@@ -205,6 +206,25 @@ def owner_of(config: Config, row: dict[str, Any]) -> str | None:
 INCOMPLETE = "cause: investigation incomplete (the next run retries it)"
 
 
+def scope_line(detail: str | None) -> str | None:
+    """A reconciliation result's scope (HOP_LEDGER's `detail`, ADR-01) in one line: the edge, its
+    kind and contract, the claim, the evidence level, the cutoff and how many blind spots. None for a
+    result whose detail is not a scope."""
+    try:
+        scope = json.loads(detail) if detail else None
+    except ValueError:
+        return None
+    if not isinstance(scope, dict) or "claim" not in scope or "edge" not in scope:
+        return None
+    spots = len(scope.get("blind_spots") or [])
+    parts = [f"{scope['edge']} {scope.get('mapping')} ({scope.get('contract')})", f"claim {scope['claim']}"]
+    if scope.get("evidence_level"):
+        parts.append(f"evidence {scope['evidence_level']}")
+    parts += [f"cutoff {scope.get('cutoff')}" + (" (full sweep)" if scope.get("full_sweep") else ""),
+              f"{spots} blind spot{'s' if spots != 1 else ''} (dre validate lists them)"]
+    return "scope: " + "; ".join(parts)
+
+
 def _cause_lines(config: Config, row: dict[str, Any], causes: list[dict[str, Any]]) -> list[str]:
     """One cause line per distinct resolved cause of the evaluation, with how many failures it covers."""
     from collections import Counter
@@ -282,7 +302,7 @@ def build_digests(config: Config, run: Run, data: dict[str, Any]) -> list[Digest
             reason=f"{row['reason_category']}/{row['reason_code']}" if row["state"] == "DID_NOT_RUN" else None,
             observed=row.get("observed"), expected=row.get("expected"),
             violations=row.get("violations"), prev_violations=prev["violations"] if prev else None,
-            rule=is_rule,
+            rule=is_rule, scope=scope_line(row.get("detail")),
         )
         if is_rule and rule.status == "proposed":
             digest.report_only.append(item)

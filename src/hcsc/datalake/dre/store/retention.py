@@ -78,6 +78,7 @@ _VOUCHED = {
     "dq_key_event": "kind = 'result' AND key_event_rows > 0",
     "dq_partition_state": "kind = 'result' AND partition_state_rows > 0",
     "dq_cause_result": "kind = 'cause'",
+    "dq_reconciliation": "kind = 'result' AND reconciliation_rows > 0",
     "dq_commit": "TRUE",
 }
 

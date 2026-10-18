@@ -41,6 +41,7 @@ from hcsc.datalake.dre.checks.events import (
 )
 from hcsc.datalake.dre.checks.hop.common import hop_label
 from hcsc.datalake.dre.checks.hop.key_currency import judged_view
+from hcsc.datalake.dre.checks.hop.ledger import ledger_view
 from hcsc.datalake.dre.checks.patterns import checks_for
 from hcsc.datalake.dre.checks.rules.rule_check import RuleCheck
 from hcsc.datalake.dre.checks.rules.schedule import due_moment, is_due, last_completed
@@ -420,7 +421,8 @@ def incomplete_rows(evaluation: Evaluation, rows: list[dict[str, Any]], now: dat
     carried key events: v_latest_result ranks a (dataset, check) by evaluated_at, so a marker for
     some groups only would hide the evaluation's other groups until the next run. An evaluation
     that carried no key events at all had nothing to lose: no marker."""
-    if all(result.key_events is None and not result.partition_state for result in evaluation.results):
+    if all(result.key_events is None and not result.partition_state and not result.reconciliation
+           for result in evaluation.results):
         return []
     marked = []
     for row in rows:
@@ -433,14 +435,16 @@ def incomplete_rows(evaluation: Evaluation, rows: list[dict[str, Any]], now: dat
 
 
 def write_key_events(spark: SparkSession, db: str, evaluation: Evaluation, rows: list[dict[str, Any]],
-                     run: runs.Run) -> dict[str, tuple[int, int]]:
-    """Append each result's evidence rows with the run id: key events (hop checks) and partition
-    states (T1_PARTITION_DRIFT). Returns evaluation id -> (key events, partition states) written."""
+                     run: runs.Run) -> dict[str, tuple[int, int, int]]:
+    """Append each result's evidence rows with the run id: key events (hop checks), partition
+    states (T1_PARTITION_DRIFT) and ledger lines (HOP_LEDGER). Returns evaluation id -> (key events,
+    partition states, ledger lines) written."""
     from hcsc.datalake.dre.store.partitions import record_state
+    from hcsc.datalake.dre.store.reconciliation import append_ledger
 
-    counts: dict[str, tuple[int, int]] = {}
+    counts: dict[str, tuple[int, int, int]] = {}
     for result, row in zip(evaluation.results, rows):
-        events = states = 0
+        events = states = ledger = 0
         if result.key_events is not None:
             hop = hop_label(result.group_values.get("upstream") or "", row["dataset"])
             events = append_key_events(result.key_events, db, run.run_id, row["evaluation_id"], row["dataset"],
@@ -448,17 +452,24 @@ def write_key_events(spark: SparkSession, db: str, evaluation: Evaluation, rows:
         if result.partition_state:
             states = record_state(spark, db, row["dataset"], evaluation.planned.dataset.table or "",
                                   list(result.partition_state), run.run_id, row["evaluated_at"], run.run_date)
-        counts[row["evaluation_id"]] = (events, states)
+        if result.reconciliation:
+            ledger = append_ledger(spark, db, list(result.reconciliation), run.run_id, row["evaluation_id"],
+                                   row["dataset"], row["check_id"], row["evaluated_at"], run.run_date)
+        counts[row["evaluation_id"]] = (events, states, ledger)
     return counts
 
 
 def commits_for(rows: list[dict[str, Any]], run: runs.Run,
-                evidence: dict[str, tuple[int, int]] | None = None) -> list[Commit]:
+                evidence: dict[str, tuple[int, int, int]] | None = None) -> list[Commit]:
     """One commit per stored result row (each row is its own evaluation id), vouching for the
     evidence counts written for it (none for a marker or a row without evidence)."""
     evidence = evidence or {}
-    return [Commit(run.run_id, r["evaluation_id"], r["dataset"], r["check_id"], 1,
-                   *evidence.get(r["evaluation_id"], (0, 0))) for r in rows]
+    commits = []
+    for r in rows:
+        events, states, ledger = evidence.get(r["evaluation_id"], (0, 0, 0))
+        commits.append(Commit(run.run_id, r["evaluation_id"], r["dataset"], r["check_id"], 1, events, states,
+                              reconciliation_rows=ledger))
+    return commits
 
 
 # Units (evaluations, investigations) whose commit rows are appended together, unless
@@ -700,7 +711,8 @@ def pending_investigations(spark: SparkSession, config: Config, since: date,
                            skip: set[str]) -> list[dict[str, Any]]:
     """FAILED NORMAL results since `since` that are still their check's (and group's) latest result
     and have no committed cause naming that result (its run and evaluation id): investigations a
-    run could not finish. The result and cause scans are bounded by run_date."""
+    run could not finish. A check with no failure type in its pattern (HOP_LEDGER, for one) is never
+    investigated, so its results are not pending. The result and cause scans are bounded by run_date."""
 
     db = config.defaults.dq_database
     day = f"DATE'{since.isoformat()}'"
@@ -712,7 +724,11 @@ def pending_investigations(spark: SparkSession, config: Config, since: date,
         f"  WHERE run_date >= {day}) c "
         f"  ON c.evaluation_id = r.evaluation_id AND c.result_run_id = r.run_id "
         f"WHERE r.rn = 1 AND r.state = 'FAILED'").collect()
-    return [r.asDict() for r in rows if r.evaluation_id not in skip]
+    investigated = {(p.dataset.dataset, p.check.check_id, p.feed.feed if p.feed else None)
+                    for p in plan(config, per_table=False)
+                    if failure_type(p.feed.pattern if p.feed else None, p.check.check_id) is not None}
+    return [r.asDict() for r in rows
+            if r.evaluation_id not in skip and (r.dataset, r.check_id, r.feed) in investigated]
 
 
 def retry_investigations(spark: SparkSession, config: Config, run: runs.Run, key_secret: bytes | None,
@@ -749,12 +765,14 @@ def retry_investigations(spark: SparkSession, config: Config, run: runs.Run, key
 
 
 def drop_judged_views(spark: SparkSession, evaluation: Evaluation) -> None:
-    """Release the hop judgements HOP_KEY_CURRENCY kept for the cause engine: the checkpointed
-    frames' blocks and the temp views. Every hop's view is dropped, named from the key_map, so a
-    hop cancelled by the budget after creating its view (its result carries no view) is released too."""
+    """Release the hop judgements HOP_KEY_CURRENCY kept for the cause engine, and HOP_LEDGER's
+    assessed records: the checkpointed frames' blocks and the temp views. Every hop's view is
+    dropped, named from the key_map, so a hop cancelled by the budget after creating its view (its
+    result carries no view) is released too."""
     views = {r.judged_view for r in evaluation.results if r.judged_view is not None}
-    if evaluation.planned.check.check_id == "HOP_KEY_CURRENCY":
-        views |= {judged_view(evaluation.planned.dataset.dataset, up_id) for up_id in evaluation.planned.dataset.key_map}
+    named = {"HOP_KEY_CURRENCY": judged_view, "HOP_LEDGER": ledger_view}.get(evaluation.planned.check.check_id)
+    if named is not None:
+        views |= {named(evaluation.planned.dataset.dataset, up_id) for up_id in evaluation.planned.dataset.key_map}
     for result in evaluation.results:
         for frame in result.checkpoints:
             release_checkpoint(frame)
@@ -1014,10 +1032,10 @@ def write_evaluation(spark: SparkSession, db: str, evaluation: Evaluation, rows:
             return [], 0, []
         return marker, 0, commits_for(marker, run_record)
 
-    carries = any(r.key_events is not None or r.partition_state for r in evaluation.results)
+    carries = any(r.key_events is not None or r.partition_state or r.reconciliation for r in evaluation.results)
     try:
         if not carries:  # nothing to store before the results
-            evidence: dict[str, tuple[int, int]] = {}
+            evidence: dict[str, tuple[int, int, int]] = {}
         elif budget_minutes is not None:
             evidence = within_budget(spark, budget_minutes,
                                      lambda: write_key_events(spark, db, evaluation, rows, run_record))

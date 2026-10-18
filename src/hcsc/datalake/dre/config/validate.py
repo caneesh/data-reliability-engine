@@ -408,6 +408,14 @@ def _check_contracts(r: _Reporter, ds_id: str) -> None:
                     r.err("dataset", ds_id, loc + ("exclusions", i, "effective"), f"versions {other.version} and "
                         f"{e.version} of exclusion {e.id!r} are effective at the same time",
                         "end the older version (effective.to) where the newer one starts")
+        if c.rejects is not None and c.mapping not in KEYED:
+            r.err("dataset", ds_id, loc + ("rejects",), f"rejects are matched by key, and mapping {c.mapping} is "
+                "not judged by key", "remove rejects")
+        elif c.reject_policy and c.rejects is None:
+            r.err("dataset", ds_id, loc + ("reject_policy",), "reject_policy is set but no rejects evidence is: "
+                "HOP_LEDGER cannot account for a rejected record, which counts as missing",
+                "set rejects: {table, condition} once the rejects table exists (docs/evidence-contract.md)",
+                level="warning")
 
 
 def _overlap(a: Any, b: Any) -> bool:

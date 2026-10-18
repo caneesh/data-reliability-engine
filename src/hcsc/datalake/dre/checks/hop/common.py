@@ -112,9 +112,20 @@ def hop_params(ctx: CheckContext, event: Event, up_id: str, up: Dataset | None) 
 
 def exclusion_condition(ds: Dataset, up_id: str, up: Dataset, default_timezone: str) -> str | None:
     """The SQL condition, over the upstream's rows, of what the hop's exclusions keep out; None
-    without exclusions. The release 1 `hop_exclusions` entry is used as written. Each contract
-    exclusion matches only rows whose upstream load time falls in its effective span (dates at
-    midnight in defaults.yaml `timezone`), and the conditions are joined with OR."""
+    without exclusions: each rule's term (exclusion_terms) joined with OR."""
+    terms = exclusion_terms(ds, up_id, up, default_timezone)
+    if not terms:
+        return None
+    if len(terms) == 1 and terms[0][0] == "hop_exclusions":
+        return terms[0][1]
+    return " OR ".join(f"({condition})" for _, condition in terms)
+
+
+def exclusion_terms(ds: Dataset, up_id: str, up: Dataset, default_timezone: str) -> list[tuple[str, str]]:
+    """Each exclusion of the hop as (label, SQL condition over the upstream's rows), in contract
+    order. The release 1 `hop_exclusions` entry is one term labelled hop_exclusions, used as written.
+    A contract exclusion (label id@version) matches only rows whose upstream load time falls in its
+    effective span (dates at midnight in defaults.yaml `timezone`)."""
     from datetime import datetime, time
     from zoneinfo import ZoneInfo
 
@@ -122,11 +133,9 @@ def exclusion_condition(ds: Dataset, up_id: str, up: Dataset, default_timezone: 
 
     hop = hop_contract({up_id: up}, ds, up_id)
     if hop.legacy_exclusion is not None:
-        return hop.legacy_exclusion
-    if not hop.exclusions:
-        return None
+        return [("hop_exclusions", hop.legacy_exclusion)]
     zone = ZoneInfo(default_timezone)
-    parts = []
+    found = []
     for e in hop.exclusions:
         terms = [f"({e.condition})"]
         bounds = ((e.effective.from_, ">="), (e.effective.to, "<"))
@@ -136,8 +145,8 @@ def exclusion_condition(ds: Dataset, up_id: str, up: Dataset, default_timezone: 
             if day is not None:
                 instant = datetime.combine(day, time.min, zone)
                 terms.append(f"{utc_expr(up.load_time, default_timezone)} {op} {utc_literal(instant)}")
-        parts.append("(" + " AND ".join(terms) + ")")
-    return " OR ".join(parts)
+        found.append((e.label, " AND ".join(terms)))
+    return found
 
 
 def exclusion_label(ds: Dataset, up_id: str, up: Dataset | None) -> str:

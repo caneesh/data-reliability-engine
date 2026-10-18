@@ -33,7 +33,8 @@ if TYPE_CHECKING:
 
 SCHEMA = ("run_id STRING, evaluation_id STRING, dataset STRING, check_id STRING, kind STRING, "
           "result_run_id STRING, result_run_date DATE, result_rows INT, key_event_rows BIGINT, "
-          "partition_state_rows INT, cause_rows INT, evidence_kept_until DATE, committed_at TIMESTAMP, run_date DATE")
+          "partition_state_rows INT, cause_rows INT, reconciliation_rows INT, evidence_kept_until DATE, "
+          "committed_at TIMESTAMP, run_date DATE")
 
 RESULT, CAUSE = "result", "cause"
 _RUN_ID = re.compile(r"^[0-9a-fA-F-]{1,64}$")  # a run id is a UUID (store/runs.py)
@@ -63,6 +64,7 @@ class Commit:
     cause_rows: int = 0
     result_run_date: date | None = None
     evidence_kept_until: date | None = None
+    reconciliation_rows: int = 0  # HOP_LEDGER's accounting rows (dq_reconciliation)
 
     @property
     def identity(self) -> tuple[str, str, str]:
@@ -74,16 +76,19 @@ class Commit:
         """What the commit says, as stored: two rows of one identity with different contents are a
         conflict (an integrity incident), identical ones a harmless duplicate."""
         return (self.result_rows, self.key_event_rows, self.partition_state_rows, self.cause_rows,
-                self.result_run_id or self.run_id, self.result_run_date or run_date, self.evidence_kept_until)
+                self.reconciliation_rows, self.result_run_id or self.run_id, self.result_run_date or run_date,
+                self.evidence_kept_until)
 
     def with_lifetime(self, run_date: date, retention_months: dict[str, int]) -> Commit:
         """The commit with evidence_kept_until: run_date plus the shortest retention among the tables
-        holding the rows it vouches for (results or causes, key events, partition states)."""
+        holding the rows it vouches for (results or causes, key events, partition states, ledger rows)."""
         tables = ["dq_cause_result" if self.kind == CAUSE else "dq_check_result"]
         if self.key_event_rows > 0:
             tables.append("dq_key_event")
         if self.partition_state_rows > 0:
             tables.append("dq_partition_state")
+        if self.reconciliation_rows > 0:
+            tables.append("dq_reconciliation")
         return replace(self, evidence_kept_until=add_months(run_date, min(retention_months[t] for t in tables)))
 
 
@@ -102,7 +107,7 @@ def append_commits(spark: SparkSession, dq_database: str, commits: list[Commit],
         return 0
     rows = [(c.run_id, c.evaluation_id, c.dataset, c.check_id, c.kind, c.result_run_id or c.run_id,
              c.result_run_date or run_date, c.result_rows, c.key_event_rows, c.partition_state_rows, c.cause_rows,
-             c.evidence_kept_until, as_utc(committed_at), run_date)
+             c.reconciliation_rows, c.evidence_kept_until, as_utc(committed_at), run_date)
             for c in commits]
     # One file: a batch is stored whole or not at all, never a subset of its rows.
     writer.append(spark.createDataFrame(rows, SCHEMA).coalesce(1), dq_database, "dq_commit")
@@ -116,20 +121,21 @@ def stored_commits(spark: SparkSession, dq_database: str, run_id: str,
     validate_dq_database(dq_database)
     rows = spark.sql(
         f"SELECT DISTINCT run_id, evaluation_id, kind, result_rows, key_event_rows, partition_state_rows, "
-        f"cause_rows, result_run_id, result_run_date, evidence_kept_until FROM {dq_database}.dq_commit "
+        f"cause_rows, reconciliation_rows, result_run_id, result_run_date, evidence_kept_until "
+        f"FROM {dq_database}.dq_commit "
         f"WHERE {_this_run(run_id, run_date)}").collect()
     found: dict[tuple[str, str, str], set[tuple]] = {}
     for r in rows:
         found.setdefault((r.run_id, r.evaluation_id, r.kind), set()).add(
-            (r.result_rows, r.key_event_rows, r.partition_state_rows, r.cause_rows, r.result_run_id,
-             r.result_run_date, r.evidence_kept_until))
+            (r.result_rows, r.key_event_rows, r.partition_state_rows, r.cause_rows, r.reconciliation_rows,
+             r.result_run_id, r.result_run_date, r.evidence_kept_until))
     return found
 
 
 def stored_counts(spark: SparkSession, dq_database: str, run_id: str, run_date: date,
                   commits: list[Commit]) -> dict[tuple[str, str], int]:
     """How many rows of each kind the run has stored, for what `commits` vouch for, in one query
-    over the run's own rows: ("result" | "key_event" | "cause", evaluation id) and
+    over the run's own rows: ("result" | "key_event" | "cause" | "reconciliation", evaluation id) and
     ("partition_state", dataset) -> count. A table no commit declares rows in is not read."""
     validate_dq_database(dq_database)
     run = _this_run(run_id, run_date)
@@ -143,6 +149,9 @@ def stored_counts(spark: SparkSession, dq_database: str, run_id: str, run_date: 
     if any(c.kind == RESULT and c.partition_state_rows > 0 for c in commits):
         parts.append(f"SELECT 'partition_state' AS what, dataset AS id, COUNT(*) AS n "
                      f"FROM {dq_database}.dq_partition_state WHERE {run} GROUP BY dataset")
+    if any(c.kind == RESULT and c.reconciliation_rows > 0 for c in commits):
+        parts.append(f"SELECT 'reconciliation' AS what, evaluation_id AS id, COUNT(*) AS n "
+                     f"FROM {dq_database}.dq_reconciliation WHERE {run} GROUP BY evaluation_id")
     if any(c.kind == CAUSE for c in commits):
         parts.append(f"SELECT 'cause' AS what, evaluation_id AS id, COUNT(*) AS n FROM {dq_database}.dq_cause_result "
                      f"WHERE {run} GROUP BY evaluation_id")
@@ -161,5 +170,7 @@ def mismatches(commit: Commit, counts: dict[tuple[str, str], int]) -> list[str]:
             checks.append(("key events", ("key_event", commit.evaluation_id), commit.key_event_rows))
         if commit.partition_state_rows > 0:
             checks.append(("partition states", ("partition_state", commit.dataset), commit.partition_state_rows))
+        if commit.reconciliation_rows > 0:
+            checks.append(("ledger rows", ("reconciliation", commit.evaluation_id), commit.reconciliation_rows))
     return [f"{what}: {counts.get(key, 0)} stored, {declared} declared"
             for what, key, declared in checks if counts.get(key, 0) != declared]

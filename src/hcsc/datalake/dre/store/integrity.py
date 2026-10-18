@@ -128,6 +128,8 @@ def _mismatch_detail(r: Any) -> str:
             pairs.append(("key events", r.key_event_rows, r.stored_key_event_rows))
         if r.partition_state_rows:
             pairs.append(("partition states", r.partition_state_rows, r.stored_partition_state_rows))
+        if r.reconciliation_rows:
+            pairs.append(("ledger rows", r.reconciliation_rows, r.stored_reconciliation_rows))
     return "; ".join(f"{what}: {declared} declared, {stored} stored" for what, declared, stored in pairs
                      if declared != stored)
 

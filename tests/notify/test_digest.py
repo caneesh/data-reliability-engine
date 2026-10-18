@@ -31,6 +31,10 @@ UPSTREAM = {"upstream": "example_curated_enrollment"}
 KEY_VALUE = "123401|01|2026-01-01|AGR-A"  # synthetic; must never reach a digest
 KEY_HASH = "a" * 64
 SLOTS = ["2026-01-16T06:30:00+00:00", "2026-01-16T10:00:00+00:00"]
+LEDGER_SCOPE = json.dumps({  # HOP_LEDGER's detail: the result's scope (build step 3), shortened
+    "edge": "example_curated_enrollment->gold_member_coverage", "mapping": "union_partition", "contract": "declared",
+    "claim": "contract-proven", "evidence_level": "observed", "cutoff": "2026-01-16T12:05:00+00:00",
+    "full_sweep": False, "blind_spots": ["deletions not modelled", "as-of replay unavailable"]})
 
 
 def result(run: str, dataset: str, check: str, state: str, groups: dict | None = None, *, feed="example_realtime",
@@ -98,6 +102,9 @@ def digests(spark, config):
                detail=json.dumps({"slots": SLOTS})),
         result(CURRENT, gold, "HOP_KEY_CURRENCY", "FAILED", UPSTREAM, violations=1,
                observed="0 missing and 1 stale of 1 keys", expected="every upstream key present at its latest version"),
+        result(CURRENT, gold, "HOP_LEDGER", "FAILED", UPSTREAM, violations=1,
+               observed="due 3 (pending 0): delivered 2, stale 1; orphans 0; fails: 1 stale",
+               expected="every due record in exactly one authorised disposition", detail=LEDGER_SCOPE),
         result(CURRENT, gold, "T1_VOLUME", "PASSED", {"slot": "00:30", "slot_time": "2026-01-16 00:30"}),
         result(CURRENT, gold, "WINDOW_GAP", "DID_NOT_RUN", reason=("DATA_UNAVAILABLE", "window_gap")),
         result(CURRENT, gold, "one_row_per_coverage", "FAILED", SRC_A, violations=3),
@@ -142,8 +149,9 @@ def test_digest_matches_the_golden_file(digests, owner: str) -> None:
 
 
 def test_subject_counts_new_failures_and_checks_that_did_not_run(digests) -> None:
-    # New failures: KEY_DUPLICATES, ON_TIME (ZERO_ROWS shown with it), HOP_KEY_CURRENCY, HOP_FILE_COMPLETENESS.
-    assert digests["membership-gold"].subject == "DRE dev: 4 new failures, 2 checks did not run"
+    # New failures: KEY_DUPLICATES, ON_TIME (ZERO_ROWS shown with it), HOP_KEY_CURRENCY, HOP_LEDGER,
+    # HOP_FILE_COMPLETENESS.
+    assert digests["membership-gold"].subject == "DRE dev: 5 new failures, 2 checks did not run"
     assert digests["provider-data"].subject == "DRE dev: all clear"
     assert digests["membership-gold"].recipients == ["dre-alerts@example.com"]
 
@@ -182,3 +190,16 @@ def test_key_samples_are_bounded_in_sql_and_read_only_when_wanted(spark, config)
     data = read_run(spark, DQ, run_id, at.date(), with_samples=True)
     assert data["samples"] == {"many-keys": [f"{n:064x}" for n in range(SAMPLE_KEYS)]}
     assert read_run(spark, DQ, run_id, at.date(), with_samples=False)["samples"] == {}
+
+
+def test_a_reconciliation_result_prints_its_scope_in_one_line(digests) -> None:
+    """Model section 1: the digest prints the scope beside the state, so a PASS is never read as more
+    than it claims. Results whose detail is not a scope get no line."""
+    from hcsc.datalake.dre.notify.digest import scope_line
+
+    [ledger] = [i for i in digests["membership-gold"].changed if i.check_id == "HOP_LEDGER"]
+    assert ledger.scope == ("scope: example_curated_enrollment->gold_member_coverage union_partition (declared); "
+                            "claim contract-proven; evidence observed; cutoff 2026-01-16T12:05:00+00:00; "
+                            "2 blind spots (dre validate lists them)")
+    assert ledger.scope in digests["membership-gold"].text()
+    assert scope_line(json.dumps({"slots": SLOTS})) is None and scope_line("not json") is None and scope_line(None) is None

@@ -271,3 +271,75 @@ A dead run's STARTED row blocks NORMAL runs for `watchdog_grace_minutes`, as bef
 - **Reporting status:** use `v_latest_result.healthy`; never treat PASSED alone as healthy.
 - **Reading results, events, partition states or causes:** use the committed views, never the tables. The guard tests do not enforce this yet; review does.
 - **Changing a view:** edit `store/ddl.sql`, then run `dre install --apply` on each store. `dre install --check` shows which views differ.
+
+## Step 3: HOP_LEDGER and dq_reconciliation
+
+Built 2026-10-18 under the step 3 authorisation. Reviewed at checkpoint 3. Rules: spec section 6 ("HOP\_LEDGER"); deviations L1 to L15 in `docs/decisions.md`.
+
+### What it adds
+
+One new check, HOP\_LEDGER, which accounts for every due upstream record of a hop in exactly one disposition, and one new evidence table, `dq_reconciliation`, which holds each ledger under its result's commit. Nothing existing changes behaviour: the release 1 hop checks keep running beside it.
+
+### The check (`checks/hop/ledger.py`)
+
+- `HopLedger.evaluate` runs `_hop` once per upstream in `key_map`, then once per contract-only upstream (a `join_contribution` or `fan_out` hop has no `key_map` entry). Each hop is wrapped in `per_hop`, so an exception is DID\_NOT\_RUN for that hop only.
+- `_hop`:
+  1. Resolves the hop's contract (`config/contracts.hop_contract`). A kind outside `contracts.LEDGER_KINDS` (`identity`, `dedup`, `merge`, `union_partition`), or a hop without a `key_map` entry, returns `unsupported` (DID\_NOT\_RUN / unsupported\_mapping, with its scope).
+  2. `ledger_params` checks the preconditions (upstream configured, `load_time`, `record_time` on both sides, tables present, the `rejects` table present: `insufficient_evidence` otherwise) and builds the template parameters from validated config only.
+  3. Runs `hop_ledger.sql.j2` in mode `assessed`, materialises it with `localCheckpoint`, and registers it as the session view `ledger_view(dataset, upstream)`. The view holds keys; it never leaves the session, and `runner.drop_judged_views` drops it (and releases the checkpoint) with the evaluation, also when the budget cancelled the hop.
+  4. Runs mode `summary` over the view and collects a few rows: per line, disposition and label, how many rows and distinct keys; and the overlap pairs.
+  5. `counted` turns them into the ledger and the identity check; `judge` applies the contract (classes, the reject policy, tolerance, volume guards, orphans); `ceiling` gives the claim ceiling; `scope_of` builds the scope; `ledger_lines` builds the `dq_reconciliation` rows.
+  6. Returns DID\_NOT\_RUN / ledger\_unbalanced or empty\_population (both still carrying their lines), or PASSED / FAILED with `population` = due records, `violations`, `observed` (the ledger line), `detail` (the scope JSON) and `reconciliation` (the lines).
+- `orphans_unchecked` decides whether orphans can be counted (L6).
+
+### The SQL (`checks/sql/hop_ledger.sql.j2`)
+
+| CTE | What it holds |
+| --- | --- |
+| `up_rows` | Every upstream row (after its `feed_filter`): normalised key, raw key, whether it has a key, record and load time in UTC, the tombstone flag, one flag per exclusion term (`checks/hop/common.exclusion_terms`, effective dates included), the owned columns as strings |
+| `up_cut` | Rows loaded before the window end (the cutoff), or with no load time |
+| `up_cand` | Keyed rows of keys with a row loaded in the judged range (every keyed row on the full sweep). This narrows the work, not the answer: each candidate key's every row is kept |
+| `up_ranked`, `up_top`, `up_keys` | Each key's version under judgement (rows tied at the latest record time), its load time, how many raw keys share the normalised key, its flags |
+| `due_keys` | Keys whose version's deadline falls in the judged range (L1); on the full sweep, at or before it, and keys with no load time (L8) |
+| `dn_rows` … `dn_keys` | This dataset's rows for the due keys: version, raw-key variants, untimed rows, the `soft_when` flag |
+| `up_sets`, `dn_sets` | The owned-column value sets at each side's version (as HOP\_VALUE\_AGREEMENT) |
+| `rejects`, `rejected` | Rejects before the cutoff, matched by key and rejected at or after the version's load time; the latest names the reason (L3) |
+| `judged` | One row per due key: present here, tombstone, unknown reason, exclusion label, reject reason, divergence, soft delete applied |
+| `ledger`, `placed` | `matched`: the explaining rules that hold, in precedence; `residual`: delivered, divergent, stale or missing; the disposition is the first match, else the residual |
+
+The output unions the due keys, keyless due rows, pending and untimed keys, and orphans (when checked). A due key in no bucket has a null disposition, which `counted` reports as unbalanced.
+
+### The table and the commit (`store/reconciliation.py`, `store/ddl.sql`, `store/commits.py`)
+
+- `append_ledger` writes the lines through `store/writer.py`. Counts, codes and labels only.
+- `runner.write_key_events` writes them with the other evidence, before the result, and returns (key events, partition states, ledger lines) per evaluation; `commits_for` declares the count in `Commit.reconciliation_rows`.
+- `commits.stored_counts` counts them and `commits.mismatches` compares ("ledger rows"), so a unit with a lost line is withheld whole.
+- `v_committed_reconciliation`: rows with a result commit of the same run, evaluation id and `run_date`, declaring `reconciliation_rows > 0`, not INVALID.
+- `v_commit_integrity` compares the declared and stored counts, so the integrity sweep finds lost or added lines and records them as EVIDENCE\_MISMATCH (`integrity._mismatch_detail`: "ledger rows"); the unit is then INVALID and its lines are hidden. The ledger builds on no earlier evidence, so it has no compromised-baseline rule.
+- `with_lifetime` and `retention._VOUCHED` keep the lines while a commit promises them (`retention_months.dq_reconciliation`, 84).
+
+### Configuration
+
+- `contracts.<upstream>.rejects` (`config/models.RejectsSource`): `table`, `condition`, `reason_column` (`reason_code`), `time_column` (`rejected_at`, UTC). Validated in `config/validate._check_contracts`.
+- `config/contracts.blind_spots`: the ledger's limits per hop (no rejects evidence, values compared on `owned_columns` only, aggregate not reconciled).
+- HOP\_LEDGER is listed in `patterns/file_cyclic.yaml`, `file_periodic.yaml` and `table_merge.yaml`. It has no failure type (L13).
+
+### Reporting
+
+`notify/digest.scope_line` prints a result's scope in one line, for any result whose `detail` is a scope (it has `edge` and `claim`), under "Changed since the last run" and "Did not run".
+
+### Tests
+
+| Test | Proves |
+| --- | --- |
+| `checks/test_hop_ledger.py` (31 tests) | Every disposition, PASS and FAIL; the identity (an unbalanced ledger is DID\_NOT\_RUN, never a verdict); empty population; collisions, missing record times and keyless rows unassessable; untimed keys, and unassessable on the full sweep; exclusions with effective dates, present excluded records, volume guards, overlaps; rejects authorised, defect, too old, over their guard; the missing rejects table; soft and hard deletions applied and not; orphans, and where they are not checked; every unsupported kind and the inferred aggregate; the claim (inferred, declared, legacy) and the contract hash; the full sweep; no key value in any output |
+| `store/test_reconciliation.py` | Lines visible only under a commit that declares them; a unit with a lost line withheld; lost lines in the integrity view, and the sweep recording changed lines as EVIDENCE\_MISMATCH ("ledger rows: 2 declared, 3 stored"), after which the unit's lines are hidden; through `dre run`, the ledger committed with its result and balanced against its population |
+| `config/test_contracts.py` (`rejects-need-a-key`, `rejects-need-a-table`, `test_a_reject_policy_without_rejects_evidence_is_a_warning`) | The `rejects` validation and blind spots |
+| `notify/test_digest.py::test_a_reconciliation_result_prints_its_scope_in_one_line` and the golden file | The scope line |
+| `store/test_ddl.py` | `dq_reconciliation` and `dq_commit.reconciliation_rows` match spec section 5 |
+
+### Changing this code
+
+- **A new disposition:** add it to `DISPOSITIONS` (in precedence, with class and level), to the `matched` array or the residual in the SQL, and to `judge` if it fails. The identity check needs nothing.
+- **A new kind for the ledger:** add it to `contracts.LEDGER_KINDS` only once the SQL reads it correctly; until then it stays unsupported, with a reason in `unsupported`.
+- **A new evidence source:** declare it on the contract, check it in `ledger_params` (`insufficient_evidence` when it is gone), and give its disposition the right evidence level.

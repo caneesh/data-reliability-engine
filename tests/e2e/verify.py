@@ -1,6 +1,7 @@
 """Check an end-to-end `dre run`: one COMPLETED run, results for every synthetic feed and the
 table-wide dataset, no PLATFORM failures (which would mean an engine error), and the second
-feeds' healthy hops (roster to directory; curated to gold) PASSED. Exit 1 if not."""
+feeds' healthy hops (roster to directory; curated to gold) PASSED, HOP_LEDGER included, with each
+ledger committed and balanced (its dispositions add up to its due population). Exit 1 if not."""
 
 from __future__ import annotations
 
@@ -28,8 +29,17 @@ def main() -> int:
         problems.append(f"PLATFORM failures: {platform}")
     for dataset in ("provider_directory", "gold_member_coverage"):
         hops = {r.check_id: r.state for r in results if r.dataset == dataset and r.check_id.startswith("HOP_")}
-        if hops != {"HOP_KEY_CURRENCY": "PASSED", "HOP_VALUE_AGREEMENT": "PASSED"}:
-            problems.append(f"{dataset} hops {hops}, expected both PASSED")
+        if hops != {"HOP_KEY_CURRENCY": "PASSED", "HOP_VALUE_AGREEMENT": "PASSED", "HOP_LEDGER": "PASSED"}:
+            problems.append(f"{dataset} hops {hops}, expected all three PASSED")
+    population = ("due", "pending", "untimed", "orphan", "overlap", "guard")
+    for ledger in [r for r in results if r.check_id == "HOP_LEDGER" and r.state == "PASSED"]:
+        lines = spark.table("dq.v_committed_reconciliation").filter(
+            f"evaluation_id = '{ledger.evaluation_id}'").collect()
+        due = sum(x.records for x in lines if x.line == "due")
+        buckets = sum(x.records or 0 for x in lines if x.line not in population)
+        if not lines or due != buckets or due != ledger.population:
+            problems.append(f"{ledger.dataset} HOP_LEDGER: {len(lines)} committed lines, due {due}, "
+                            f"in buckets {buckets}, population {ledger.population}")
     drift = [r for r in results if r.dataset == "provider_directory" and r.check_id == "T1_PARTITION_DRIFT"]
     if [(r.state, r.reason_code) for r in drift] != [("DID_NOT_RUN", "insufficient_history")]:
         problems.append(f"provider_directory T1_PARTITION_DRIFT {[(r.state, r.reason_code) for r in drift]}, "

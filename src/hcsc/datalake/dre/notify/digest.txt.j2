@@ -6,6 +6,9 @@ Run {{ d.run_id }}, started {{ d.run_started.strftime("%Y-%m-%d %H:%M") }} UTC, 
 Changed since the last run
 {% for i in d.changed %}
 - {{ i.label }}: {{ i.prev_state or "first result" }} -> {{ i.state }}
+{% if i.scope %}
+    {{ i.scope }}
+{% endif %}
 {% if i.state == "FAILED" %}
     observed: {{ i.observed }}; expected: {{ i.expected }}
 {% if i.rule %}
@@ -32,6 +35,9 @@ Changed since the last run
 Did not run
 {% for i in d.did_not_run %}
 - {{ i.label }}: {{ i.reason }}
+{% if i.scope %}
+    {{ i.scope }}
+{% endif %}
 {% endfor %}
 {% if not d.did_not_run %}
 - none

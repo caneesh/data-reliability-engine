@@ -51,8 +51,9 @@ def test_run_writes_results_and_windows_follow_on(spark, tmp_path, capsys) -> No
 
     # Every check on a dataset in one run shares the same event (the window is fixed before any write).
     gold_run1 = [r for r in spark.table(f"{replay.dq}.dq_check_result").collect() if r.dataset == "gold_member_coverage"]
-    # 13 checks (7 Tier 1 with T1_FRESHNESS, 2 hop, 4 rules); schema drift for this table runs under the table-wide dataset.
-    assert len(gold_run1) == 12
+    # 14 checks (7 Tier 1 with T1_FRESHNESS, 3 hop, 4 rules); schema drift for this table runs under the table-wide dataset.
+    assert len(gold_run1) == 13
+    assert "HOP_LEDGER" in {r.check_id for r in gold_run1}
     assert {(r.event_id, r.window_start, r.window_end) for r in gold_run1} == {
         (first.event_id, first.window_start, first.window_end)}
 
@@ -67,7 +68,8 @@ def test_run_writes_results_and_windows_follow_on(spark, tmp_path, capsys) -> No
     # The CONFIGURATION problem is reported again on every run.
     hops = [(r.check_id, r.reason_code) for r in spark.table(f"{replay.dq}.dq_check_result").collect()
             if r.run_id != run1.run_id and r.dataset == "gold_member_coverage" and r.check_id.startswith("HOP_")]
-    assert sorted(hops) == [("HOP_KEY_CURRENCY", "invalid_config"), ("HOP_VALUE_AGREEMENT", "invalid_config")]
+    assert sorted(hops) == [("HOP_KEY_CURRENCY", "invalid_config"), ("HOP_LEDGER", "invalid_config"),
+                            ("HOP_VALUE_AGREEMENT", "invalid_config")]
 
 
 def test_replay_runs_do_not_move_the_window(spark, tmp_path) -> None:
@@ -357,10 +359,13 @@ def test_a_failed_key_event_write_makes_the_run_partial_and_the_result_is_still_
     monkeypatch.setattr(runner, "explain_failures", spy)
     assert main(["run", "--conf", str(replay.conf)]) == 2
     [final] = [r for r in spark.table(f"{replay.dq}.dq_run").collect() if r.status != "STARTED"]
-    hop_rows = [r for r in spark.table(f"{replay.dq}.dq_check_result").collect()
-                if (r.dataset, r.check_id) == ("gold_member_coverage", "HOP_KEY_CURRENCY")]
-    assert [(r.state, r.reason_code) for r in hop_rows] == [("DID_NOT_RUN", "evidence_incomplete")]  # no FAILED row
-    assert final.status == "PARTIAL" and final.checks_written == final.checks_expected - 1  # only the hop is short
+    # The mock fails every evidence write: HOP_KEY_CURRENCY's key events and HOP_LEDGER's ledger lines (step 3).
+    # Each of those evaluations publishes a marker instead of its result, and only they are short.
+    for check in ("HOP_KEY_CURRENCY", "HOP_LEDGER"):
+        hop_rows = [r for r in spark.table(f"{replay.dq}.dq_check_result").collect()
+                    if (r.dataset, r.check_id) == ("gold_member_coverage", check)]
+        assert [(r.state, r.reason_code) for r in hop_rows] == [("DID_NOT_RUN", "evidence_incomplete")], check
+    assert final.status == "PARTIAL" and final.checks_written == final.checks_expected - 2
     published = spark.table(f"{replay.dq}.v_committed_result").count()
     assert published == spark.table(f"{replay.dq}.dq_check_result").count()  # everything stored is published
     others = [n for check, n in explained if check != "HOP_KEY_CURRENCY"]

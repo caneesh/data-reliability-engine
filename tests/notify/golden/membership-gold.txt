@@ -1,4 +1,4 @@
-DRE dev: 4 new failures, 2 checks did not run
+DRE dev: 5 new failures, 2 checks did not run
 Run 00000000-0000-0000-0000-000000000003, started 2026-01-16 12:05 UTC, for membership-gold.
 
 Changed since the last run
@@ -10,6 +10,9 @@ Changed since the last run
     observed: 0 missing and 1 stale of 1 keys; expected: every upstream key present at its latest version
     cause: NOT_RUN (confirmed)
     sample keys (key_hash): aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+- gold_member_coverage HOP_LEDGER [upstream=example_curated_enrollment]: first result -> FAILED
+    scope: example_curated_enrollment->gold_member_coverage union_partition (declared); claim contract-proven; evidence observed; cutoff 2026-01-16T12:05:00+00:00; 2 blind spots (dre validate lists them)
+    observed: due 3 (pending 0): delivered 2, stale 1; orphans 0; fails: 1 stale; expected: every due record in exactly one authorised disposition
 - gold_member_coverage T1_KEY_DUPLICATES [src_sys_nm=SRC_A]: PASSED -> FAILED
     observed: 1 of 3 keys have more than one row; expected: every key at most once
 - gold_member_coverage T1_ON_TIME: PASSED -> FAILED
