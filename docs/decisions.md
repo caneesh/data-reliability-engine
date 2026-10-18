@@ -505,6 +505,18 @@ The traceability matrix comes before code (exit criterion 6).
    - **Backpressure:** at 80% of the budget the next run defers the full sweep.
    - **Load test:** on a representative cluster, which needs the platform team.
 
+## Checkpoint 2 signed off for controlled development; step 3 authorised (2026-10-18)
+
+The user, after the corrections R1 to R3 (CI run #85 on `ce7a283`): **"This is authorization to proceed with controlled development, not production certification. The Step 3 implementation must still satisfy the previously approved reconciliation-contract, ledger, and evidence-scope requirements."**
+
+1. **Checkpoint 2 is closed for development.** It is not a production certification, and nothing in this repository may cite it as one.
+2. **Step 3 (HOP_LEDGER and `dq_reconciliation`) is authorised**, bound by:
+   - the reconciliation contract (ADR-02, ADR-03, ADR-04; model sections 4 to 6) and the D6 conditions of checkpoint 1;
+   - the ledger (ADR-01; model sections 2 and 3): the populations, the eleven dispositions in precedence, the asserted identity (`ledger_unbalanced` otherwise), tolerance on `missing`, `stale` and `divergent` only, the volume guards, orphans, key collisions;
+   - the evidence scope (ADR-01, ADR-06): the scope stored with every result, evidence levels on every disposition, the claim ceiling, blind spots and unsupported mappings visible;
+   - the commit protocol and evidence states of checkpoint 2.
+3. Step 3 ends at checkpoint 3, which the user reviews before step 4.
+
 ## Checkpoint 2 corrections R1 to R3: evidence states, integrity sweep, confirmed repair, cause dates (2026-10-17)
 
 The user's second checkpoint 2 review ("DRE Checkpoint 2 Correction Lifecycle", 2026-10-17) registered three corrections (CP2-R1 publication and integrity race, high; CP2-R2 repair without final readback, medium; CP2-R3 cross-date cause linkage, medium) and a failure-injection matrix F01 to F10. My assessment (given before building): R1's race cannot occur inside DRE (one writer, append only, run-scoped rows, a unit verified after its last write), except for one late-thread path; evidence lost after a commit is real (retention, changes outside DRE); R2 agreed; R3's identity was already unambiguous but should be explicit. The user then ratified **"Approved for implementation, subject to acceptance testing"**:
