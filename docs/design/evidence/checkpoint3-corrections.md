@@ -4,7 +4,7 @@ For the reviewer of the revised checkpoint 3. It answers the review's handoff re
 
 ## (a) Source changes
 
-The corrections commit on branch `claude/claude-md-documentation-a2lxt0` (its SHA and CI run are in `docs/design/checkpoints.md`, "Checkpoint 3, revised"). The change set is its diff against `a5e8190`.
+Commit `6387989` on branch `claude/claude-md-documentation-a2lxt0`, CI run #90 (green: `test`, `e2e`, `package`; artifacts `test-report` and `e2e-logs`). The change set is `git diff a5e8190 6387989`.
 
 | Area | Files |
 | --- | --- |

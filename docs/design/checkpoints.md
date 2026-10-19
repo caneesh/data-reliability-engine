@@ -394,7 +394,7 @@ L1 to L15, each with its reason, in `docs/decisions.md`, "Phase 1 build step 3".
 
 ## Checkpoint 3, revised: the corrections C3-01 to C3-04 and the conditions on L1 to L15 (2026-10-19)
 
-**Status:** built; **awaits independent review and ratification.** Step 4 stays blocked until then. **CI:** pending (the CI line is added once the run finishes). **Decisions:** `docs/decisions.md`, "Checkpoint 3 reviewed: changes required, then the correction plan ratified". **Implementation:** `docs/design/implementation.md`, "Corrections after the checkpoint 3 review". **Model amendments:** `docs/design/reconciliation-model.md`, section 12. **Evidence package:** `docs/design/evidence/checkpoint3-corrections.md`.
+**Status:** built; **awaits independent review and ratification.** Step 4 stays blocked until then. **CI:** run #90 on `6387989`, green (`test`, `e2e`, `package`), with the `test-report` (JUnit XML) and `e2e-logs` artifacts kept with the run. **Decisions:** `docs/decisions.md`, "Checkpoint 3 reviewed: changes required, then the correction plan ratified". **Implementation:** `docs/design/implementation.md`, "Corrections after the checkpoint 3 review". **Model amendments:** `docs/design/reconciliation-model.md`, section 12. **Evidence package:** `docs/design/evidence/checkpoint3-corrections.md`.
 
 ### The ratified decisions and their proof
 
@@ -444,5 +444,5 @@ In `docs/decisions.md` ("Interpretations, for the reviewer to confirm or correct
 
 ### Gate to step 4
 
-1. CI green on the corrections commit, with the test report kept.
+1. ~~CI green on the corrections commit, with the test report kept.~~ Run #90, green, both artifacts kept.
 2. Independent review of the corrections; the user ratifies the revised checkpoint 3.

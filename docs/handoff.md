@@ -19,7 +19,7 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
   - **Second review, 2026-10-17: corrections R1 to R3**, then the user's ratification "approved for implementation, subject to acceptance testing". **Built:** the consistency model (spec section 5, item 6); evidence states VALID, INVALID, EXPIRED, UNKNOWN (`v_commit_state`; `v_latest_result.healthy` = PASSED and VALID, the one definition); evidence lifetimes on commits (13 months partition states, 84 results) honoured by retention, with investigation holds; the integrity sweep (daily 35 days, weekly full) and `dq_integrity`; compromised baselines (hop full sweep, drift cannot pass, REBASELINED); confirmed repair (readback, CONFIRMED only, conflicts recorded); `result_run_date` on cause commits; freshness in the digest and watchdog; the late-thread fix. **Signed off on 2026-10-18 for controlled development, not production certification; step 3 authorised** (`docs/decisions.md`, "Checkpoint 2 signed off").
   - **Step 3** (HOP_LEDGER and `dq_reconciliation`) is built (`docs/decisions.md`, "Phase 1 build step 3", with deviations L1 to L15 to ratify; `docs/design/implementation.md`, "Step 3"). Checkpoint 3 was reviewed on 2026-10-19: **changes required** (C3-01 to C3-04, conditions on L1, L4, L5, L6, L13, L14, L15; L3, L11, L12 revised). The user ratified the correction plan; **the corrections are built** (coverage continuity for every hop check, reject lineage and rules, union attribution states, persisted qualifications and claim-aware `healthy`, verified and unverified columns, triage, identity uniqueness, LEDGER_UNBALANCED incidents, insufficient_evidence holding the window). **The revised checkpoint 3 awaits independent review and ratification** (`docs/design/checkpoints.md`, "Checkpoint 3, revised"; `docs/decisions.md`, "Checkpoint 3 reviewed"); step 4 is blocked until then.
 - **Context from 2026-10-15 and 16.** The user's team is building a temporary in-pipeline audit (control table, rejects table, filter rule ids, audit log lines) that modifies the jobs; DRE stays outside the jobs. `docs/evidence-contract.md` fixes what that audit writes so DRE's probes read it by configuration (also a Claude Doc, "DRE Evidence Contract"). A feature catalogue of the engine is a Claude Doc, "DRE: Feature Catalogue" (https://claude.ai/code/artifact/4831d1d5-a7fd-427e-9a49-e67b4dc62e39). The real flow: a scheduled process loads HDFS files up to a hand-off layer (merge or gcf), a continuous process moves them into gold temp, and gold main merges on its own schedule; whether the hand-off table is written by insert-overwrite per batch partition is still unknown (it decides where partition drift matters first).
-- **Tests:** 820 (`pytest --collect-only -q | tail -1` gives the exact count). A full local run takes about 45 minutes (each test run now does its first integrity sweep); CI about 25. Replay scenarios R01 to R13 all pass, plus a three-layer acceptance test. Proof scenarios R14 to R23 are planned (traceability matrix, section 4); PS8 is already covered by `tests/test_commit_protocol.py`.
+- **Tests:** 849 (`pytest --collect-only -q | tail -1` gives the exact count). A full local run takes about 45 minutes (each test run now does its first integrity sweep); CI about 25. Replay scenarios R01 to R13 all pass, plus a three-layer acceptance test. Proof scenarios R14 to R23 are planned (traceability matrix, section 4); PS8 is already covered by `tests/test_commit_protocol.py`.
 
 ## History, in order (each step green in CI)
 
@@ -69,7 +69,7 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
 | Checkpoint 2 signed off for controlled development; step 3 authorised | `3d3f3c2` | #87 |
 | Phase 1 build step 3: HOP_LEDGER, `dq_reconciliation`, `rejects` on contracts, the scope line; checkpoint 3 | `1f30227` | #88 |
 | Checkpoint 3 CI line | `a5e8190` | #89 |
-| Checkpoint 3 corrections: coverage continuity, reject lineage, qualifications and health, union attribution, triage, identity, LEDGER_UNBALANCED, window hold; revised checkpoint 3 | see checkpoint 3, revised | see checkpoint 3, revised |
+| Checkpoint 3 corrections: coverage continuity, reject lineage, qualifications and health, union attribution, triage, identity, LEDGER_UNBALANCED, window hold; revised checkpoint 3 | `6387989` | #90 |
 
 Each row has a section in `docs/decisions.md` saying what was decided and why.
 
@@ -77,7 +77,7 @@ Each row has a section in `docs/decisions.md` saying what was decided and why.
 
 **Next action**, in this order unless the user says otherwise:
 
-0. Confirm CI for the corrections commit (the CI line in "Checkpoint 3, revised").
+0. ~~Confirm CI for the corrections commit.~~ Run #90 on `6387989`, green, with the `test-report` and `e2e-logs` artifacts kept.
 1. **Wait for the independent review and ratification of the revised checkpoint 3.** Record the verdict in `docs/decisions.md` before starting step 4. A change asked for is built the controlled way (failing test first, spec, code, docs, full suite, e2e).
 2. **Step 4, evaluation modes and AS_OF_REPLAY**, on the user's word. Start by stating the plan.
 3. **Later steps** (`docs/design/target-architecture.md`, section 7):
