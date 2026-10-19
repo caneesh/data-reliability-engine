@@ -11,8 +11,10 @@ Changed since the last run
     cause: NOT_RUN (confirmed)
     sample keys (key_hash): aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 - gold_member_coverage HOP_LEDGER [upstream=example_curated_enrollment]: first result -> FAILED
-    scope: example_curated_enrollment->gold_member_coverage union_partition (declared); claim contract-proven; evidence observed; cutoff 2026-01-16T12:05:00+00:00; 2 blind spots (dre validate lists them)
+    scope: example_curated_enrollment->gold_member_coverage union_partition (declared); claim declared contract, qualified: attribution_unverified; evidence observed; values verified for 1 of 3 columns; cutoff 2026-01-16T12:05:00+00:00
     observed: due 3 (pending 0): delivered 2, stale 1; orphans 0; fails: 1 stale; expected: every due record in exactly one authorised disposition
+    triage: 1 stale: HOP_KEY_CURRENCY and HOP_VALUE_AGREEMENT name these keys and their causes
+    blind spots: attribution (each row here owned by exactly one source) is not proven until build step 5; as-of replay unavailable: gold_member_coverage is mutable
 - gold_member_coverage T1_KEY_DUPLICATES [src_sys_nm=SRC_A]: PASSED -> FAILED
     observed: 1 of 3 keys have more than one row; expected: every key at most once
 - gold_member_coverage T1_ON_TIME: PASSED -> FAILED

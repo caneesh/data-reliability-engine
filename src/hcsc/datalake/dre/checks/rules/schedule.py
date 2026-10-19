@@ -13,7 +13,7 @@ from datetime import date, datetime, time, timedelta
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
-from hcsc.datalake.dre.checks.events import BLOCKING_CATEGORIES
+from hcsc.datalake.dre.checks.events import blocking_sql
 from hcsc.datalake.dre.checks.times import as_utc
 from hcsc.datalake.dre.store.names import validate_dq_database
 
@@ -43,12 +43,11 @@ def last_completed_sql(dq_database: str, since: date | None = None) -> str:
     """The query behind last_completed: rule results only (the rows with a severity), from the
     run_date partitions on or after `since`."""
     validate_dq_database(dq_database)
-    blocking = ", ".join(f"'{c}'" for c in BLOCKING_CATEGORIES)
     lookback = f" AND run_date >= DATE'{since.isoformat()}'" if since is not None else ""
     return (
         f"SELECT dataset, check_id, MAX(evaluated_at) AS evaluated_at FROM {dq_database}.v_committed_result "
         f"WHERE execution_type = 'NORMAL' AND severity IS NOT NULL{lookback} "
-        f"AND NOT (state = 'DID_NOT_RUN' AND reason_category IN ({blocking})) "
+        f"AND NOT {blocking_sql()} "
         f"GROUP BY dataset, check_id"
     )
 

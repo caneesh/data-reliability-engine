@@ -26,7 +26,7 @@ _HASH = re.compile(r"^[0-9a-f]{64}$")
 def hop(cx: CauseContext) -> dict[str, Any]:
     """The hop's template parameters (as the hop check built them), key hashing on."""
     def build() -> dict[str, Any]:
-        params = hop_params(cx.ctx, cx.event, cx.upstream_id, cx.upstream())
+        params = hop_params(cx.ctx, cx.event, cx.upstream_id, cx.upstream(), cx.check_id)
         if not isinstance(params, dict):
             raise ValueError("the hop cannot be evaluated")
         params = {**params, "hashed": cx.ctx.key_secret is not None,

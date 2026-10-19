@@ -391,6 +391,13 @@ def evaluate(spark: SparkSession, config: Config, planned: Planned, event: Event
     return Evaluation(planned, event, results, datetime.now(timezone.utc), duration_ms, ctx)
 
 
+def covers(result: CheckResult) -> bool:
+    """Whether a result judged its range (checks/hop/coverage.py): PASSED, FAILED, or nothing due.
+    Any other outcome (an error, missing or insufficient evidence, a budget cut) covers nothing,
+    so the next window judges the range again."""
+    return result.state in ("PASSED", "FAILED") or result.reason_code == "empty_population"
+
+
 def result_rows(evaluation: Evaluation, run: runs.Run, execution_type: str) -> list[dict[str, Any]]:
     p = evaluation.planned
     event = evaluation.event
@@ -407,7 +414,10 @@ def result_rows(evaluation: Evaluation, run: runs.Run, execution_type: str) -> l
             "population": r.population, "violations": r.violations, "observed": r.observed,
             "expected": r.expected, "group_values": r.group_values, "severity": p.check.severity,
             "evaluated_at": evaluation.evaluated_at, "duration_ms": evaluation.duration_ms,
-            "detail": r.detail, "run_date": run.run_date,
+            "detail": r.detail, "qualifications": ",".join(r.qualifications) or None,
+            "coverage_from": r.coverage[0] if r.coverage is not None and covers(r) else None,
+            "coverage_to": r.coverage[1] if r.coverage is not None and covers(r) else None,
+            "run_date": run.run_date,
         }
         for r in evaluation.results
     ]
@@ -430,7 +440,8 @@ def incomplete_rows(evaluation: Evaluation, rows: list[dict[str, Any]], now: dat
                        "reason_code": "evidence_incomplete", "population": None, "violations": None,
                        "observed": f"{row['state']} result not published: the evaluation's evidence rows (key events, partition states) were not all stored",
                        "expected": "the result and its evidence rows stored together", "evaluated_at": now,
-                       "detail": "the window is held and evaluated again"})
+                       "detail": "the window is held and evaluated again",
+                       "qualifications": None, "coverage_from": None, "coverage_to": None})
     return marked
 
 
@@ -907,6 +918,19 @@ def rebaselines(run: runs.Run, evaluation: Evaluation, tainted: list[tuple[str, 
     return integrity.rebaseline_records(run, evaluation.planned.dataset.dataset, check_id, tainted) if established else []
 
 
+def record_unbalanced(spark: SparkSession, db: str, run: runs.Run, rows: list[dict[str, Any]]) -> None:
+    """Record a LEDGER_UNBALANCED incident for each stored result whose ledger did not balance (L5),
+    when it is stored: an engine defect is an observation, kept whether or not its unit is published.
+    Never stops the run."""
+    found = integrity.unbalanced_records(run, rows)
+    if not found:
+        return
+    try:
+        integrity.append_records(spark, db, found)
+    except Exception as exc:
+        log.warning("could not record an unbalanced ledger: %s", error_detail(exc))
+
+
 def integrity_sweep(spark: SparkSession, config: Config, run: runs.Run) -> list[str]:
     """The integrity sweep, when due (R1): FULL (every commit whose evidence is still kept) at the
     first run at or after rule_run_at on integrity_full_sweep_day, otherwise DAILY (the last
@@ -1131,6 +1155,7 @@ def run(spark: SparkSession, conf: str, feed_id: str | None = None, selection: S
             stored_rows, complete, commits = write_evaluation(spark, db, evaluation, rows, run_record,
                                                               WRITE_BUDGET_MINUTES)
             publisher.add(commits, complete, after=rebaselines(run_record, evaluation, tainted, complete))
+            record_unbalanced(spark, db, run_record, stored_rows)
             rows = stored_rows
             explained.update(r["evaluation_id"] for r in rows)
             for line in describe(evaluation) + explain_failures(spark, config, evaluation, rows, run_record,

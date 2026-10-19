@@ -1,7 +1,8 @@
 """Check an end-to-end `dre run`: one COMPLETED run, results for every synthetic feed and the
 table-wide dataset, no PLATFORM failures (which would mean an engine error), and the second
 feeds' healthy hops (roster to directory; curated to gold) PASSED, HOP_LEDGER included, with each
-ledger committed and balanced (its dispositions add up to its due population). Exit 1 if not."""
+ledger committed and balanced (its dispositions add up to its due population), covering hop results
+with their coverage, and no qualified PASS healthy. Exit 1 if not."""
 
 from __future__ import annotations
 
@@ -40,6 +41,20 @@ def main() -> int:
         if not lines or due != buckets or due != ledger.population:
             problems.append(f"{ledger.dataset} HOP_LEDGER: {len(lines)} committed lines, due {due}, "
                             f"in buckets {buckets}, population {ledger.population}")
+    # Checkpoint 3: every covering hop result records the range it judged; the synthetic hops' ledgers
+    # are qualified (the provider hop's contract is inferred, gold's union attribution is unproven), so
+    # neither is healthy, and no qualified PASS is healthy.
+    hop_results = [r for r in results if r.check_id.startswith("HOP_") and r.state in ("PASSED", "FAILED")]
+    if not hop_results or any(r.coverage_to is None for r in hop_results):
+        problems.append("a covering hop result has no coverage_to")
+    expected = {"provider_directory": "inferred_contract", "gold_member_coverage": "attribution_unverified"}
+    for dataset, qualification in expected.items():
+        [ledger] = [r for r in results if r.dataset == dataset and r.check_id == "HOP_LEDGER"]
+        if qualification not in (ledger.qualifications or "").split(","):
+            problems.append(f"{dataset} HOP_LEDGER qualifications {ledger.qualifications}, expected {qualification}")
+    healthy_qualified = spark.table("dq.v_latest_result").filter("healthy AND qualifications IS NOT NULL").count()
+    if healthy_qualified:
+        problems.append(f"{healthy_qualified} qualified PASS(es) reported healthy")
     drift = [r for r in results if r.dataset == "provider_directory" and r.check_id == "T1_PARTITION_DRIFT"]
     if [(r.state, r.reason_code) for r in drift] != [("DID_NOT_RUN", "insufficient_history")]:
         problems.append(f"provider_directory T1_PARTITION_DRIFT {[(r.state, r.reason_code) for r in drift]}, "

@@ -90,6 +90,13 @@ class CheckResult:
     # HOP_LEDGER: the ledger's lines to append to dq_reconciliation (store/reconciliation.py), written by
     # the runner with the run and evaluation ids before the result, like key events.
     reconciliation: tuple[dict[str, Any], ...] = field(default=(), compare=False, repr=False)
+    # Hop checks: the deadline range judged, (start, end) in UTC (checks/hop/coverage.py). The runner
+    # stores it as coverage_from and coverage_to on a covering result only (PASSED, FAILED, or
+    # DID_NOT_RUN / empty_population), so the next window continues from it.
+    coverage: tuple[datetime, datetime] | None = field(default=None, compare=False, repr=False)
+    # What a PASS's claim rests on unproven (codes, checks/hop/ledger.py QUALIFICATIONS): stored as
+    # dq_check_result.qualifications; a PASSED result with any is not healthy (v_latest_result).
+    qualifications: tuple[str, ...] = field(default=(), compare=False)
 
 
 def release_checkpoint(frame: Any) -> None:

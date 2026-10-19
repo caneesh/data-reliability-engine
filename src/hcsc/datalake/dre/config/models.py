@@ -128,6 +128,16 @@ def _calendar(value: str) -> str:
     return value
 
 
+_RULE_REF = re.compile(r"[A-Za-z_][A-Za-z0-9_]*@[1-9][0-9]*")
+
+
+def _rule_ref(value: str) -> str:
+    """A business rule named by id and version, as the rejects name it: id@version."""
+    if not _RULE_REF.fullmatch(value):
+        raise invalid(f"{value!r} is not a rule id@version", "write the rule as <id>@<version>, for example code_check@2")
+    return value
+
+
 def _normaliser(value: Any) -> Any:
     """A registered key normaliser (checks/keys.py): a bare name, or {name: argument}."""
     from hcsc.datalake.dre.checks.keys import NormaliserError, validate_normaliser
@@ -517,6 +527,9 @@ class RejectReason(Model):
 
     disposition: Literal["authorised", "defect"]
     max_share: float | None = Field(default=None, gt=0, le=1)  # an authorised reason's volume guard
+    # The approved business rules (id@version) a reject of this reason must name to be authorised
+    # (checkpoint 3, C3-01). Empty: the reason alone decides. Needs the rejects' rule columns.
+    rules: list[Annotated[str, AfterValidator(_rule_ref)]] = []
 
     @model_validator(mode="after")
     def _guard(self) -> RejectReason:
@@ -525,6 +538,8 @@ class RejectReason(Model):
                           "set max_share (for example 0.02): above it the authorised rejects fail the hop")
         if self.disposition == "defect" and self.max_share is not None:
             raise invalid("max_share applies to authorised reasons only", "remove max_share from a defect")
+        if self.disposition == "defect" and self.rules:
+            raise invalid("rules approve rejects of an authorised reason", "remove rules from a defect")
         return self
 
 
@@ -565,19 +580,56 @@ class Tolerance(Model):
         return data
 
 
+class BatchLineage(Model):
+    """A reject names the batch of the record it refused: `column` in the rejects table, compared
+    (as text) with `upstream_column`, the upstream's batch column, on the rows of the version under
+    judgement."""
+
+    column: Identifier
+    upstream_column: Identifier
+
+
+class RejectLineage(Model):
+    """How a reject names the record version it refused (checkpoint 3, C3-01): exactly one of
+    `version`, the rejects' column holding the refused record's version (its record time, read with
+    its format and zone and compared, in UTC, with the upstream's record time), or `batch`."""
+
+    version: TimeColumn | None = None
+    batch: BatchLineage | None = None
+
+    @model_validator(mode="after")
+    def _one(self) -> RejectLineage:
+        if (self.version is None) == (self.batch is None):
+            raise invalid("lineage needs exactly one of version and batch",
+                          "set version: {column: <the refused record's version>} or batch: {column, upstream_column}")
+        return self
+
+
 class RejectsSource(Model):
     """Where the pipeline's rejects evidence for a hop is (ADR-04; the rejects table of
     docs/evidence-contract.md): reported evidence. Its key columns carry the upstream's names and
     raw values (the hop's key_map columns, normalised as the upstream normalises them);
     `reason_column` holds the reason code and `time_column` when the record was rejected (UTC
     unless its `timezone` says otherwise). `condition` (SQL over the table) narrows it to the stage
-    that feeds this hop. A reject accounts for the version under judgement when its key matches
-    and it was rejected at or after that version's upstream load time, and before the window end."""
+    that feeds this hop. `lineage` (required, C3-01) ties a reject to the record version it refused;
+    `rule_id_column` and `rule_version_column` name the business rule behind it, where the pipeline
+    records one. A reject accounts for the version under judgement only when its key and its
+    lineage match it, and it was rejected before the window end; a reject of the key whose lineage
+    is empty cannot be attributed, and leaves the record unassessable."""
 
     table: TableName
     condition: SqlFragment | None = None
     reason_column: Identifier = "reason_code"
     time_column: TimeColumn = Field(default_factory=lambda: TimeColumn(column="rejected_at", timezone="UTC"))
+    lineage: RejectLineage
+    rule_id_column: Identifier | None = None
+    rule_version_column: Identifier | None = None
+
+    @model_validator(mode="after")
+    def _rule_columns(self) -> RejectsSource:
+        if (self.rule_id_column is None) != (self.rule_version_column is None):
+            raise invalid("a rule is named by its id and its version", "set both rule_id_column and rule_version_column")
+        return self
 
 
 class EdgeContract(Model):

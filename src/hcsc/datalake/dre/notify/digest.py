@@ -66,6 +66,9 @@ class Item:
     notes: list[str] = field(default_factory=list)
     samples: list[str] = field(default_factory=list)
     scope: str | None = None             # what a reconciliation result's claim covers, in one line
+    qualifications: list[str] = field(default_factory=list)  # what a PASS rests on unproven: never healthy
+    blind_spots: list[str] = field(default_factory=list)     # what a reconciliation result cannot see
+    triage: list[str] = field(default_factory=list)          # what to look at, for a FAILED ledger
 
     @property
     def label(self) -> str:
@@ -93,6 +96,7 @@ class Digest:
     report_only: list[Item] = field(default_factory=list)
     passing: int = 0
     evidence: list[Item] = field(default_factory=list)  # current results whose evidence is INVALID or UNKNOWN
+    qualified: list[Item] = field(default_factory=list)  # this run's passes with qualifications: not healthy
     integrity: str = ""  # when the store's integrity was last verified
 
     @property
@@ -206,22 +210,31 @@ def owner_of(config: Config, row: dict[str, Any]) -> str | None:
 INCOMPLETE = "cause: investigation incomplete (the next run retries it)"
 
 
-def scope_line(detail: str | None) -> str | None:
-    """A reconciliation result's scope (HOP_LEDGER's `detail`, ADR-01) in one line: the edge, its
-    kind and contract, the claim, the evidence level, the cutoff and how many blind spots. None for a
-    result whose detail is not a scope."""
+def scope_of(detail: str | None) -> dict[str, Any] | None:
+    """A reconciliation result's scope (HOP_LEDGER's `detail`, ADR-01), or None for a result whose
+    detail is not a scope."""
     try:
         scope = json.loads(detail) if detail else None
     except ValueError:
         return None
-    if not isinstance(scope, dict) or "claim" not in scope or "edge" not in scope:
+    return scope if isinstance(scope, dict) and "claim" in scope and "edge" in scope else None
+
+
+def scope_line(detail: str | None) -> str | None:
+    """The scope in one line: the edge, its kind and contract, the claim, the evidence level, how
+    many columns the values were verified for, the cutoff. Its blind spots and triage are listed
+    under it (Item.blind_spots, Item.triage)."""
+    scope = scope_of(detail)
+    if scope is None:
         return None
-    spots = len(scope.get("blind_spots") or [])
     parts = [f"{scope['edge']} {scope.get('mapping')} ({scope.get('contract')})", f"claim {scope['claim']}"]
     if scope.get("evidence_level"):
         parts.append(f"evidence {scope['evidence_level']}")
-    parts += [f"cutoff {scope.get('cutoff')}" + (" (full sweep)" if scope.get("full_sweep") else ""),
-              f"{spots} blind spot{'s' if spots != 1 else ''} (dre validate lists them)"]
+    values = scope.get("values") or {}
+    if values.get("unverified") is not None:
+        verified = len(values.get("verified") or [])
+        parts.append(f"values verified for {verified} of {verified + len(values['unverified'])} columns")
+    parts.append(f"cutoff {scope.get('cutoff')}" + (" (full sweep)" if scope.get("full_sweep") else ""))
     return "scope: " + "; ".join(parts)
 
 
@@ -303,6 +316,9 @@ def build_digests(config: Config, run: Run, data: dict[str, Any]) -> list[Digest
             observed=row.get("observed"), expected=row.get("expected"),
             violations=row.get("violations"), prev_violations=prev["violations"] if prev else None,
             rule=is_rule, scope=scope_line(row.get("detail")),
+            qualifications=[q for q in (row.get("qualifications") or "").split(",") if q],
+            blind_spots=list((scope_of(row.get("detail")) or {}).get("blind_spots") or []),
+            triage=list((scope_of(row.get("detail")) or {}).get("triage") or []),
         )
         if is_rule and rule.status == "proposed":
             digest.report_only.append(item)
@@ -325,7 +341,10 @@ def build_digests(config: Config, run: Run, data: dict[str, Any]) -> list[Digest
             item.reason = row["evidence_state"]
             digest.evidence.append(item)
         else:
-            digest.passing += 1
+            if item.qualifications:  # a PASS that rests on something unproven: listed, never healthy
+                digest.qualified.append(item)
+            else:
+                digest.passing += 1
             if item.prev_state in ("FAILED", "DID_NOT_RUN"):
                 digest.changed.append(item)
     # Groups the check's previous run reported that this run did not (configured group columns only).

@@ -25,6 +25,9 @@ WITH up_rows AS (
   SELECT {{ p.up_key }} AS k, {{ p.up_raw }} AS raw_k, {{ p.up_keyed }} AS keyed,
          {{ p.up_record }} AS record_ts, {{ p.up_load }} AS load_ts,
          {% if p.tombstone %}coalesce(({{ p.tombstone }}), FALSE){% else %}FALSE{% endif %} AS tomb
+{% if p.rejects and p.rejects.by_batch %}
+       , {{ p.rejects.up_batch }} AS batch
+{% endif %}
 {% for x in p.exclusions %}
        , coalesce(({{ x.condition }}), FALSE) AS x_{{ loop.index }}
 {% endfor %}
@@ -61,6 +64,7 @@ up_top AS (
 ),
 up_keys AS (
   SELECT k, MAX(record_ts) AS up_record_ts, MAX(load_ts) AS up_load_ts, MAX(raw_variants) AS up_variants,
+         COUNT(*) AS up_tied,
          MAX(CASE WHEN tomb THEN 1 ELSE 0 END) AS tomb
 {% for x in p.exclusions %}
        , MAX(CASE WHEN x_{{ loop.index }} THEN 1 ELSE 0 END) AS x_{{ loop.index }}
@@ -100,7 +104,7 @@ dn_top AS (
   SELECT * FROM dn_ranked WHERE record_ts = top_ts OR top_ts IS NULL
 ),
 dn_keys AS (
-  SELECT k, MAX(record_ts) AS dn_record_ts, MAX(raw_variants) AS dn_variants,
+  SELECT k, MAX(record_ts) AS dn_record_ts, MAX(raw_variants) AS dn_variants, COUNT(*) AS dn_tied,
          MAX(CASE WHEN record_ts IS NULL THEN 1 ELSE 0 END) AS dn_untimed,
          MAX(CASE WHEN soft THEN 1 ELSE 0 END) AS soft
   FROM dn_top GROUP BY k
@@ -117,27 +121,55 @@ dn_sets AS (
 ),
 {% endif %}
 {% if p.rejects %}
--- reported evidence: a reject accounts for the version under judgement when its key matches and it was
--- rejected at or after that version's load time, and before the cutoff; the latest reject names the reason
+-- reported evidence (checkpoint 3, C3-01): a reject accounts for the version under judgement only when
+-- its key and its lineage (the refused record's version, or its batch) match that version, and it was
+-- rejected before the cutoff; the latest such reject names the reason and the rule. A reject of the key
+-- whose lineage is empty cannot be attributed to any version: the record is unassessable. A reject
+-- naming another version explains nothing about this one.
 rejects AS (
-  SELECT {{ p.rejects.key }} AS k, CAST({{ p.rejects.reason }} AS STRING) AS reason, {{ p.rejects.time }} AS rejected_ts
+  SELECT {{ p.rejects.key }} AS k, CAST({{ p.rejects.reason }} AS STRING) AS reason, {{ p.rejects.time }} AS rejected_ts,
+         {{ p.rejects.lineage }} AS lineage,
+         {% if p.rejects.rule %}{{ p.rejects.rule }}{% else %}CAST(NULL AS STRING){% endif %} AS rule
   FROM {{ p.rejects.table }}
   WHERE {{ p.rejects.time }} < {{ p.window_end }}{% if p.rejects.filter %} AND ({{ p.rejects.filter }}){% endif %}
 
 ),
 rejected AS (
-  SELECT d.k, max_by(r.reason, r.rejected_ts) AS reason
-  FROM due_keys d JOIN rejects r ON r.k = d.k AND r.rejected_ts >= d.up_load_ts
+  SELECT d.k, max_by(named_struct('reason', r.reason, 'rule', r.rule), r.rejected_ts) AS latest
+  FROM due_keys d
+{% if p.rejects.by_batch %}
+  JOIN (SELECT DISTINCT k, batch FROM up_top) b ON b.k = d.k
+  JOIN rejects r ON r.k = d.k AND r.lineage = b.batch
+{% else %}
+  JOIN rejects r ON r.k = d.k AND r.lineage = d.up_record_ts
+{% endif %}
   GROUP BY d.k
+),
+unattributed AS (
+  SELECT DISTINCT d.k FROM due_keys d JOIN rejects r ON r.k = d.k WHERE r.lineage IS NULL
 ),
 {% endif %}
 judged AS (
   SELECT d.k, d.up_record_ts, n.dn_record_ts, n.k IS NOT NULL AS present, d.tomb = 1 AS tomb,
          CASE WHEN d.up_variants > 1 OR coalesce(n.dn_variants, 1) > 1 THEN 'key collision'
+{% if p.one_to_one %}
+              -- identity (L4): one record each side; rows tied at the version on either side are not
+              WHEN d.up_tied > 1 OR coalesce(n.dn_tied, 1) > 1 THEN 'not one-to-one'
+{% endif %}
               WHEN d.up_record_ts IS NULL OR n.dn_untimed = 1 THEN 'no record time'
-              WHEN d.up_load_ts IS NULL THEN 'no load time' END AS unknown_reason,
+              WHEN d.up_load_ts IS NULL THEN 'no load time'
+{% if p.rejects %}
+              -- only for a record absent here: a record present here is not explained by a reject
+              WHEN r.k IS NULL AND ua.k IS NOT NULL AND n.k IS NULL THEN 'reject not attributable to a version'
+{% if p.rejects.rules_required %}
+              WHEN r.latest.reason IN ({% for x in p.rejects.rules_required %}'{{ x }}'{% if not loop.last %}, {% endif %}{% endfor %})
+                   AND r.latest.rule IS NULL THEN 'reject names no rule'
+{% endif %}
+{% endif %}
+              END AS unknown_reason,
          {% if p.exclusions %}CASE {% for x in p.exclusions %}WHEN d.x_{{ loop.index }} = 1 THEN '{{ x.label }}' {% endfor %}END{% else %}CAST(NULL AS STRING){% endif %} AS excluded_by,
-         {% if p.rejects %}r.reason{% else %}CAST(NULL AS STRING){% endif %} AS reject_reason,
+         {% if p.rejects %}r.latest.reason{% else %}CAST(NULL AS STRING){% endif %} AS reject_reason,
+         {% if p.rejects %}r.latest.rule{% else %}CAST(NULL AS STRING){% endif %} AS reject_rule,
          {% if p.owned %}us.vals <> ds.vals{% else %}FALSE{% endif %} AS diverges,
          coalesce(n.soft = 1, FALSE) AS soft_applied
   FROM due_keys d
@@ -148,12 +180,13 @@ judged AS (
 {% endif %}
 {% if p.rejects %}
   LEFT JOIN rejected r ON r.k = d.k
+  LEFT JOIN unattributed ua ON ua.k = d.k
 {% endif %}
 ),
 ledger AS (
   -- matched: the explaining rules (1 to 6) that hold, in precedence; the residual (delivered,
   -- divergent, stale, missing) is what D shows when none of them does
-  SELECT k, unknown_reason, excluded_by, reject_reason,
+  SELECT k, unknown_reason, excluded_by, reject_reason, reject_rule,
          filter(array(
            CASE WHEN unknown_reason IS NOT NULL THEN 'unassessable' END,
 {% if p.applied_as == "soft" %}
@@ -175,50 +208,62 @@ ledger AS (
 ),
 placed AS (
   SELECT k, coalesce(element_at(matched, 1), residual) AS disposition, unknown_reason, excluded_by, reject_reason,
-         matched
+         reject_rule, matched
   FROM ledger
 )
 SELECT 'due' AS line, k, disposition,
        CASE disposition WHEN 'unassessable' THEN unknown_reason
                         WHEN 'excluded' THEN excluded_by
                         WHEN 'excluded_but_present' THEN excluded_by
-                        WHEN 'rejected' THEN reject_reason END AS label,
+                        WHEN 'rejected' THEN concat_ws(' ', reject_reason, reject_rule) END AS label,
+       -- a reject's class under the policy: authorised only for a reason the policy authorises and, where
+       -- the policy lists rules, a rule it lists; every other reason, or rule, is a defect (ADR-04)
+       CASE WHEN disposition <> 'rejected' THEN CAST(NULL AS STRING)
+{% if p.rejects and p.rejects.authorised %}
+            WHEN concat_ws(' ', reject_reason, reject_rule) IN ({% for x in p.rejects.authorised %}'{{ x }}'{% if not loop.last %}, {% endif %}{% endfor %})
+              THEN 'authorised'
+{% endif %}
+{% if p.rejects and p.rejects.authorised_any %}
+            WHEN reject_reason IN ({% for x in p.rejects.authorised_any %}'{{ x }}'{% if not loop.last %}, {% endif %}{% endfor %})
+              THEN 'authorised'
+{% endif %}
+            ELSE 'defect' END AS variant,
        matched
 FROM placed
 UNION ALL
 SELECT 'due' AS line, CAST(NULL AS STRING) AS k, 'unassessable' AS disposition, 'no key' AS label,
-       array('unassessable') AS matched
+       CAST(NULL AS STRING) AS variant, array('unassessable') AS matched
 FROM up_cut
 WHERE NOT keyed AND {% if p.full_sweep %}(load_ts < {{ p.deadline_end }} OR load_ts IS NULL){% else %}load_ts < {{ p.deadline_end }} AND load_ts >= {{ p.deadline_start }}{% endif %}
 
 UNION ALL
 SELECT 'pending' AS line, k, CAST(NULL AS STRING) AS disposition, CAST(NULL AS STRING) AS label,
-       CAST(array() AS ARRAY<STRING>) AS matched
-FROM up_keys WHERE up_load_ts >= {{ p.deadline_end }}
+       CAST(NULL AS STRING) AS variant, CAST(array() AS ARRAY<STRING>) AS matched
+FROM up_keys WHERE up_load_ts >= {{ p.pending_from }}
 {% if not p.full_sweep %}
 UNION ALL
 SELECT 'untimed' AS line, k, CAST(NULL AS STRING) AS disposition, CAST(NULL AS STRING) AS label,
-       CAST(array() AS ARRAY<STRING>) AS matched
+       CAST(NULL AS STRING) AS variant, CAST(array() AS ARRAY<STRING>) AS matched
 FROM up_keys WHERE up_load_ts IS NULL
 {% endif %}
 {% if p.orphans %}
 UNION ALL
 SELECT 'orphan' AS line, o.k, CAST(NULL AS STRING) AS disposition, CAST(NULL AS STRING) AS label,
-       CAST(array() AS ARRAY<STRING>) AS matched
+       CAST(NULL AS STRING) AS variant, CAST(array() AS ARRAY<STRING>) AS matched
 FROM (SELECT DISTINCT k FROM dn_rows
       WHERE keyed AND load_ts >= {{ p.window_start }} AND load_ts < {{ p.window_end }}) o
 LEFT ANTI JOIN (SELECT DISTINCT k FROM up_rows WHERE keyed) u ON u.k = o.k
 UNION ALL
 SELECT 'orphan' AS line, CAST(NULL AS STRING) AS k, CAST(NULL AS STRING) AS disposition, 'no key' AS label,
-       CAST(array() AS ARRAY<STRING>) AS matched
+       CAST(NULL AS STRING) AS variant, CAST(array() AS ARRAY<STRING>) AS matched
 FROM dn_rows WHERE NOT keyed AND load_ts >= {{ p.window_start }} AND load_ts < {{ p.window_end }}
 {% endif %}
 {% else %}
-SELECT line, disposition, label, COUNT(*) AS n, COUNT(DISTINCT k) AS keys
+SELECT line, disposition, label, variant, COUNT(*) AS n, COUNT(DISTINCT k) AS keys
 FROM {{ source }}
-GROUP BY line, disposition, label
+GROUP BY line, disposition, label, variant
 UNION ALL
-SELECT 'overlap' AS line, disposition, later AS label, COUNT(*) AS n, COUNT(*) AS keys
+SELECT 'overlap' AS line, disposition, later AS label, CAST(NULL AS STRING) AS variant, COUNT(*) AS n, COUNT(*) AS keys
 FROM (SELECT disposition, explode(slice(matched, 2, size(matched) - 1)) AS later FROM {{ source }}
       WHERE size(matched) > 1) o
 GROUP BY disposition, later

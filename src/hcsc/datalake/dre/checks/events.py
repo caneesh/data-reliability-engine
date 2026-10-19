@@ -6,7 +6,8 @@ its end.
 
 - window_end = the run's start minus settle_minutes and the feed's check_delay_minutes.
 - window_start = the latest window_end among the dataset's NORMAL events,
-  skipping events that had any check DID_NOT_RUN for a PLATFORM or BUDGET reason, or that
+  skipping events that had any check DID_NOT_RUN for a PLATFORM or BUDGET reason (or
+  insufficient_evidence: evidence a contract requires could not be read), or that
   were evaluated by a run that did not finish COMPLETED (those windows are held: evaluated
   again, so evidence a broken run could not store is recovered); on a dataset's first run, window_end
   minus initial_lookback_hours. CONFIGURATION reasons never hold a window.
@@ -34,8 +35,20 @@ if TYPE_CHECKING:
 
     from hcsc.datalake.dre.config.models import Dataset, Settings
 
-# DID_NOT_RUN categories that hold a window for the next run (up to max_window_hours).
+# DID_NOT_RUN categories that hold a window for the next run (up to max_window_hours), and codes of
+# other categories that hold it too: insufficient_evidence (checkpoint 3, L15), so evidence a contract
+# requires that cannot be read never lets the window's records go unjudged.
 BLOCKING_CATEGORIES = ("PLATFORM", "BUDGET")
+BLOCKING_CODES = ("insufficient_evidence",)
+
+
+def blocking_sql(alias: str = "") -> str:
+    """The SQL condition, over a result row, of a DID_NOT_RUN that holds its window."""
+    a = f"{alias}." if alias else ""
+    categories = ", ".join(f"'{c}'" for c in BLOCKING_CATEGORIES)
+    codes = ", ".join(f"'{c}'" for c in BLOCKING_CODES)
+    return (f"({a}state = 'DID_NOT_RUN' AND ({a}reason_category IN ({categories}) "
+            f"OR {a}reason_code IN ({codes})))")
 GAP_CHECK_ID = "WINDOW_GAP"  # the result row recording a held span that was given up
 
 
@@ -95,7 +108,7 @@ def history_sql(dq_database: str, datasets: list[str], since: date | None = None
     """The one query behind window_histories (a function so a test can EXPLAIN it)."""
     validate_dq_database(dq_database)
     names = ", ".join(f"'{validate_identifier(d, 'dataset id')}'" for d in sorted(set(datasets)))
-    blocking = ", ".join(f"'{c}'" for c in BLOCKING_CATEGORIES)
+    blocking = blocking_sql("r")
     lookback = f" AND r.run_date >= DATE'{since.isoformat()}'" if since is not None else ""
     # A run that did not finish COMPLETED (PARTIAL, FAILED, or died while STARTED) may not have
     # stored all its evidence: its events are held too. A result with no run row is not held.
@@ -106,9 +119,9 @@ def history_sql(dq_database: str, datasets: list[str], since: date | None = None
     return (
         f"WITH events AS ("
         f"  SELECT r.dataset, r.event_id, MIN(r.window_start) AS window_start, MAX(r.window_end) AS window_end,"
-        f"         MAX(CASE WHEN (r.state = 'DID_NOT_RUN' AND r.reason_category IN ({blocking})) OR {incomplete}"
+        f"         MAX(CASE WHEN {blocking} OR {incomplete}"
         f"                  THEN 1 ELSE 0 END) AS held,"
-        f"         collect_set(CASE WHEN r.state = 'DID_NOT_RUN' AND r.reason_category IN ({blocking})"
+        f"         collect_set(CASE WHEN {blocking}"
         f"                          THEN r.reason_code"
         f"                          WHEN {incomplete} THEN concat('run_', lower(u.status)) END) AS held_by"
         f"  FROM {dq_database}.dq_check_result r"

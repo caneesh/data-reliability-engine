@@ -30,7 +30,6 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import replace
-from datetime import timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
@@ -39,6 +38,7 @@ from hcsc.datalake.dre.checks.base import (
 )
 from hcsc.datalake.dre.checks.derived import source_of
 from hcsc.datalake.dre.checks.hop.common import exclusion_terms, has_a_key, hop_label, per_hop
+from hcsc.datalake.dre.checks.hop.coverage import coverage_of, judged_range
 from hcsc.datalake.dre.checks.keys import column_expr, key_string
 from hcsc.datalake.dre.checks.registry import register_check
 from hcsc.datalake.dre.checks.times import utc_expr
@@ -105,8 +105,75 @@ def orphans_unchecked(ctx: CheckContext, hop: Hop) -> str | None:
     return None
 
 
+# What a claim can rest on unproven (checkpoint 3, C3-03, C3-04): each makes a PASS qualified, so it is
+# stored on the result (dq_check_result.qualifications) and never counted as healthy (v_latest_result).
+QUALIFICATIONS = {
+    "inferred_contract": "the hop's kind is inferred from key_map, not declared",
+    "legacy_exclusion": "an exclusion comes from hop_exclusions: no id, version, approval or volume guard",
+    "attribution_unverified": "the rows here are not proven to belong to this source (T1_SOURCE_ATTRIBUTION, "
+                              "build step 5)",
+    "orphans_unchecked": "rows here that no upstream row maps to were not counted",
+    "evidence_reported": "the claim rests on evidence the pipeline reported (its rejects)",
+}
+
+
+def attribution_of(ctx: CheckContext, hop: Hop) -> str:
+    """Which rows here belong to this hop (C3-02): single_source (this dataset has one upstream),
+    shared_target_unattributed (several upstreams, no attribution: completeness is judged per hop,
+    orphans cannot be), feed_filter_unverified (a union_partition read through its feed_filter, decision
+    D5, whose disjointness and completeness are proven from build step 5), unknown (a union_partition
+    without one). `verified` comes with T1_SOURCE_ATTRIBUTION (build step 5)."""
+    ds = ctx.dataset
+    if hop.contract.mapping == "union_partition":
+        return "feed_filter_unverified" if ds.feed_filter else "unknown"
+    if len({*ds.key_map, *ds.contracts}) > 1:
+        return "shared_target_unattributed"
+    return "single_source"
+
+
+def qualifications_of(ctx: CheckContext, hop: Hop, level: str | None) -> tuple[str, ...]:
+    found = []
+    if not hop.declared:
+        found.append("inferred_contract")
+    if hop.legacy_exclusion is not None:
+        found.append("legacy_exclusion")
+    if attribution_of(ctx, hop) in ("feed_filter_unverified", "unknown"):
+        found.append("attribution_unverified")
+    if orphans_unchecked(ctx, hop) is not None:
+        found.append("orphans_unchecked")
+    if level is not None and LEVELS.index(level) > LEVELS.index("reconstructed"):
+        found.append("evidence_reported")
+    return tuple(found)
+
+
+def claim_of(hop: Hop, qualifications: tuple[str, ...]) -> str:
+    """contract-proven only under a declared contract with nothing unproven (D6; C3-02)."""
+    if not hop.declared:
+        return "inferred contract"
+    return "contract-proven" if not qualifications else f"declared contract, qualified: {', '.join(qualifications)}"
+
+
+def value_coverage(ctx: CheckContext) -> dict[str, Any]:
+    """Which values the claim verifies (C3-03): the owned_columns (identity transforms, compared as
+    sets at the version), and every other column of this dataset that is not its key, a time, the
+    partition or the file name: unverified, named, never implied checked. A completeness-only claim
+    does not need them; it discloses them."""
+    ds = ctx.dataset
+    verified = [{"upstream": u, "here": d} for u, d in ds.owned_columns.items()]
+    structural = {c.lower() for c in (*ds.key, *(t.column for t in (ds.record_time, ds.load_time) if t),
+                                      ds.partition_column, ds.file_name_column) if c}
+    owned = {d.lower() for d in ds.owned_columns.values()}
+    try:
+        columns = ctx.spark.table(ds.table).schema.fieldNames() if ds.table else []
+    except Exception:  # the table is checked elsewhere; here only the disclosure is at stake
+        return {"verified": verified, "unverified": None, "coverage": "unknown"}
+    unverified = sorted(c for c in columns if c.lower() not in structural | owned)
+    coverage = "complete" if not unverified else ("partial" if verified else "none")
+    return {"verified": verified, "unverified": unverified, "coverage": coverage}
+
+
 def scope_of(ctx: CheckContext, event: Event, hop: Hop, up: Dataset | None, level: str | None,
-             note: str | None = None) -> dict[str, Any]:
+             note: str | None = None, judged: tuple[Any, Any] | None = None) -> dict[str, Any]:
     """The result's scope (ADR-01): what its claim covers, and what it does not."""
     from hcsc.datalake.dre.config.contracts import blind_spots
 
@@ -116,22 +183,25 @@ def scope_of(ctx: CheckContext, event: Event, hop: Hop, up: Dataset | None, leve
     unchecked = orphans_unchecked(ctx, hop)
     if unchecked is not None:
         spots.append(f"orphans not checked: {unchecked}")
-    claim = ("contract-proven" if hop.declared and hop.legacy_exclusion is None else
-             "inferred contract" if not hop.declared else
-             "declared contract with an unapproved hop_exclusions entry: not contract-proven")
-    sweep = " at or before" if ctx.full_sweep else " in"
+    qualifications = qualifications_of(ctx, hop, level)
+    values = value_coverage(ctx)
+    sweep = "at or before the end of" if ctx.full_sweep else "in"
     scope = {
         "edge": hop_label(hop.upstream, ds.dataset), "mapping": hop.contract.mapping,
         "contract": "declared" if hop.declared else "inferred from key_map",
-        "contract_hash": contract_hash(hop, ds), "claim": claim,
+        "contract_hash": contract_hash(hop, ds), "claim": claim_of(hop, qualifications),
+        "qualifications": list(qualifications), "attribution": attribution_of(ctx, hop),
         "population": (f"each upstream key's latest version (by record time, among rows loaded before the window "
-                       f"end) whose deadline (its load time + {ctx.settings.sla_hours:g}h) falls{sweep} the window"),
+                       f"end) whose deadline (its load time + {ctx.settings.sla_hours:g}h) falls {sweep} the hop's "
+                       f"deadline range, which continues from its committed coverage"),
         "window": [event.window_start.isoformat(), event.window_end.isoformat()],
+        "deadline_range": [judged[0].isoformat(), judged[1].isoformat()] if judged else None,
         "cutoff": event.window_end.isoformat(), "full_sweep": ctx.full_sweep,
         "grain": {"key": list(ds.key), "version": ds.record_time.column if ds.record_time else None,
                   "history": ds.grain.history},
         "evidence_level": level, "evidence_levels": LEVEL, "blind_spots": spots,
-        "unverified_columns": [], "orphans": "checked" if unchecked is None else "not checked",
+        "values": values, "unverified_columns": values["unverified"],
+        "orphans": "checked" if unchecked is None else "not checked",
     }
     if note:
         scope["note"] = note
@@ -150,8 +220,9 @@ def unsupported(ctx: CheckContext, event: Event, hop: Hop, up: Dataset | None) -
     }
     note = f"{kind} ({source}): {reasons.get(kind, 'not judged by HOP_LEDGER')}"
     scope = scope_of(ctx, event, hop, up, None, note)
-    return did_not_run("unsupported_mapping", detail=json.dumps(scope, sort_keys=True),
-                       group_values={"upstream": hop.upstream})
+    return replace(did_not_run("unsupported_mapping", detail=json.dumps(scope, sort_keys=True),
+                               group_values={"upstream": hop.upstream}),
+                   qualifications=tuple(scope["qualifications"]))
 
 
 def ledger_params(ctx: CheckContext, event: Event, hop: Hop, up: Dataset) -> dict[str, Any] | CheckResult:
@@ -182,7 +253,7 @@ def ledger_params(ctx: CheckContext, event: Event, hop: Hop, up: Dataset) -> dic
             return did_not_run(code, detail=f"{what} {table} not found", group_values=groups)
     mapping = ds.key_map[up_id]
     up_cols = [mapping[c] for c in ds.key]
-    sla = timedelta(hours=ctx.settings.sla_hours)
+    start, end = judged_range(ctx, event, CHECK_ID, up_id)
     deletion = hop.contract.deletion
     rejects = hop.contract.rejects
     return {
@@ -200,19 +271,45 @@ def ledger_params(ctx: CheckContext, event: Event, hop: Hop, up: Dataset) -> dic
         "tombstone": deletion.tombstone if deletion else None,
         "applied_as": deletion.applied_as if deletion else "hard",
         "soft_when": deletion.soft_when if deletion else None,
-        "rejects": None if rejects is None else {
-            "table": rejects.table, "filter": rejects.condition, "reason": rejects.reason_column,
-            "key": key_string([column_expr(up, c) for c in up_cols]), "time": utc_expr(rejects.time_column, tz)},
+        "rejects": None if rejects is None else rejects_params(hop, up, up_cols, tz),
         "window_start": utc_literal(event.window_start), "window_end": utc_literal(event.window_end),
-        "deadline_start": utc_literal(event.window_start - sla), "deadline_end": utc_literal(event.window_end - sla),
-        "full_sweep": ctx.full_sweep,
+        "deadline_start": utc_literal(start), "deadline_end": utc_literal(end),
+        "pending_from": utc_literal(max(start, end)), "coverage": coverage_of(start, end), "judged": (start, end),
+        "full_sweep": ctx.full_sweep, "one_to_one": hop.contract.mapping == "identity",
     }
+
+
+def rejects_params(hop: Hop, up: Dataset, up_cols: list[str], tz: str) -> dict[str, Any]:
+    """The rejects evidence's template parameters (C3-01): how a reject is keyed, tied to a version
+    (lineage) and named (reason, rule), and which (reason, rule) labels the policy authorises."""
+    rejects, policy = hop.contract.rejects, hop.contract.reject_policy
+    lineage = rejects.lineage
+    rule = (f"concat(CAST({rejects.rule_id_column} AS STRING), '@', CAST({rejects.rule_version_column} AS STRING))"
+            if rejects.rule_id_column else None)
+    authorised = {r: p for r, p in policy.items() if p.disposition == "authorised"}
+    return {
+        "table": rejects.table, "filter": rejects.condition, "reason": rejects.reason_column,
+        "key": key_string([column_expr(up, c) for c in up_cols]), "time": utc_expr(rejects.time_column, tz),
+        "by_batch": lineage.batch is not None,
+        "lineage": (f"CAST({lineage.batch.column} AS STRING)" if lineage.batch else utc_expr(lineage.version, tz)),
+        "up_batch": f"CAST({lineage.batch.upstream_column} AS STRING)" if lineage.batch else None,
+        "rule": rule,
+        "authorised_any": sorted(r for r, p in authorised.items() if not p.rules),
+        "authorised": sorted(f"{r} {rule_id}" for r, p in authorised.items() for rule_id in p.rules),
+        "rules_required": sorted(r for r, p in authorised.items() if p.rules),
+    }
+
+
+def reason_of(label: str | None) -> str | None:
+    """A rejected label is the reason code, then the rule (id@version) when the rejects name one."""
+    return label.split(" ", 1)[0] if label else None
 
 
 def counted(rows: list[Any]) -> dict[str, Any]:
     """The summary rows as a ledger: dispositions with their labels, the populations, orphans,
     overlaps, and whether the identity holds."""
     dispositions: dict[str, dict[str | None, int]] = {d: {} for d, _, _ in DISPOSITIONS}
+    variants: dict[str | None, str] = {}  # a rejected label's class under the policy, from the SQL
     totals = {"due": 0, "pending": 0, "untimed": 0, "orphan": 0}
     overlaps: dict[str, int] = {}
     due_rows = due_keys = keyless = unassigned = 0
@@ -228,6 +325,8 @@ def counted(rows: list[Any]) -> dict[str, Any]:
             unassigned += r.n
         else:
             dispositions[r.disposition][r.label] = dispositions[r.disposition].get(r.label, 0) + r.n
+            if r.disposition == "rejected":
+                variants[r.label] = r.variant
         if r.label == "no key":
             keyless += r.n
         else:
@@ -236,15 +335,15 @@ def counted(rows: list[Any]) -> dict[str, Any]:
     buckets = sum(n for labels in dispositions.values() for n in labels.values())
     balanced = unassigned == 0 and buckets == due_rows == due_keys + keyless
     return {"dispositions": dispositions, "totals": totals, "overlaps": overlaps, "balanced": balanced,
-            "due": due_keys + keyless, "buckets": buckets}
+            "due": due_keys + keyless, "buckets": buckets, "reject_classes": variants}
 
 
 def judge(hop: Hop, ledger: dict[str, Any]) -> tuple[str, int, list[str], list[str], dict[str, str]]:
     """(state, violations, observed parts, failure reasons, reject classes) under the contract."""
     c, d, due = hop.contract, ledger["dispositions"], ledger["due"]
     total = {name: sum(labels.values()) for name, labels in d.items()}
-    reject_class = {reason: (c.reject_policy[reason].disposition if reason in c.reject_policy else "defect")
-                    for reason in d["rejected"] if reason is not None}
+    reject_class = {label: ledger.get("reject_classes", {}).get(label) or "defect"
+                    for label in d["rejected"] if label is not None}
     defect_rejects = sum(n for reason, n in d["rejected"].items() if reject_class.get(reason) == "defect")
     orphans = ledger["totals"]["orphan"]
     failures = []
@@ -264,9 +363,13 @@ def judge(hop: Hop, ledger: dict[str, Any]) -> tuple[str, int, list[str], list[s
         share = guards.get(label)
         if share is not None and due and n / due > share:
             failures.append(f"exclusion {label} covers {n} of {due} due ({n / due:.1%}), over its max_share {share:.1%}")
-    for reason, n in d["rejected"].items():
-        policy = c.reject_policy.get(reason)
-        if policy is not None and policy.disposition == "authorised" and due and n / due > policy.max_share:
+    authorised_by_reason: dict[str, int] = {}
+    for label, n in d["rejected"].items():
+        if reject_class.get(label) == "authorised":
+            authorised_by_reason[reason_of(label)] = authorised_by_reason.get(reason_of(label), 0) + n
+    for reason, n in sorted(authorised_by_reason.items()):
+        policy = c.reject_policy[reason]
+        if due and n / due > policy.max_share:
             failures.append(f"rejects {reason} cover {n} of {due} due ({n / due:.1%}), over max_share "
                             f"{policy.max_share:.1%}")
     violations = (total["unassessable"] + total["deleted_not_applied"] + total["excluded_but_present"] + defect_rejects
@@ -283,6 +386,42 @@ def judge(hop: Hop, ledger: dict[str, Any]) -> tuple[str, int, list[str], list[s
             else:
                 parts.append(f"{name} {n}")
     return (FAILED if failures else PASSED), violations, parts, failures, reject_class
+
+
+def triage(ledger: dict[str, Any], reject_class: dict[str, str], failures: list[str]) -> list[str]:
+    """What to look at for each failing part of a FAILED ledger (L13): generic actions, by disposition,
+    with counts and rule or reason labels only. HOP_LEDGER has no cause investigation; these lines
+    are its triage, printed in the digest."""
+    d, lines = ledger["dispositions"], []
+
+    def labelled(name: str, only: Any = None) -> tuple[int, str]:
+        picked = {k: n for k, n in d[name].items() if n and (only is None or only(k))}
+        labels = ", ".join(sorted(k for k in picked if k is not None))
+        return sum(picked.values()), (f" ({labels})" if labels else "")
+
+    n, labels = labelled("unassessable")
+    if n:
+        lines.append(f"{n} record(s) cannot be judged{labels}: fix the key or time values, the key normaliser, "
+                     "or the rejects' lineage")
+    n, _ = labelled("deleted_not_applied")
+    if n:
+        lines.append(f"{n} deletion(s) arrived upstream and are not applied here: check the step that applies deletes")
+    n, labels = labelled("excluded_but_present")
+    if n:
+        lines.append(f"{n} record(s) an approved exclusion keeps out are here{labels}: the exclusion is not applied "
+                     "as approved")
+    n, labels = labelled("rejected", lambda k: reject_class.get(k) == "defect")
+    if n:
+        lines.append(f"{n} record(s) rejected for a defect reason{labels}: correct the data or the rule upstream")
+    if ledger["totals"]["orphan"]:
+        lines.append(f"{ledger['totals']['orphan']} row(s) here that no upstream row maps to: look for substituted "
+                     "keys or another writer")
+    deficits = {name: sum(d[name].values()) for name in TOLERATED if sum(d[name].values())}
+    if deficits:
+        lines.append(", ".join(f"{n} {name}" for name, n in deficits.items())
+                     + ": HOP_KEY_CURRENCY and HOP_VALUE_AGREEMENT name these keys and their causes")
+    lines += [f"{f}: check that the rule is not broader than approved" for f in failures if "max_share" in f]
+    return lines
 
 
 def ceiling(ledger: dict[str, Any], reject_class: dict[str, str]) -> str:
@@ -355,11 +494,14 @@ class HopLedger(Check):
         assessed.createOrReplaceTempView(view)
         rows = ctx.spark.sql(render_sql("hop_ledger.sql.j2", p=params, mode="summary", source=view)).collect()
         ledger = counted(rows)
-        held = {"judged_view": view, "checkpoints": (assessed,)}
         state, violations, parts, failures, reject_class = judge(hop, ledger)
         level = ceiling(ledger, reject_class)
-        scope = scope_of(ctx, event, hop, up, level)
+        scope = scope_of(ctx, event, hop, up, level, judged=params["judged"])
+        if state == FAILED:
+            scope["triage"] = triage(ledger, reject_class, failures)
         scope_json = json.dumps(scope, sort_keys=True)
+        held = {"judged_view": view, "checkpoints": (assessed,), "coverage": params["coverage"],
+                "qualifications": tuple(scope["qualifications"])}
         lines = ledger_lines(hop, ledger, reject_class, failures, scope_json)
         totals = ledger["totals"]
         beside = [f"pending {totals['pending']}"] + ([f"untimed {totals['untimed']}"] if totals["untimed"] else [])

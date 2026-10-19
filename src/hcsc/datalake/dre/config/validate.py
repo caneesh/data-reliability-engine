@@ -411,10 +411,15 @@ def _check_contracts(r: _Reporter, ds_id: str) -> None:
         if c.rejects is not None and c.mapping not in KEYED:
             r.err("dataset", ds_id, loc + ("rejects",), f"rejects are matched by key, and mapping {c.mapping} is "
                 "not judged by key", "remove rejects")
-        elif c.reject_policy and c.rejects is None:
+        elif c.rejects is not None and c.rejects.rule_id_column is None:
+            for reason, policy in c.reject_policy.items():
+                if policy.rules:
+                    r.err("dataset", ds_id, loc + ("reject_policy", reason, "rules"), f"reason {reason} approves "
+                        "rules, but the rejects name no rule", "set rejects.rule_id_column and rule_version_column")
+        if c.reject_policy and c.rejects is None:
             r.err("dataset", ds_id, loc + ("reject_policy",), "reject_policy is set but no rejects evidence is: "
                 "HOP_LEDGER cannot account for a rejected record, which counts as missing",
-                "set rejects: {table, condition} once the rejects table exists (docs/evidence-contract.md)",
+                "set rejects: {table, lineage} once the rejects table exists (docs/evidence-contract.md)",
                 level="warning")
 
 

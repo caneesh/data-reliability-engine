@@ -111,7 +111,8 @@ def integrity_problems(spark: SparkSession, dq_database: str, now: datetime, gra
     stamp = lambda t: _utc(t).strftime("%Y-%m-%d %H:%M:%S")  # noqa: E731
     row = spark.sql(
         f"SELECT MAX(CASE WHEN record = 'SWEEP' AND status = 'COMPLETED' THEN recorded_at END) AS verified, "
-        f"SUM(CASE WHEN record IN ('EVIDENCE_MISMATCH', 'COMMIT_CONFLICT') AND run_date >= DATE'{hour.date().isoformat()}' "
+        f"SUM(CASE WHEN record IN ('EVIDENCE_MISMATCH', 'COMMIT_CONFLICT', 'LEDGER_UNBALANCED') "
+        f"AND run_date >= DATE'{hour.date().isoformat()}' "
         f"  AND recorded_at >= TIMESTAMP '{stamp(hour)}' AND recorded_at < TIMESTAMP '{stamp(hour + HOUR)}' "
         f"  THEN 1 ELSE 0 END) AS incidents FROM {dq_database}.dq_integrity").collect()[0]
     found = []

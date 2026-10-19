@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_check_result (
   reason_category STRING, reason_code STRING,
   population BIGINT, violations BIGINT, observed STRING, expected STRING,
   group_values MAP<STRING,STRING>,
-  severity STRING, evaluated_at TIMESTAMP, duration_ms BIGINT, detail STRING
+  severity STRING, evaluated_at TIMESTAMP, duration_ms BIGINT, detail STRING,
+  qualifications STRING, coverage_from TIMESTAMP, coverage_to TIMESTAMP
 ) PARTITIONED BY (run_date DATE) STORED AS ORC;
 
 CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_cause_result (
@@ -87,7 +88,9 @@ CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_reconciliation (
 -- record: SWEEP (an integrity sweep: status COMPLETED or FAILED, scope DAILY or FULL over
 -- scope_from to scope_to), EVIDENCE_MISMATCH (a commit's stored rows no longer match it before its
 -- evidence_kept_until), COMMIT_CONFLICT (one commit identity stored with different contents), or
--- REBASELINED (a later evaluation re-established the baseline an INVALID unit fed). The
+-- REBASELINED (a later evaluation re-established the baseline an INVALID unit fed), or
+-- LEDGER_UNBALANCED (a HOP_LEDGER evaluation whose dispositions did not add up: an engine defect,
+-- an incident that makes no unit INVALID; checkpoint 3, L5). The
 -- subject columns name the commit. Observations, not evaluations: not commit-gated.
 CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_integrity (
   run_id STRING, record STRING, status STRING,
@@ -262,15 +265,17 @@ WHERE (c.kind = 'result' AND (coalesce(r.n, 0) <> c.result_rows
 
 -- Every row of the latest evaluation per (dataset, check_id): one row for an
 -- ungrouped check, one row per group for a grouped one. healthy is the one definition of a
--- healthy result: PASSED with VALID evidence (never INVALID, UNKNOWN or EXPIRED). Latest = the latest window, then
+-- healthy result: PASSED with VALID evidence (never INVALID, UNKNOWN or EXPIRED) and no
+-- qualifications (a claim that rests on an unproven premise: an inferred contract, an unverified
+-- attribution, orphans not checked, reported evidence; checkpoint 3). Latest = the latest window, then
 -- the latest evaluation of it, so a RERUN or REPLAY of an older window never becomes the
 -- current state, while a RERUN of the current window replaces it.
 CREATE OR REPLACE VIEW {{ dq_database }}.v_latest_result AS
 SELECT evaluation_id, run_id, event_id, window_start, window_end, execution_type, feed, dataset, check_id,
        expectation_version, state, reason_category, reason_code, population,
        violations, observed, expected, group_values, severity, evaluated_at,
-       duration_ms, detail, run_date, evidence_state,
-       state = 'PASSED' AND evidence_state = 'VALID' AS healthy
+       duration_ms, detail, qualifications, coverage_from, coverage_to, run_date, evidence_state,
+       state = 'PASSED' AND evidence_state = 'VALID' AND qualifications IS NULL AS healthy
 FROM (
   SELECT r.*,
          DENSE_RANK() OVER (

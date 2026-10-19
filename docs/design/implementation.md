@@ -343,3 +343,31 @@ The output unions the due keys, keyless due rows, pending and untimed keys, and 
 - **A new disposition:** add it to `DISPOSITIONS` (in precedence, with class and level), to the `matched` array or the residual in the SQL, and to `judge` if it fails. The identity check needs nothing.
 - **A new kind for the ledger:** add it to `contracts.LEDGER_KINDS` only once the SQL reads it correctly; until then it stays unsupported, with a reason in `unsupported`.
 - **A new evidence source:** declare it on the contract, check it in `ledger_params` (`insufficient_evidence` when it is gone), and give its disposition the right evidence level.
+
+### Corrections after the checkpoint 3 review (2026-10-19)
+
+Ratified in `docs/decisions.md`, "Checkpoint 3 reviewed". Each correction, where it lives:
+
+| Correction | Code | What it does |
+| --- | --- | --- |
+| L1 coverage continuity | `checks/hop/coverage.py` (`judged_range`, `coverage_of`); `checks/hop/common.hop_params` and `ledger.ledger_params` call it; `runner.covers`, `runner.result_rows` store it; `dq_check_result.coverage_from`, `coverage_to` | One query per hop per evaluation over `v_committed_result`: the latest covering NORMAL result of an earlier window gives the range's start. Each hop check's result carries `coverage`, stored only for covering outcomes. The SQL templates take `pending_from` for pending counts |
+| C3-01 reject lineage | `config/models.RejectLineage`, `BatchLineage`, `RejectsSource.lineage`, `rule_id_column`, `rule_version_column`, `RejectReason.rules`; `config/validate._check_contracts`; `ledger.rejects_params`; `hop_ledger.sql.j2` (`rejects`, `rejected`, `unattributed`, the `variant` column) | The SQL matches rejects to the version under judgement through lineage and computes each reject's class from the policy; `counted` keeps the classes (`reject_classes`), `judge` uses them, and guards each authorised reason across its rules |
+| C3-02 union attribution | `ledger.attribution_of` | The attribution state on every scope; `attribution_unverified` for a union |
+| C3-03, C3-04 qualifications and health | `ledger.QUALIFICATIONS`, `qualifications_of`, `claim_of`, `value_coverage`; `CheckResult.qualifications`; `dq_check_result.qualifications`; `v_latest_result.healthy` | Every ledger result carries its qualifications; a qualified PASS is never healthy. The scope's `values` names verified and unverified columns |
+| L13 triage | `ledger.triage` | A FAILED ledger's scope gets `triage` |
+| Digest | `notify/digest.scope_of`, `scope_line`, `Item.qualifications`, `blind_spots`, `triage`, `Digest.qualified`; `digest.txt.j2` | The qualified-pass section; blind spots and triage under a failed ledger; the passing count counts healthy passes only |
+| L4 identity | `hop_ledger.sql.j2` (`up_tied`, `dn_tied`, `p.one_to_one`) | "not one-to-one" under `mapping: identity` |
+| L5 integrity | `store/integrity.UNBALANCED`, `INCIDENTS`, `unbalanced_records`; `runner.record_unbalanced`; `watchdog.integrity_problems` | LEDGER_UNBALANCED recorded when stored; counted as an incident |
+| L15 window hold | `checks/events.BLOCKING_CODES`, `blocking_sql` (also used by `checks/rules/schedule.py`) | `insufficient_evidence` holds the window |
+
+Tests:
+
+| Test | Proves |
+| --- | --- |
+| `checks/test_hop_coverage.py` (10 tests) | A shorter SLA leaves no gap and a longer one judges nothing twice, for HOP_KEY_CURRENCY, HOP_LEDGER and HOP_FILE_COMPLETENESS; coverage never moves back; a window that covered nothing is judged by the next; a held window starts where its first attempt did; INVALID results cover nothing; exact range bounds; a late-arriving older version; only covering results store coverage, never a marker |
+| `checks/test_hop_ledger.py` (C3 tests) | Rejects of another version, without lineage, with approved and unapproved rules, by batch; union attribution states and claim caps (overlapping, uncovered, missing filters); verified and unverified columns; triage; qualifications per premise; identity one-to-one; every disposition at once, balanced |
+| `store/test_reconciliation.py` | A qualified PASS is never healthy; LEDGER_UNBALANCED is an incident and makes no unit INVALID |
+| `checks/test_windows.py::test_insufficient_evidence_holds_the_window` | L15 |
+| `config/test_contracts.py` (lineage, rules cases) | The new validation, with file, line, field and fix |
+| `notify/test_digest.py` | Qualified passes listed and not counted; triage and blind spots printed |
+| `test_runner.py::test_a_failed_key_event_write_makes_the_run_partial_and_the_result_is_still_explained` | A failed ledger evidence write publishes a marker, which carries no coverage |

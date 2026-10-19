@@ -11,6 +11,12 @@ Changed since the last run
 {% endif %}
 {% if i.state == "FAILED" %}
     observed: {{ i.observed }}; expected: {{ i.expected }}
+{% for line in i.triage %}
+    triage: {{ line }}
+{% endfor %}
+{% if i.blind_spots %}
+    blind spots: {{ i.blind_spots | join("; ") }}
+{% endif %}
 {% if i.rule %}
     {{ i.change }}
 {% endif %}
@@ -57,6 +63,19 @@ Report only (proposed rules)
 {% for i in d.report_only %}
 - {{ i.label }}: {% if i.state == "DID_NOT_RUN" %}DID_NOT_RUN {{ i.reason }}{% else %}{{ i.state }}, {{ i.change }}{% endif %}
 
+{% endfor %}
+
+{% endif %}
+{% if d.qualified %}
+Passed with qualifications (not counted as healthy)
+{% for i in d.qualified %}
+- {{ i.label }}: {{ i.qualifications | join(", ") }}
+{% if i.scope %}
+    {{ i.scope }}
+{% endif %}
+{% if i.blind_spots %}
+    blind spots: {{ i.blind_spots | join("; ") }}
+{% endif %}
 {% endfor %}
 
 {% endif %}

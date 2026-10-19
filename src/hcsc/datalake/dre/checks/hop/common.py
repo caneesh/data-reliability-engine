@@ -3,7 +3,8 @@
 A hop is (this dataset, one upstream in its key_map). Keys are joined on the mapped key
 with each side's key_normalise, as one canonical string. Each side's feed_filter applies.
 Keys judged in a window: upstream keys whose latest load time + sla_hours falls in the
-window (judged once, at their deadline); keys with a row here loaded in the window whose
+hop's deadline range (judged once, at their deadline; the range continues from the coverage the
+hop committed, checks/hop/coverage.py); keys with a row here loaded in the window whose
 upstream deadline has passed (so a key that regresses here without an upstream change is
 judged again); and keys still open in v_open_keys. On the full sweep day, every upstream
 key past its deadline. Upstream rows matching the dataset's hop_exclusions for the upstream
@@ -15,11 +16,11 @@ from __future__ import annotations
 import hashlib
 import hmac
 from dataclasses import replace
-from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Callable
 
 from hcsc.datalake.dre.checks.base import CheckContext, CheckResult, did_not_run, error_detail, from_exception, utc_literal
 from hcsc.datalake.dre.checks.derived import source_of
+from hcsc.datalake.dre.checks.hop.coverage import coverage_of, judged_range
 from hcsc.datalake.dre.checks.keys import column_expr, key_string
 from hcsc.datalake.dre.checks.times import utc_expr
 
@@ -51,8 +52,10 @@ def per_hop(up_id: str, evaluate_hop: Callable[[], CheckResult]) -> CheckResult:
         return replace(from_exception(exc), group_values={"upstream": up_id})
 
 
-def hop_params(ctx: CheckContext, event: Event, up_id: str, up: Dataset | None) -> dict[str, Any] | CheckResult:
-    """Template parameters for one hop, or a DID_NOT_RUN result when the hop cannot be evaluated."""
+def hop_params(ctx: CheckContext, event: Event, up_id: str, up: Dataset | None,
+               check_id: str) -> dict[str, Any] | CheckResult:
+    """Template parameters for one hop, or a DID_NOT_RUN result when the hop cannot be evaluated.
+    The deadline range is the hop's own (checks/hop/coverage.py), carried on the result as `coverage`."""
     ds = ctx.dataset
     if up is None:
         return did_not_run("invalid_config", detail=f"upstream {up_id} is not configured",
@@ -77,7 +80,7 @@ def hop_params(ctx: CheckContext, event: Event, up_id: str, up: Dataset | None) 
             return did_not_run("metastore_unavailable", detail=error_detail(exc), group_values={"upstream": up_id})
         if not exists:
             return did_not_run("table_missing", detail=f"table {up.table} not found", group_values={"upstream": up_id})
-    sla = timedelta(hours=ctx.settings.sla_hours)
+    start, end = judged_range(ctx, event, check_id, up_id)
     owned = [{"up": column_expr(up, u), "dn": column_expr(ds, d)} for u, d in ds.owned_columns.items()]
     exclusion = exclusion_condition(ds, up_id, up, tz)
     filters = [f"({up.feed_filter})" if up.feed_filter else None,
@@ -97,7 +100,9 @@ def hop_params(ctx: CheckContext, event: Event, up_id: str, up: Dataset | None) 
         "dn_load": utc_expr(ds.load_time, tz) if ds.load_time is not None else None,
         "window_start": utc_literal(event.window_start), "window_end": utc_literal(event.window_end),
         "owned": owned,
-        "deadline_start": utc_literal(event.window_start - sla), "deadline_end": utc_literal(event.window_end - sla),
+        "deadline_start": utc_literal(start), "deadline_end": utc_literal(end),
+        # pending: past the range's end; a record before the range's start was judged already
+        "pending_from": utc_literal(max(start, end)), "coverage": coverage_of(start, end),
         "full_sweep": ctx.full_sweep, "hash_fn": HASH_FUNCTION,
         # hashed: compute key_hash with the secret; use_open: also judge keys open in v_open_keys
         # (NORMAL runs only: the open-key state is today's, not a historical window's)

@@ -71,12 +71,16 @@ One row per record a stage refused to carry forward, written in the same job tha
 | `batch_id`, `stage` | STRING | As in the control table |
 | `file_name` | STRING | Base name of the source file the record came from, or empty |
 | key columns of the input table | as the input | The record's key, column names and values exactly as the input table holds them (the subscriber id, member number, effective date and plan id for the enrollment chain) |
+| `record_version` | TIMESTAMP (UTC) | The version of the refused record: its source record time as the input holds it (the same column the input's `record_time` reads), so DRE can tell which version was refused. Added at checkpoint 3 (C3-01); `batch_id` serves instead when the input carries the batch id on every row |
 | `reason_code` | STRING | From the closed list below |
+| `rule_id`, `rule_version` | STRING, INT | The versioned business rule behind the reject, where one applies (`RULE_FAILED`, and `INVALID_CODE` or `INVALID_FORMAT` when a configured rule decided it); null otherwise. Added at checkpoint 3 (C3-01) |
 | `reason_detail` | STRING | A short technical note (the failing column, the parser message), no member values beyond the key columns |
 | `rejected_at` | TIMESTAMP (UTC) | When the stage refused it |
 | `run_date` | DATE | UTC date of `rejected_at` |
 
 **Reason codes** (closed list): `PARSE_ERROR` (the record could not be read), `KEY_NULL` (a key column null or blank), `MANDATORY_NULL` (a required non-key column null), `INVALID_CODE` (a value outside its allowed set), `INVALID_FORMAT` (a value not matching its pattern), `DUPLICATE_DROPPED` (a duplicate the de-dup stage discarded, with the winner's key in `reason_detail`), `JOIN_UNMATCHED` (a lookup that found no match), `RULE_FAILED` (a business rule, named in `reason_detail`).
+
+**Why lineage (checkpoint 3, C3-01).** DRE accounts for a missing record with a reject only when the reject names that record's version (`record_version`, or `batch_id` matched against the input's batch column) and, where the authorising policy names rules, an approved rule by id and version. A reject without lineage cannot explain any version: the record is reported as unassessable, never as an authorised reject. A changed rule is a new `rule_version`, so rejects before and after the change are never taken for the same rule.
 
 A record rejected at one stage never appears in a later stage's rejects. A record filtered by a filter rule is not a reject: it is counted in the control table under its rule id and stays in the input table, where the rule can be re-applied.
 

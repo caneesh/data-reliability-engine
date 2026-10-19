@@ -313,7 +313,7 @@ Precedence (the acceptance list): `test_normal_rerun_and_replay_precedence` (a R
 
 ## Checkpoint 3: HOP_LEDGER and dq_reconciliation (2026-10-18)
 
-**Status:** built; **awaits the user's review.** Step 4 is blocked until then. **CI:** run #88 on `1f30227`, green (`test`, `e2e`, `package`), with the `test-report` (JUnit XML) and `e2e-logs` artifacts kept with the run. **Decisions:** `docs/decisions.md`, "Phase 1 build step 3". **Implementation:** `docs/design/implementation.md`, "Step 3". **Evidence package:** `docs/design/evidence/checkpoint3-ledger.md` (committed-view and integrity-view output from the end-to-end store).
+**Status:** built; **reviewed 2026-10-19: changes required** (see "Checkpoint 3, revised" below). **CI:** run #88 on `1f30227`, green (`test`, `e2e`, `package`), with the `test-report` (JUnit XML) and `e2e-logs` artifacts kept with the run. **Decisions:** `docs/decisions.md`, "Phase 1 build step 3". **Implementation:** `docs/design/implementation.md`, "Step 3". **Evidence package:** `docs/design/evidence/checkpoint3-ledger.md` (committed-view and integrity-view output from the end-to-end store).
 
 ### Planned and delivered
 
@@ -391,3 +391,58 @@ L1 to L15, each with its reason, in `docs/decisions.md`, "Phase 1 build step 3".
 
 1. ~~CI green on the step 3 commit, with the test report kept.~~ Run #88, green, both artifacts kept.
 2. The user reviews checkpoint 3 and ratifies or changes L1 to L15.
+
+## Checkpoint 3, revised: the corrections C3-01 to C3-04 and the conditions on L1 to L15 (2026-10-19)
+
+**Status:** built; **awaits independent review and ratification.** Step 4 stays blocked until then. **CI:** pending (the CI line is added once the run finishes). **Decisions:** `docs/decisions.md`, "Checkpoint 3 reviewed: changes required, then the correction plan ratified". **Implementation:** `docs/design/implementation.md`, "Corrections after the checkpoint 3 review". **Model amendments:** `docs/design/reconciliation-model.md`, section 12. **Evidence package:** `docs/design/evidence/checkpoint3-corrections.md`.
+
+### The ratified decisions and their proof
+
+| Item | Decision | Code | Proving tests |
+| --- | --- | --- | --- |
+| C3-01 | Rejects need record-version lineage and, where the policy names rules, a versioned rule; unattributable rejects never authorise | `RejectsSource.lineage`, rule columns, `RejectReason.rules`; `hop_ledger.sql.j2`; `docs/evidence-contract.md` | `checks/test_hop_ledger.py::test_a_reject_of_an_earlier_version_explains_nothing_about_the_latest` (same key, two versions, reject of the earlier one), `::test_a_reject_without_lineage_cannot_explain_a_record`, `::test_a_reason_that_approves_rules_needs_an_approved_rule` (missing rule and an unapproved version), `::test_a_reject_accounts_for_a_record_only_under_an_authorising_policy` (an unauthorised reason; the share limit), `::test_a_reject_can_name_its_batch_instead_of_its_version`; `config/test_contracts.py` lineage and rules cases |
+| C3-02 | Union attribution states and claim caps now; the proof in step 5 | `ledger.attribution_of`, `qualifications_of`, `claim_of` | `::test_a_union_is_never_contract_proven_until_its_attribution_is` (overlapping filters, an uncovered filter, rows of another feed, no filter); e2e |
+| C3-03 | Persisted qualifications, claim-aware health; partial value coverage disclosed | `dq_check_result.qualifications`; `v_latest_result.healthy`; `ledger.value_coverage` | `store/test_reconciliation.py::test_a_pass_with_qualifications_is_never_healthy`; `::test_the_scope_names_verified_and_unverified_columns` (identity-only mapping, renamed owned column, none, complete, a missing owned column); `::test_kinds_the_ledger_does_not_judge_are_unsupported` (aggregate, fan_out) |
+| C3-04 | Collisions, unchecked orphans, ledger-only failures, missing evidence visible; no unqualified healthy PASS | the qualifications, `ledger.triage`, the digest | `::test_a_key_collision_after_normalisation_is_unassessable`, `::test_orphans_are_not_checked_where_rows_here_cannot_be_attributed`, `::test_a_failed_ledger_says_what_to_look_at`, `::test_a_declared_rejects_table_that_is_gone_is_insufficient_evidence`; `notify/test_digest.py::test_a_reconciliation_result_prints_its_scope_triage_and_blind_spots`, `::test_a_qualified_pass_is_listed_and_never_counted_as_healthy`; `test_runner.py::test_a_failed_key_event_write_makes_the_run_partial_and_the_result_is_still_explained` |
+| L1 | Coverage continuity for HOP_LEDGER and the existing hop checks, one shared committed-coverage calculation | `checks/hop/coverage.py`; `runner.covers`; `dq_check_result.coverage_from`, `coverage_to` | `checks/test_hop_coverage.py`: `test_a_shorter_sla_leaves_no_gap`, `test_a_longer_sla_judges_nothing_twice`, `test_a_longer_sla_with_nothing_due_yet_never_moves_coverage_back`, `test_a_window_that_covered_nothing_is_judged_by_the_next`, `test_a_held_window_judged_again_starts_where_its_first_attempt_did`, `test_invalid_results_cover_nothing`, `test_file_completeness_continues_from_its_coverage_too`, `test_the_range_bounds_are_exact`, `test_a_late_arriving_older_version_does_not_change_the_version_judged`, `test_only_covering_results_store_coverage_and_a_marker_never_does` |
+| L4 | Identity uniqueness enforced | `hop_ledger.sql.j2` (`one_to_one`) | `::test_an_identity_hop_requires_one_record_on_each_side` |
+| L5 | Unbalanced ledger fails closed and is an integrity incident | `integrity.unbalanced_records`, `runner.record_unbalanced`, watchdog | `::test_an_unbalanced_ledger_is_did_not_run_never_a_verdict`; `store/test_reconciliation.py::test_an_unbalanced_ledger_is_recorded_as_an_integrity_incident` |
+| L13 | Actionable triage for ledger-only failures | `ledger.triage`; the digest | `::test_a_failed_ledger_says_what_to_look_at`; the digest test above |
+| L14 | How the release 1 checks' states read against the ledger | spec section 6 (table) | (documentation) |
+| L15 | Insufficient evidence holds the window | `events.BLOCKING_CODES`, `blocking_sql` | `checks/test_windows.py::test_insufficient_evidence_holds_the_window` |
+| Exit | Every due record in one disposition, all at once | the ledger | `::test_the_ledger_balances_with_every_disposition_at_once` |
+
+### The acceptance criteria
+
+| Criterion | How it holds | Evidence |
+| --- | --- | --- |
+| No source record unassessably lost during SLA changes | The range starts where committed coverage ended | `test_a_shorter_sla_leaves_no_gap` (a key in the old gap is judged by every hop check) |
+| Every due ledger record has exactly one disposition | The identity is asserted on every evaluation; an unbalanced ledger fails closed and is an incident | `test_the_ledger_balances_with_every_disposition_at_once`, `test_an_unbalanced_ledger_is_did_not_run_never_a_verdict`, the e2e check |
+| Missing or insufficient evidence never advances coverage as successful | Only covering outcomes record coverage; markers and INVALID results never do; insufficient_evidence holds the window | `test_only_covering_results_store_coverage_and_a_marker_never_does`, `test_invalid_results_cover_nothing`, `test_insufficient_evidence_holds_the_window` |
+| Unsupported or unproven contracts cannot generate an unqualified healthy PASS | Unsupported kinds are DID_NOT_RUN; every unproven premise is a stored qualification, and `healthy` needs none | `test_a_pass_with_qualifications_is_never_healthy`, `test_kinds_the_ledger_does_not_judge_are_unsupported`, the e2e check (no qualified PASS healthy) |
+| The scope distinguishes verified from unverified claims | `claim`, `qualifications`, `attribution`, `values`, `blind_spots` | `test_the_scope_names_verified_and_unverified_columns`, `test_only_a_declared_contract_with_nothing_unproven_claims_contract_proven_completeness` |
+| The existing reconciliation checks are consistent with the ledger's temporal model | They share `judged_range`, and the cause engine through `hop_params` | `checks/test_hop_coverage.py` (HOP_KEY_CURRENCY, HOP_FILE_COMPLETENESS, HOP_LEDGER alike) |
+| All regression and failure-injection tests pass | The full suite and e2e | The CI line above |
+
+### Invariants re-verified
+
+- **Hard constraints.** Writes only through `store/writer.py`, to the dq store; no pipeline change; nothing source-specific; guard tests pass. The coverage read is a read of DRE's own committed results.
+- **Three result states.** No new state or reason code; `insufficient_evidence` now holds its window.
+- **Tests restated, none weakened:** the reject tests gained lineage (a reject without it no longer authorises); the claim test now expects a qualification wherever orphans cannot be checked; `store/test_reconciliation.py::test_a_run_publishes_each_hop_ledger_with_its_result` expected the declared union to claim contract-proven (the step 3 reading of L11, now revised) and now expects the capped claim and an unhealthy result; the digest golden files gained the qualified-pass section, triage and blind spots.
+
+### Interpretations for the reviewer
+
+In `docs/decisions.md` ("Interpretations, for the reviewer to confirm or correct"): only HOP_LEDGER writes qualifications; a qualified pass does not change the digest's subject; the coverage read is bounded by `history_lookback_days`; an unattributable reject affects only a record absent here.
+
+### Residual risks
+
+1. **The audit must write lineage.** Until the team's rejects table carries `record_version` (or a batch id the upstream also carries) and, where needed, `rule_id` and `rule_version`, every reject leaves its record unassessable: a hop with rejects fails rather than passes on them.
+2. **Every ledger pass is qualified today** on the synthetic configuration (an inferred contract, or an unproven union attribution), so none is healthy until contracts are declared and step 5 proves attribution.
+3. **Coverage beyond the lookback.** A hop that covered nothing for longer than `history_lookback_days` restarts from the window's own range; the weekly full sweep judges what lies before it.
+4. **Catch-up cost.** After a long run of non-covering windows, the next covering window judges the whole span at once, within the check's budget.
+5. **Schema migration** (as before): an existing store keeps its older `dq_commit` and `dq_check_result`; `dre install --check` reports them, nothing migrates them yet. No store is deployed.
+
+### Gate to step 4
+
+1. CI green on the corrections commit, with the test report kept.
+2. Independent review of the corrections; the user ratifies the revised checkpoint 3.

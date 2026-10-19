@@ -121,6 +121,49 @@ def test_a_run_publishes_each_hop_ledger_with_its_result(spark, tmp_path) -> Non
     assert by_line["due"] == buckets == 2 and by_line["missing"] == 2
     assert {x.scope for x in lines} == {result.detail}
     scope = json.loads(result.detail)
-    # the sample declares the hop a union_partition attributed by gold's feed_filter (decision D5)
-    assert (scope["mapping"], scope["claim"], scope["orphans"]) == ("union_partition", "contract-proven", "checked")
+    # the sample declares the hop a union_partition read through gold's feed_filter (decision D5); its
+    # attribution is proven only from build step 5, so the claim is capped and the result never healthy (C3-02)
+    assert (scope["mapping"], scope["claim"], scope["orphans"]) == (
+        "union_partition", "declared contract, qualified: attribution_unverified", "checked")
+    [current] = spark.table(f"{replay.dq}.v_latest_result").where(f"evaluation_id = '{result.evaluation_id}'").collect()
+    assert (current.qualifications, current.healthy) == ("attribution_unverified", False)
     assert spark.table(f"{replay.dq}.v_commit_integrity").count() == 0
+
+
+def test_a_pass_with_qualifications_is_never_healthy(spark, store) -> None:
+    """Checkpoint 3 (C3-03, C3-04): healthy is PASSED, with VALID evidence and no qualifications. A PASS
+    whose claim rests on an unproven premise (an inferred contract, an unverified attribution, orphans
+    not checked, reported evidence) is published as it is, and never counted as healthy."""
+    day = date(2026, 3, 5)
+    rows = [{"evaluation_id": f"q-{ds}", "run_id": "rq", "dataset": ds, "check_id": "HOP_LEDGER", "state": "PASSED",
+             "window_end": AT, "evaluated_at": AT, "qualifications": quals, "run_date": day}
+            for ds, quals in (("proven", None), ("inferred", "inferred_contract"),
+                              ("union", "attribution_unverified,orphans_unchecked"))]
+    append_rows(spark, store, "dq_check_result", rows)
+    healthy = {r.dataset: (r.healthy, r.qualifications) for r in spark.table(f"{store}.v_latest_result")
+               .where("run_id = 'rq'").collect()}
+    assert healthy == {"proven": (True, None), "inferred": (False, "inferred_contract"),
+                       "union": (False, "attribution_unverified,orphans_unchecked")}
+
+
+def test_an_unbalanced_ledger_is_recorded_as_an_integrity_incident(spark, store) -> None:
+    """L5: a ledger that does not balance fails closed (DID_NOT_RUN / PLATFORM / ledger_unbalanced, the
+    window held) and is recorded in dq_integrity as LEDGER_UNBALANCED when stored, so the digest's
+    integrity line and the watchdog report it. No stored evidence changed: no unit becomes INVALID."""
+    from hcsc.datalake.dre import runner
+    from hcsc.datalake.dre.store import integrity, runs
+
+    run = runs.new_run(now=datetime(2026, 3, 6, 12, tzinfo=UTC))
+    rows = [{"evaluation_id": "unbal", "run_id": run.run_id, "dataset": "gold", "check_id": "HOP_LEDGER",
+             "state": "DID_NOT_RUN", "reason_category": "PLATFORM", "reason_code": "ledger_unbalanced",
+             "observed": "due 2 (pending 0): delivered 1; 1 in buckets for 2 due", "run_date": run.run_date},
+            {"evaluation_id": "fine", "run_id": run.run_id, "dataset": "gold", "check_id": "HOP_LEDGER",
+             "state": "PASSED", "run_date": run.run_date}]
+    append_rows(spark, store, "dq_check_result", rows)
+    runner.record_unbalanced(spark, store, run, rows)
+    [incident] = spark.table(f"{store}.dq_integrity").where("record = 'LEDGER_UNBALANCED'").collect()
+    assert (incident.evaluation_id, incident.detail) == ("unbal", "due 2 (pending 0): delivered 1; 1 in buckets for 2 due")
+    assert integrity.freshness(spark, store, datetime(2026, 3, 6, 13, tzinfo=UTC)).new_incidents == 1
+    states = {r.evaluation_id: r.evidence_state for r in spark.table(f"{store}.v_commit_state")
+              .where(f"run_id = '{run.run_id}'").collect()}
+    assert states == {"unbal": "VALID", "fine": "VALID"}

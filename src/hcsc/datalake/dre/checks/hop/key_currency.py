@@ -54,9 +54,13 @@ class KeyCurrency(Check):
 
     @staticmethod
     def _hop(ctx: CheckContext, event: Event, up_id: str, up: Dataset | None) -> CheckResult:
-        params = hop_params(ctx, event, up_id, up)
+        params = hop_params(ctx, event, up_id, up, "HOP_KEY_CURRENCY")
         if isinstance(params, CheckResult):
             return params
+        return replace(KeyCurrency._judge(ctx, up_id, up, params), coverage=params["coverage"])
+
+    @staticmethod
+    def _judge(ctx: CheckContext, up_id: str, up: Dataset | None, params: dict) -> CheckResult:
         view = None
         if params["hashed"]:
             view = judged_view(ctx.dataset.dataset, up_id)

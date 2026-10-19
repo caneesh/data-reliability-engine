@@ -109,6 +109,21 @@ Level D unless the row says otherwise. Each row names the build step (`docs/desi
 | The protected-queue rule (`yarn_queue` never in `protected_queues`) | 08 | U (static) | `config/test_contracts.py::...[queue-is-protected]` | 8 (checked at run start) |
 | Run budget (40 minutes), concurrency cap, kill switch, backpressure, load test | 08 | D. Build step 8; the load test is O |
 
+## 6a. Checkpoint 3 corrections (ratified 2026-10-19)
+
+| Requirement | Ref | Level | Tests |
+| --- | --- | --- | --- |
+| No record lost or judged twice when `sla_hours` changes; a window that covered nothing is judged by the next; one shared, committed-coverage calculation for every hop check | L1 | **U, I** | `checks/test_hop_coverage.py` (all); e2e: every covering hop result has `coverage_to` |
+| Missing or insufficient evidence never advances coverage | L1, L15 | **U** | `checks/test_hop_coverage.py::test_only_covering_results_store_coverage_and_a_marker_never_does`, `::test_invalid_results_cover_nothing`; `checks/test_windows.py::test_insufficient_evidence_holds_the_window` |
+| A reject explains a record only through version or batch lineage and, where the policy names rules, an approved rule | C3-01 | **U** | `checks/test_hop_ledger.py::test_a_reject_of_an_earlier_version_explains_nothing_about_the_latest`, `::test_a_reject_without_lineage_cannot_explain_a_record`, `::test_a_reason_that_approves_rules_needs_an_approved_rule`, `::test_a_reject_can_name_its_batch_instead_of_its_version`, `::test_a_reject_accounts_for_a_record_only_under_an_authorising_policy`; `config/test_contracts.py::...[rejects-need-lineage, lineage-is-one-of, rule-needs-its-version, policy-rules-need-rule-columns, policy-rule-format, defect-takes-no-rules]` |
+| Union attribution states; a union never contract-proven before step 5 | C3-02 | **U, I** | `checks/test_hop_ledger.py::test_a_union_is_never_contract_proven_until_its_attribution_is`; e2e (gold: `attribution_unverified`) |
+| Persisted qualifications; a qualified PASS never healthy | C3-03, C3-04 | **U, I** | `store/test_reconciliation.py::test_a_pass_with_qualifications_is_never_healthy`; `checks/test_hop_ledger.py::test_only_a_declared_contract_with_nothing_unproven_claims_contract_proven_completeness`; `notify/test_digest.py::test_a_qualified_pass_is_listed_and_never_counted_as_healthy`; e2e (no qualified PASS healthy) |
+| Verified and unverified columns named; partial coverage disclosed | C3-03 | **U** | `checks/test_hop_ledger.py::test_the_scope_names_verified_and_unverified_columns` |
+| Collisions, unchecked orphans, ledger-only failures, missing evidence visible in status, scope, digest | C3-04 | **U** | `::test_a_key_collision_after_normalisation_is_unassessable`, `::test_orphans_are_not_checked_where_rows_here_cannot_be_attributed`, `::test_a_failed_ledger_says_what_to_look_at`, `::test_a_declared_rejects_table_that_is_gone_is_insufficient_evidence`; `notify/test_digest.py::test_a_reconciliation_result_prints_its_scope_triage_and_blind_spots`; `test_runner.py::test_a_failed_key_event_write_makes_the_run_partial_and_the_result_is_still_explained` |
+| Identity uniqueness | L4 | **U** | `checks/test_hop_ledger.py::test_an_identity_hop_requires_one_record_on_each_side` |
+| Unbalanced ledger fails closed and is an integrity incident | L5 | **U** | `checks/test_hop_ledger.py::test_an_unbalanced_ledger_is_did_not_run_never_a_verdict`; `store/test_reconciliation.py::test_an_unbalanced_ledger_is_recorded_as_an_integrity_incident` |
+| Every due record in exactly one disposition, all dispositions at once | Exit criterion | **U** | `checks/test_hop_ledger.py::test_the_ledger_balances_with_every_disposition_at_once` |
+
 ## 7. What the matrix says
 
 - **Every built guarantee is tested, at hop scope** (sections 1 and 2). The CI jobs cover unit, replay, end-to-end and packaging, all in local-mode Spark.

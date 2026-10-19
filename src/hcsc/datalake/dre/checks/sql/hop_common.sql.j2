@@ -118,9 +118,10 @@ judged AS (
 {% endif %}
 ){% if counts %},
 pending_keys AS (
-  -- upstream keys not judged because their deadline has not passed yet (loaded within sla_hours)
+  -- upstream keys not judged because their deadline has not passed yet (loaded within sla_hours);
+  -- after a longer sla_hours, keys before the range's start were judged already, not pending
   SELECT u.k FROM up_keys u LEFT ANTI JOIN judged j ON j.k = u.k
-  WHERE u.up_load_ts >= {{ p.deadline_end }}
+  WHERE u.up_load_ts >= {{ p.pending_from }}
 ),
 excluded_keys AS (
   -- upstream keys whose every row a hop exclusion keeps out, in the range judged

@@ -18,6 +18,10 @@ added by hand). The sweep finds the second kind, and records it here:
 - REBASELINED: a later evaluation re-established the baseline an INVALID unit fed (the hop's open
   keys by a full sweep, the partition states by a new recording), so it no longer compromises
   the checks that read it.
+- LEDGER_UNBALANCED (checkpoint 3, L5): a HOP_LEDGER evaluation whose dispositions did not add up to
+  its due population, an engine defect. Its result is DID_NOT_RUN / PLATFORM / ledger_unbalanced (fail
+  closed, the window held); the record makes it an integrity incident the digest and the watchdog
+  report. It does not make any unit INVALID: no stored evidence changed.
 
 These rows are observations, like dq_run and dq_file: they are not commit-gated.
 """
@@ -38,6 +42,8 @@ if TYPE_CHECKING:
     from hcsc.datalake.dre.store.runs import Run
 
 SWEEP, MISMATCH, CONFLICT, REBASELINED = "SWEEP", "EVIDENCE_MISMATCH", "COMMIT_CONFLICT", "REBASELINED"
+UNBALANCED = "LEDGER_UNBALANCED"
+INCIDENTS = (MISMATCH, CONFLICT, UNBALANCED)  # what the digest and the watchdog report as incidents
 DAILY, FULL = "DAILY", "FULL"
 COMPLETED, FAILED = "COMPLETED", "FAILED"
 # The checks that build on earlier evidence: HOP_KEY_CURRENCY judges the hop's open keys from its
@@ -62,6 +68,15 @@ def record(run: Run, kind: str, **fields: Any) -> dict[str, Any]:
     """One dq_integrity row recorded by `run`."""
     return {"run_id": run.run_id, "record": kind, "recorded_at": datetime.now(timezone.utc),
             "run_date": run.run_date, **fields}
+
+
+def unbalanced_records(run: Run, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """A LEDGER_UNBALANCED record for each stored result row that says its ledger did not balance
+    (counts only, from the row's observed text)."""
+    return [record(run, UNBALANCED, subject_run_id=r["run_id"], subject_run_date=r["run_date"],
+                   evaluation_id=r["evaluation_id"], commit_kind="result", dataset=r["dataset"],
+                   check_id=r["check_id"], detail=r.get("observed"))
+            for r in rows if r.get("reason_code") == "ledger_unbalanced"]
 
 
 def conflict_record(run: Run, commit: Any, stored: set[tuple]) -> dict[str, Any]:
@@ -212,7 +227,7 @@ def freshness(spark: SparkSession, dq_database: str, now: datetime) -> Freshness
     row = spark.sql(
         f"SELECT MAX(CASE WHEN record = '{SWEEP}' AND status = '{COMPLETED}' THEN recorded_at END) AS completed, "
         f"MAX(CASE WHEN record = '{SWEEP}' AND status = '{FAILED}' THEN recorded_at END) AS failed, "
-        f"SUM(CASE WHEN record IN ('{MISMATCH}', '{CONFLICT}') AND run_date >= DATE'{day}' "
+        f"SUM(CASE WHEN record IN ({', '.join(repr(k) for k in INCIDENTS)}) AND run_date >= DATE'{day}' "
         f"  AND recorded_at >= TIMESTAMP '{(now - timedelta(days=1)):%Y-%m-%d %H:%M:%S}' THEN 1 ELSE 0 END) AS incidents "
         f"FROM {dq_database}.dq_integrity").collect()[0]
     completed = as_utc(row.completed) if row.completed else None

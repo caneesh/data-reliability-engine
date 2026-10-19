@@ -379,3 +379,15 @@ The ten Phase 1 sign-off scenarios from the assessment, each with the expected r
 - `fan_out` lineage stays unsupported.
 - `versions: all` (an SCD2 target that must hold every version, not only the latest) is deferred.
 - The engine never infers an exclusion, a reject reason or a lineage edge it was not given.
+
+## 12. Amendments ratified at checkpoint 3 (2026-10-19)
+
+The model is frozen; these amendments were ratified by the user at checkpoint 3 (`docs/decisions.md`, "Phase 1 build step 3" and "Checkpoint 3 reviewed"). Where they differ from the sections above, they win. The spec (section 6, HOP\_LEDGER) states the rules as built.
+
+1. **Populations (section 2).** A record is due in the window where its deadline falls (L1), within the hop's deadline range, which continues from the coverage the hop committed: a change of the SLA neither leaves a gap nor judges a record twice, and a window whose result covered nothing is judged by the next. The cutoff is the window end (L2). On the full sweep, untimed records are due, as unassessable (L8).
+2. **Unassessable (section 3, row 1)** also covers: under `identity`, more than one record at the version on either side ("not one-to-one", L4); a reject of an absent record that names no version; a reject whose reason's policy lists rules but which names none (C3-01).
+3. **Rejects (section 5).** A reject accounts for a record only through lineage: the refused record's version, or its batch, matching the version under judgement; a policy entry may list the approved rules (id@version) its rejects must name (C3-01, replacing L3). The rejects table's columns are in `docs/evidence-contract.md`.
+4. **The claim (section 1).** A result stores its qualifications (an inferred contract, an unapproved `hop_exclusions` entry, an unverified union attribution, orphans not checked, reported evidence). It is contract-proven only with none, and a qualified PASS is never healthy (C3-02 to C3-04, replacing L11). The scope names the verified and unverified columns; partial value coverage is disclosed and does not qualify a completeness claim (C3-03, replacing L12).
+5. **Union attribution (section 6.1).** Until T1\_SOURCE\_ATTRIBUTION proves the predicates disjoint and complete (build step 5), a union's attribution is `feed_filter_unverified` (or `unknown` without a predicate) and its claim stays qualified (C3-02).
+6. **Identity (section 3).** An unbalanced ledger fails closed, holds its window and is recorded as an integrity incident (L5).
+7. **Overlaps (section 3).** Only the explaining rules (unassessable to rejected) overlap; delivered to missing describe what the target shows when no rule explains the record (L7).

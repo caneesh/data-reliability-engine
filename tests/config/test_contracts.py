@@ -123,10 +123,29 @@ CASES = [
     ("authorised-reject-needs-guard", GOLD, MAPPING, MAPPING + "    reject_policy: { INVALID_CODE: { disposition: authorised } }\n",
      f"{HOP}.reject_policy.INVALID_CODE", "reject_policy:", "needs max_share", "set max_share"),
     ("rejects-need-a-key", GOLD, MAPPING, "    mapping: join_contribution\n    reference: { sub_id: subscriberidnumber }\n"
-     "    rejects: { table: example_db.enrollment_rejects }\n", f"{HOP}.rejects", "rejects:", "matched by key",
+     "    rejects: { table: example_db.enrollment_rejects, lineage: { version: { column: record_version } } }\n", f"{HOP}.rejects", "rejects:", "matched by key",
      "remove rejects"),
-    ("rejects-need-a-table", GOLD, MAPPING, MAPPING + "    rejects: { condition: \"stage = 'x'\" }\n",
+    ("rejects-need-a-table", GOLD, MAPPING, MAPPING + "    rejects: { condition: \"stage = 'x'\", lineage: { version: { column: record_version } } }\n",
      f"{HOP}.rejects.table", "rejects:", "missing", "add `table`"),
+    # checkpoint 3, C3-01: a reject must name the record version it refused, and a rule by id and version
+    ("rejects-need-lineage", GOLD, MAPPING, MAPPING + "    rejects: { table: example_db.enrollment_rejects }\n",
+     f"{HOP}.rejects.lineage", "rejects:", "missing", "add `lineage`"),
+    ("lineage-is-one-of", GOLD, MAPPING, MAPPING + "    rejects: { table: example_db.enrollment_rejects, lineage: "
+     "{ version: { column: record_version }, batch: { column: batch_id, upstream_column: batch_id } } }\n",
+     f"{HOP}.rejects.lineage", "rejects:", "exactly one of version and batch", "set version"),
+    ("rule-needs-its-version", GOLD, MAPPING, MAPPING + "    rejects: { table: example_db.enrollment_rejects, lineage: { version: { column: record_version } }, "
+     "rule_id_column: rule_id }\n", f"{HOP}.rejects", "rejects:", "by its id and its version",
+     "rule_version_column"),
+    ("policy-rules-need-rule-columns", GOLD, MAPPING, MAPPING + "    rejects: { table: example_db.enrollment_rejects, lineage: { version: { column: record_version } } }\n"
+     "    reject_policy: { INVALID_CODE: { disposition: authorised, max_share: 0.02, rules: [code_check@2] } }\n",
+     f"{HOP}.reject_policy.INVALID_CODE.rules", "reject_policy:", "the rejects name no rule", "rule_id_column"),
+    ("policy-rule-format", GOLD, MAPPING, MAPPING +
+     "    reject_policy: { INVALID_CODE: { disposition: authorised, max_share: 0.02, rules: [code_check] } }\n",
+     f"{HOP}.reject_policy.INVALID_CODE.rules[0]", "reject_policy:", "is not a rule id@version", "<id>@<version>"),
+    ("defect-takes-no-rules", GOLD, MAPPING, MAPPING +
+     "    reject_policy: { PARSE_ERROR: { disposition: defect, rules: [parser@1] } }\n",
+     f"{HOP}.reject_policy.PARSE_ERROR", "reject_policy:", "rules approve rejects of an authorised reason",
+     "remove rules"),
     ("bad-history", GOLD, "  history: mutable", "  history: sometimes", "grain.history", "history: sometimes",
      "not allowed", "append_only"),
     ("queue-is-protected", DEFAULTS, "hmac_secret_file: null", "hmac_secret_file: null\nyarn_queue: shared_q\n"
@@ -211,7 +230,8 @@ def test_a_reject_policy_without_rejects_evidence_is_a_warning(conf: Path) -> No
     [hop] = [h for h in hops(config) if h.dataset == "gold_member_coverage"]
     assert "no rejects evidence: a record the pipeline rejected counts as missing (the reject policy cannot be " \
         "applied)" in blind_spots(config, hop)
-    edit(conf, GOLD, policy, policy + "    rejects: { table: example_db.enrollment_rejects, condition: \"stage = 'x'\" }\n")
+    edit(conf, GOLD, policy, policy + "    rejects: { table: example_db.enrollment_rejects, condition: \"stage = 'x'\", "
+         "lineage: { version: { column: record_version } } }\n")
     config, errors, warnings = validate_conf(conf)
     assert errors == [] and not [w for w in warnings if w.field == f"{HOP}.reject_policy"]
     [hop] = [h for h in hops(config) if h.dataset == "gold_member_coverage"]

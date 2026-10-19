@@ -33,13 +33,25 @@ KEY_HASH = "a" * 64
 SLOTS = ["2026-01-16T06:30:00+00:00", "2026-01-16T10:00:00+00:00"]
 LEDGER_SCOPE = json.dumps({  # HOP_LEDGER's detail: the result's scope (build step 3), shortened
     "edge": "example_curated_enrollment->gold_member_coverage", "mapping": "union_partition", "contract": "declared",
-    "claim": "contract-proven", "evidence_level": "observed", "cutoff": "2026-01-16T12:05:00+00:00",
-    "full_sweep": False, "blind_spots": ["deletions not modelled", "as-of replay unavailable"]})
+    "claim": "declared contract, qualified: attribution_unverified", "evidence_level": "observed",
+    "cutoff": "2026-01-16T12:05:00+00:00", "full_sweep": False,
+    "values": {"verified": [{"upstream": "enddate", "here": "mbr_mbrshp_covrg_end_dt"}],
+               "unverified": ["covrg_agrmt_desc", "src_sys_nm"], "coverage": "partial"},
+    "blind_spots": ["attribution (each row here owned by exactly one source) is not proven until build step 5",
+                    "as-of replay unavailable: gold_member_coverage is mutable"],
+    "triage": ["1 stale: HOP_KEY_CURRENCY and HOP_VALUE_AGREEMENT name these keys and their causes"]})
+PROVIDER_SCOPE = json.dumps({
+    "edge": "provider_roster_raw->provider_directory", "mapping": "dedup", "contract": "inferred from key_map",
+    "claim": "inferred contract", "evidence_level": "observed", "cutoff": "2026-01-16T12:05:00+00:00",
+    "full_sweep": False, "values": {"verified": [{"upstream": "specialty", "here": "specialty"}], "unverified": [],
+                                    "coverage": "complete"},
+    "blind_spots": ["kind dedup is inferred from key_map, not declared: its results can never claim "
+                    "contract-proven completeness"]})
 
 
 def result(run: str, dataset: str, check: str, state: str, groups: dict | None = None, *, feed="example_realtime",
            violations: int | None = None, observed: str | None = None, expected: str | None = None,
-           reason: tuple[str, str] | None = None, detail: str | None = None) -> dict:
+           reason: tuple[str, str] | None = None, detail: str | None = None, qualifications: str | None = None) -> dict:
     group_text = ",".join(f"{k}={v}" for k, v in sorted((groups or {}).items()))
     return {"evaluation_id": f"{run[-1]}-{dataset}-{check}-{group_text}", "run_id": run, "event_id": f"e-{run[-1]}",
             "window_start": AT[run], "window_end": AT[run], "execution_type": "NORMAL", "feed": feed,
@@ -47,7 +59,7 @@ def result(run: str, dataset: str, check: str, state: str, groups: dict | None =
             "reason_category": reason[0] if reason else None, "reason_code": reason[1] if reason else None,
             "population": None if state == "DID_NOT_RUN" else 10, "violations": violations,
             "observed": observed, "expected": expected, "group_values": groups or {},
-            "evaluated_at": AT[run], "detail": detail, "run_date": AT[run].date()}
+            "evaluated_at": AT[run], "detail": detail, "qualifications": qualifications, "run_date": AT[run].date()}
 
 
 def cause(evaluation: str, ref: str, order: int, code: str, state: str) -> dict:
@@ -104,7 +116,8 @@ def digests(spark, config):
                observed="0 missing and 1 stale of 1 keys", expected="every upstream key present at its latest version"),
         result(CURRENT, gold, "HOP_LEDGER", "FAILED", UPSTREAM, violations=1,
                observed="due 3 (pending 0): delivered 2, stale 1; orphans 0; fails: 1 stale",
-               expected="every due record in exactly one authorised disposition", detail=LEDGER_SCOPE),
+               expected="every due record in exactly one authorised disposition", detail=LEDGER_SCOPE,
+               qualifications="attribution_unverified"),
         result(CURRENT, gold, "T1_VOLUME", "PASSED", {"slot": "00:30", "slot_time": "2026-01-16 00:30"}),
         result(CURRENT, gold, "WINDOW_GAP", "DID_NOT_RUN", reason=("DATA_UNAVAILABLE", "window_gap")),
         result(CURRENT, gold, "one_row_per_coverage", "FAILED", SRC_A, violations=3),
@@ -115,6 +128,9 @@ def digests(spark, config):
         result(CURRENT, cur, "HOP_FILE_COMPLETENESS", "FAILED", {"upstream": "example_raw_enrollment"}, violations=1,
                observed="1 of 4 upstream files have fewer rows here", expected="every upstream row of each file present here"),
         result(CURRENT, "provider_directory", "T1_KEY_NULLS", "PASSED", feed="provider_directory_merge", violations=0),
+        result(CURRENT, "provider_directory", "HOP_LEDGER", "PASSED", {"upstream": "provider_roster_raw"},
+               feed="provider_directory_merge", violations=0, observed="due 3 (pending 0): delivered 3",
+               detail=PROVIDER_SCOPE, qualifications="inferred_contract"),
     ]
     on_time = f"3-{gold}-T1_ON_TIME-"
     currency = f"3-{gold}-HOP_KEY_CURRENCY-upstream=example_curated_enrollment"
@@ -192,14 +208,31 @@ def test_key_samples_are_bounded_in_sql_and_read_only_when_wanted(spark, config)
     assert read_run(spark, DQ, run_id, at.date(), with_samples=False)["samples"] == {}
 
 
-def test_a_reconciliation_result_prints_its_scope_in_one_line(digests) -> None:
-    """Model section 1: the digest prints the scope beside the state, so a PASS is never read as more
-    than it claims. Results whose detail is not a scope get no line."""
+def test_a_reconciliation_result_prints_its_scope_triage_and_blind_spots(digests) -> None:
+    """Model section 1 and checkpoint 3 (C3-03, C3-04, L13): the digest prints the scope beside the state,
+    with how many columns the values were verified for, the blind spots and, for a FAILED ledger,
+    its triage lines. Results whose detail is not a scope get none."""
     from hcsc.datalake.dre.notify.digest import scope_line
 
     [ledger] = [i for i in digests["membership-gold"].changed if i.check_id == "HOP_LEDGER"]
     assert ledger.scope == ("scope: example_curated_enrollment->gold_member_coverage union_partition (declared); "
-                            "claim contract-proven; evidence observed; cutoff 2026-01-16T12:05:00+00:00; "
-                            "2 blind spots (dre validate lists them)")
-    assert ledger.scope in digests["membership-gold"].text()
+                            "claim declared contract, qualified: attribution_unverified; evidence observed; "
+                            "values verified for 1 of 3 columns; cutoff 2026-01-16T12:05:00+00:00")
+    text = digests["membership-gold"].text()
+    assert ledger.scope in text
+    assert "    triage: 1 stale: HOP_KEY_CURRENCY and HOP_VALUE_AGREEMENT name these keys and their causes" in text
+    assert "    blind spots: attribution (each row here owned by exactly one source) is not proven" in text
     assert scope_line(json.dumps({"slots": SLOTS})) is None and scope_line("not json") is None and scope_line(None) is None
+
+
+def test_a_qualified_pass_is_listed_and_never_counted_as_healthy(digests) -> None:
+    """C3-03, C3-04: a PASS that rests on something unproven (here an inferred contract) is listed under
+    "Passed with qualifications" with its qualifications and blind spots, and is not in the passing count."""
+    d = digests["provider-data"]
+    [qualified] = d.qualified
+    assert (qualified.check_id, qualified.qualifications) == ("HOP_LEDGER", ["inferred_contract"])
+    assert d.passing == 1  # T1_KEY_NULLS only
+    text = d.text()
+    assert "Passed with qualifications (not counted as healthy)\n- provider_directory HOP_LEDGER " \
+           "[upstream=provider_roster_raw]: inferred_contract" in text
+    assert "blind spots: kind dedup is inferred from key_map" in text
