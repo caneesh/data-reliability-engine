@@ -26,6 +26,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from hcsc.datalake.dre import operations
 from hcsc.datalake.dre.causes.base import CauseContext
 from hcsc.datalake.dre.causes.engine import explain, failure_type, summarise
 from hcsc.datalake.dre.checks.budget import BudgetExceeded, within_budget
@@ -367,7 +368,8 @@ def upstreams_of(config: Config, ds: Dataset) -> dict[str, Dataset]:
 def check_context(spark: SparkSession, config: Config, planned: Planned, event: Event,
                   landing_problems: dict[str, CheckResult] | None = None, key_secret: bytes | None = None,
                   budget_minutes: float | None = None, record_key_events: bool = True,
-                  force_full_sweep: bool = False) -> CheckContext:
+                  force_full_sweep: bool = False, defer_sweep: bool = False) -> CheckContext:
+    """defer_sweep: backpressure (operations.py) defers the calendar's full sweep; force_full_sweep wins."""
     ds = planned.dataset
     landing_problem = (landing_problems or {}).get(planned.feed.feed) if planned.feed else None
     return CheckContext(
@@ -375,7 +377,7 @@ def check_context(spark: SparkSession, config: Config, planned: Planned, event: 
         config.defaults.dq_database, landing_problem,
         upstreams=upstreams_of(config, ds),
         key_secret=key_secret,
-        full_sweep=force_full_sweep or is_full_sweep(config, ds.dataset, event),
+        full_sweep=force_full_sweep or (not defer_sweep and is_full_sweep(config, ds.dataset, event)),
         budget_minutes=budget_minutes, scan_mb_per_minute=config.defaults.scan_mb_per_minute,
         record_key_events=record_key_events, history_since=history_since(config, event.window_end),
     )
@@ -384,9 +386,9 @@ def check_context(spark: SparkSession, config: Config, planned: Planned, event: 
 def evaluate(spark: SparkSession, config: Config, planned: Planned, event: Event,
              landing_problems: dict[str, CheckResult] | None = None, key_secret: bytes | None = None,
              budget_minutes: float | None = None, record_key_events: bool = True,
-             force_full_sweep: bool = False) -> Evaluation:
+             force_full_sweep: bool = False, defer_sweep: bool = False) -> Evaluation:
     ctx = check_context(spark, config, planned, event, landing_problems, key_secret, budget_minutes,
-                        record_key_events, force_full_sweep)
+                        record_key_events, force_full_sweep, defer_sweep)
     results, duration_ms = run_check(planned.check, ctx, event)
     return Evaluation(planned, event, results, datetime.now(timezone.utc), duration_ms, ctx)
 
@@ -999,8 +1001,8 @@ def unchanged(rows: list[dict[str, Any]], stored: dict[str, tuple[Any, ...]]) ->
 def _preflight(spark: SparkSession, conf: str, feed_id: str | None,
                selection: Selection) -> tuple[Config, bytes | None] | int:
     """Everything a run needs before it starts, or the exit code that says why it cannot: valid
-    configuration, a known feed, a historical window that is historical, the store installed, no
-    other NORMAL run in progress, the HMAC secret readable."""
+    configuration, a known feed, a historical window that is historical, a YARN queue DRE may use,
+    the store installed, no other NORMAL run in progress, the HMAC secret readable."""
     config = load_config(conf, "run")
     if config is None:
         return EXIT_CANNOT_START
@@ -1010,6 +1012,10 @@ def _preflight(spark: SparkSession, conf: str, feed_id: str | None,
     problem = selection.problem(datetime.now(timezone.utc))
     if problem is not None:
         print(f"dre run: {problem}")
+        return EXIT_CANNOT_START
+    refusal = operations.queue_refusal(spark, config)  # before any Spark job (ADR-08)
+    if refusal is not None:
+        print(f"dre run: {refusal}")
         return EXIT_CANNOT_START
     db = config.defaults.dq_database
     missing = missing_objects(spark, db)
@@ -1102,6 +1108,11 @@ def run(spark: SparkSession, conf: str, feed_id: str | None = None, selection: S
     normal = kind == "NORMAL"
     run_record = runs.start_run(spark, db, conf_dir=conf, execution_type=kind)
     print(f"dre run: started {run_record.run_id} ({kind} run, {run_record.started_at:%Y-%m-%d %H:%M} UTC)")
+    # ADR-08: the kill switch (read now and before each check) and, for NORMAL runs, the run budget.
+    halt = operations.Halt(config, config.defaults.run_budget_minutes if normal else None)
+    if halt.switch() is not None:
+        print(f"kill switch: on at the start of the run ({halt.switched}); every check is written DID_NOT_RUN / disabled")
+    sweeps = operations.Sweeps()
     written = expected = 0
     investigations = Investigations()
     publisher = Publisher(spark, db, run_record, config.defaults.commit_batch, investigations,
@@ -1119,6 +1130,12 @@ def run(spark: SparkSession, conf: str, feed_id: str | None = None, selection: S
         gap_rows: list[GapRow] = []
         if normal:
             jobs, landing, gap_rows = normal_jobs(spark, config, planned_all, run_record, feed_id)
+            jobs = operations.order(jobs)  # on-time and completeness checks first (ADR-08)
+            if halt.switched is None:
+                sweeps = operations.plan_sweeps(spark, config, run_record, jobs, lambda d, e: is_full_sweep(config, d, e),
+                                                history_since(config, run_record.started_at))
+                for line in sweeps.lines:
+                    print(line)
             stored: dict[str, tuple[Any, ...]] = {}
         else:
             print(f"note: a {kind} reads the tables as they are now, not as they were in the window; rows "
@@ -1139,22 +1156,30 @@ def run(spark: SparkSession, conf: str, feed_id: str | None = None, selection: S
                 budget = config.dataset_settings(ds_id).compute_budget_minutes - spent.get((ds_id, event.event_id), 0.0)
             check_id = planned.check.check_id
             tainted = compromised.of(ds_id, check_id)
-            evaluation = evaluate(spark, config, planned, event, landing, key_secret, budget,
-                                  record_key_events=normal,
-                                  force_full_sweep=tainted is not None and check_id == "HOP_KEY_CURRENCY")
+            stopped = halt.check()
+            if stopped is not None:  # the kill switch or the run budget: a result like any other (ADR-08)
+                evaluation = Evaluation(planned, event, [stopped], datetime.now(timezone.utc), 0)
+            else:
+                evaluation = evaluate(spark, config, planned, event, landing, key_secret, budget,
+                                      record_key_events=normal,
+                                      force_full_sweep=(tainted is not None and check_id == "HOP_KEY_CURRENCY")
+                                      or ds_id in sweeps.forced, defer_sweep=ds_id in sweeps.deferred)
             if tainted is not None and check_id == "T1_PARTITION_DRIFT":
                 evaluation = without_pass(evaluation)
             spent[(ds_id, event.event_id)] = spent.get((ds_id, event.event_id), 0.0) + evaluation.duration_ms / 60000
             remaining = investigation_budget(config, ds_id, spent.get((ds_id, event.event_id), 0.0))
             rows = result_rows(evaluation, run_record, kind)
-            if unchanged(rows, stored):  # RERUN, REPLAY: the same outcome is stored already
+            disabled = stopped is not None and stopped.reason_code == "disabled"
+            if not disabled and unchanged(rows, stored):  # RERUN, REPLAY: the same outcome is stored already
                 written += 1
                 print(f"{ds_id} {planned.check.check_id}: unchanged since its stored result; not written again")
                 drop_judged_views(spark, evaluation)
                 continue
             stored_rows, complete, commits = write_evaluation(spark, db, evaluation, rows, run_record,
                                                               WRITE_BUDGET_MINUTES)
-            publisher.add(commits, complete, after=rebaselines(run_record, evaluation, tainted, complete))
+            # A disabled check's result is committed but not counted as written: the run ends PARTIAL (ADR-08).
+            publisher.add(commits, 0 if disabled else complete,
+                          after=rebaselines(run_record, evaluation, tainted, complete))
             record_unbalanced(spark, db, run_record, stored_rows)
             rows = stored_rows
             explained.update(r["evaluation_id"] for r in rows)
@@ -1163,7 +1188,13 @@ def run(spark: SparkSession, conf: str, feed_id: str | None = None, selection: S
                 print(line)
             drop_judged_views(spark, evaluation)
         publisher.flush()  # the run's remaining commits, before anything reads this run's results
-        if normal:
+        for line in halt.lines():
+            print(line)
+        halted = halt.switch() is not None or halt.spent()
+        if normal and halted:
+            print("pending cause investigations and the integrity sweep: not run (kill switch on or run budget "
+                  "spent); the next run does them")
+        if normal and not halted:
             try:
                 for line in retry_investigations(spark, config, run_record, key_secret, investigations, explained,
                                                  publisher):

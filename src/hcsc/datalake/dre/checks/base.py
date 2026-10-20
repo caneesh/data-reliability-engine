@@ -42,12 +42,14 @@ REASONS: dict[str, str] = {
     "evidence_incomplete": "PLATFORM",  # the result was stored but its key events were not: evaluated again
     "evidence_invalid": "PLATFORM",  # its baseline's evidence was found compromised after publication (R1)
     "ledger_unbalanced": "PLATFORM",  # HOP_LEDGER: the dispositions do not add up to the due population (an engine defect)
+    "disabled": "PLATFORM",  # the kill switch was on: not run, the run ends PARTIAL, the window is held (ADR-08)
     "table_missing": "CONFIGURATION",
     "column_missing": "CONFIGURATION",
     "incompatible_type": "CONFIGURATION",
     "invalid_config": "CONFIGURATION",
     "unsupported_mapping": "CONFIGURATION",  # HOP_LEDGER: the hop's mapping kind is not judged (ADR-02)
     "budget_exceeded": "BUDGET",
+    "run_budget_exceeded": "BUDGET",  # reached after the run budget was spent: not run, the window is held (ADR-08)
     "upstream_check_failed": "DEPENDENCY",
     "premise_unconfirmed": "DEPENDENCY",
     "insufficient_evidence": "DEPENDENCY",  # HOP_LEDGER: evidence the contract requires cannot be read

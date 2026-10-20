@@ -95,6 +95,13 @@ def _dq_database(value: str) -> str:
         raise invalid(str(exc), "use a plain identifier, e.g. dq") from None
 
 
+def _absolute_path(value: str) -> str:
+    if not (PurePosixPath(value).is_absolute() or PureWindowsPath(value).is_absolute()):
+        raise invalid(f"{value!r} is not an absolute path",
+                      "give the absolute path the platform team names for it (a deployment value), or null")
+    return value
+
+
 def _regex(value: str) -> str:
     try:
         re.compile(value)
@@ -315,6 +322,15 @@ class Defaults(SettingsOverride):
     # they live in the deployed configuration only.
     yarn_queue: NonEmptyStr | None = None
     protected_queues: list[NonEmptyStr] = []
+    # ADR-08, build step 8 (operations.py): a NORMAL run evaluates its checks in priority order and
+    # writes each one it reaches after run_budget_minutes as DID_NOT_RUN / BUDGET / run_budget_exceeded;
+    # the kill switch is a file (a deployment value, null until named) whose presence, read at the
+    # start and between checks, writes every remaining check as DID_NOT_RUN / PLATFORM / disabled; a
+    # NORMAL run after one that took more than backpressure_share of the run budget defers the weekly
+    # full sweep to the next run that is not under backpressure.
+    run_budget_minutes: float = Field(default=40, gt=0)
+    kill_switch_file: Annotated[str, AfterValidator(_absolute_path)] | None = None
+    backpressure_share: float = Field(default=0.8, gt=0, le=1)
 
     @model_validator(mode="after")
     def _check(self) -> Defaults:

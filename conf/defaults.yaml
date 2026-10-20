@@ -49,3 +49,6 @@ history_lookback_days: 400    # how far back (run_date) the hourly reads of the 
 watchdog_owner: null          # whose recipients get watchdog alerts; null: every address in recipients
 compute_budget_scope: check   # check: each check gets compute_budget_minutes; dataset: a dataset's checks share it
 scan_mb_per_minute: null      # cluster throughput; set it to refuse checks whose estimated scan exceeds the budget
+run_budget_minutes: 40        # ADR-08: a NORMAL run's checks share this; one reached after it is DID_NOT_RUN / run_budget_exceeded
+kill_switch_file: null        # ADR-08: absolute path whose presence stops runs between checks (a deployment value, not yet named)
+backpressure_share: 0.8       # ADR-08: after a NORMAL run longer than this share of the run budget, the weekly full sweep is deferred
