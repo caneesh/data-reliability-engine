@@ -35,10 +35,13 @@ if TYPE_CHECKING:
     from hcsc.datalake.dre.checks.events import Event
 
 
-def judged_range(ctx: CheckContext, event: Event, check_id: str, up_id: str) -> tuple[datetime, datetime]:
+def judged_range(ctx: CheckContext, event: Event, check_id: str, up_id: str, group: str = "upstream",
+                 sla_hours: float | None = None) -> tuple[datetime, datetime]:
     """(start, end) of the deadline range this hop judges in this window, in UTC. start can be at
-    or after end (nothing is due yet after a longer sla_hours)."""
-    sla = timedelta(hours=ctx.settings.sla_hours)
+    or after end (nothing is due yet after a longer sla_hours). `group` is the group_values key the
+    results are grouped by and `up_id` its value; `sla_hours` replaces the dataset's (CHAIN_COMPLETENESS:
+    group `chain`, `<source>-><terminal>`, and the sum of the edge SLAs along the path)."""
+    sla = timedelta(hours=ctx.settings.sla_hours if sla_hours is None else sla_hours)
     start, end = event.window_start - sla, event.window_end - sla
     if ctx.dq_database is None or not ctx.spark.catalog.tableExists(f"{ctx.dq_database}.dq_check_result"):
         return start, end
@@ -47,7 +50,7 @@ def judged_range(ctx: CheckContext, event: Event, check_id: str, up_id: str) -> 
         f"SELECT MAX(CASE WHEN evidence_state <> 'INVALID' THEN coverage_to END) AS covered_to, "
         f"MIN(window_start) AS first_start "
         f"FROM {ctx.dq_database}.v_committed_result "
-        f"WHERE dataset = '{ctx.dataset.dataset}' AND check_id = '{check_id}' AND group_values['upstream'] = '{up_id}' "
+        f"WHERE dataset = '{ctx.dataset.dataset}' AND check_id = '{check_id}' AND group_values['{group}'] = '{up_id}' "
         f"AND execution_type = 'NORMAL' AND window_end <= {utc_literal(event.window_start)}{since}").collect()[0]
     if row.covered_to is not None:
         return as_utc(row.covered_to), end

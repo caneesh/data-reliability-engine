@@ -1,0 +1,102 @@
+{# CHAIN_COMPLETENESS (build step 6; docs/design/reconciliation-model.md section 7). Every identifier and
+   literal comes from validated configuration (dataset ids, mapping kinds) or from checks/hop/chain.py.
+
+   mode edge: one row per source record the chain judges at one edge (e), read from the edge's ledger
+   (hop_ledger.sql.j2 mode assessed, e.assessed). The first edge's due, pending and untimed records are
+   the chain's source records (src = the edge's upstream key; a keyless row has src NULL); a later edge
+   judges the records the previous edge delivered, mapped forward (e.carried, mode forward). outcome:
+   carried (delivered here: judged at the next edge), accounted (an authorised disposition), lost (any
+   other class: deficit, breach, defect or unknown), pending (pending here, or not loaded upstream as of
+   the cutoff), untimed (first edge only), unobservable (an edge the ledger does not judge, or one record
+   mapped to several keys here).
+   mode forward: the records the previous edge delivered (f.state), mapped to this edge's key through the
+   rows of the dataset between them (f.table): src, k (NULL unless exactly one key), keyed, fanout, why.
+   mode keys: the distinct keys of a forward mapping, the ledger's `carried` view.
+   mode fate: each source record's one outcome, from every edge's rows that did not carry it on and the
+   last rows that did (ending: reached at the terminal, or unobservable at an unjudged edge).
+   mode summary: fate rows counted per (edge, outcome, disposition, label, class).
+   mode population: the first edge's rows counted per line (due, pending, untimed).
+   mode events: key events for the exception keys only (lost, unobservable): key_hash, key_value, event,
+   state_detail, as dq_key_event takes them. #}
+{% if mode == "edge" %}
+WITH a AS (
+  SELECT line, k, disposition, label,
+         coalesce(variant, CASE disposition{% for d, c in e.classes %} WHEN '{{ d }}' THEN '{{ c }}'{% endfor %} END) AS cls
+  FROM {{ e.assessed }}
+  WHERE line IN ('due', 'pending', 'untimed')
+),
+per_record AS (
+{% if e.first %}
+  SELECT k AS src, k, TRUE AS keyed, 1 AS fanout, CAST(NULL AS STRING) AS why, line, disposition, label, cls FROM a
+{% else %}
+  SELECT c.src, c.k, c.keyed, c.fanout, c.why, a.line, a.disposition, a.label, a.cls
+  FROM {{ e.carried }} c LEFT JOIN a ON a.k = c.k
+{% endif %}
+),
+placed AS (
+  SELECT src, k, line, disposition, label, cls, why,
+         CASE WHEN fanout > 1 THEN 'fanout' WHEN NOT keyed THEN 'unkeyed' WHEN line IS NULL THEN 'unseen'
+              ELSE line END AS state
+  FROM per_record
+)
+SELECT src, k, line, '{{ e.edge }}' AS edge,
+       CASE state WHEN 'fanout' THEN 'unobservable' WHEN 'unkeyed' THEN 'lost' WHEN 'unseen' THEN 'pending'
+                  WHEN 'pending' THEN 'pending' WHEN 'untimed' THEN 'untimed'
+{% if e.judged %}
+                  ELSE CASE cls WHEN 'ok' THEN 'carried' WHEN 'authorised' THEN 'accounted' ELSE 'lost' END
+{% else %}
+                  ELSE 'unobservable'
+{% endif %}
+       END AS outcome,
+       CASE state WHEN 'unkeyed' THEN 'unassessable'
+                  WHEN 'due' THEN {% if e.judged %}disposition{% else %}CAST(NULL AS STRING){% endif %} END AS disposition,
+       CASE state WHEN 'fanout' THEN 'one record maps to several keys here' WHEN 'unkeyed' THEN why
+                  WHEN 'unseen' THEN 'not loaded upstream as of the cutoff'
+                  WHEN 'due' THEN {% if e.judged %}label{% else %}CAST(NULL AS STRING){% endif %} END AS label,
+       CASE state WHEN 'fanout' THEN 'unknown' WHEN 'unkeyed' THEN 'unknown'
+                  WHEN 'due' THEN {% if e.judged %}cls{% else %}'unknown'{% endif %} ELSE 'population' END AS cls
+FROM placed
+{% elif mode == "forward" %}
+WITH c AS (
+  SELECT src, k FROM {{ f.state }} WHERE outcome = 'carried'
+),
+m AS (
+  SELECT DISTINCT {{ f.prev_key }} AS k_prev, {{ f.next_key }} AS k_next, {{ f.next_keyed }} AS keyed
+  FROM {{ f.table }}
+  WHERE {{ f.prev_keyed }}{% if f.filter %} AND {{ f.filter }}{% endif %}
+
+),
+joined AS (
+  SELECT c.src, m.k_next, m.keyed, m.k_prev IS NOT NULL AS found FROM c LEFT JOIN m ON m.k_prev = c.k
+),
+grouped AS (
+  SELECT src, collect_set(CASE WHEN keyed THEN k_next END) AS ks, MAX(CASE WHEN found THEN 1 ELSE 0 END) AS found
+  FROM joined GROUP BY src
+)
+SELECT src, CASE WHEN size(ks) = 1 THEN element_at(ks, 1) END AS k, size(ks) > 0 AS keyed, size(ks) AS fanout,
+       CASE WHEN found = 0 THEN 'not found at {{ f.previous }}' WHEN size(ks) = 0 THEN 'no key' END AS why
+FROM grouped
+{% elif mode == "keys" %}
+SELECT DISTINCT k FROM {{ source }} WHERE k IS NOT NULL
+{% elif mode == "fate" %}
+{% for v in views %}
+SELECT src, edge, outcome, disposition, label, cls FROM {{ v }} WHERE outcome <> 'carried'
+UNION ALL
+{% endfor %}
+SELECT src, '{{ ending.edge }}' AS edge, '{{ ending.outcome }}' AS outcome,
+       {% if ending.disposition %}'{{ ending.disposition }}'{% else %}CAST(NULL AS STRING){% endif %} AS disposition,
+       {% if ending.label %}'{{ ending.label }}'{% else %}CAST(NULL AS STRING){% endif %} AS label,
+       '{{ ending.cls }}' AS cls
+FROM {{ ending.view }} WHERE outcome = 'carried'
+{% elif mode == "summary" %}
+SELECT edge, outcome, disposition, label, cls, COUNT(*) AS n
+FROM {{ source }}
+GROUP BY edge, outcome, disposition, label, cls
+{% elif mode == "population" %}
+SELECT line, COUNT(*) AS n FROM {{ source }} GROUP BY line
+{% else %}
+SELECT {{ hash_fn }}(src) AS key_hash, src AS key_value, upper(outcome) AS event,
+       concat(coalesce(disposition, outcome), ' at ', edge) AS state_detail
+FROM {{ source }}
+WHERE outcome IN ('lost', 'unobservable') AND src IS NOT NULL
+{% endif %}

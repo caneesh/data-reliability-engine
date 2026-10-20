@@ -18,6 +18,8 @@
      loaded in the window (only when every row here belongs to this hop: checks/hop/ledger.py
      orphans_unchecked).
    The check materialises it once and reads mode summary from it (`source`).
+   p.carried (optional, CHAIN_COMPLETENESS): a view of the distinct keys a chain carries to this edge;
+   only those keys are candidates, and keyless rows are not reported (they cannot be carried).
    mode summary: rows per (line, disposition, label) with how many rows and distinct keys, and the
    overlap pairs. #}
 {% if mode == "assessed" %}
@@ -43,7 +45,11 @@ WITH up_rows AS (
 up_cut AS (
   SELECT * FROM up_rows WHERE load_ts IS NULL OR load_ts < {{ p.window_end }}
 ),
-{% if p.full_sweep %}
+{% if p.get("carried") %}
+-- CHAIN_COMPLETENESS (checks/hop/chain.py): only the keys the chain carries to this edge (a view of
+-- distinct k); a key's every version is still read to find its latest
+up_cand AS (SELECT u.* FROM up_cut u LEFT SEMI JOIN {{ p.carried }} c ON c.k = u.k WHERE u.keyed),
+{% elif p.full_sweep %}
 up_cand AS (SELECT * FROM up_cut WHERE keyed),
 {% else %}
 -- only keys with a row loaded since the judged range began can be due or pending; this narrows the
@@ -230,12 +236,14 @@ SELECT 'due' AS line, k, disposition,
             ELSE 'defect' END AS variant,
        matched
 FROM placed
+{% if not p.get("carried") %}
 UNION ALL
 SELECT 'due' AS line, CAST(NULL AS STRING) AS k, 'unassessable' AS disposition, 'no key' AS label,
        CAST(NULL AS STRING) AS variant, array('unassessable') AS matched
 FROM up_cut
 WHERE NOT keyed AND {% if p.full_sweep %}(load_ts < {{ p.deadline_end }} OR load_ts IS NULL){% else %}load_ts < {{ p.deadline_end }} AND load_ts >= {{ p.deadline_start }}{% endif %}
 
+{% endif %}
 UNION ALL
 SELECT 'pending' AS line, k, CAST(NULL AS STRING) AS disposition, CAST(NULL AS STRING) AS label,
        CAST(NULL AS STRING) AS variant, CAST(array() AS ARRAY<STRING>) AS matched

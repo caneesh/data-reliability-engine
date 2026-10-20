@@ -16,6 +16,7 @@ checks:
   - HOP_KEY_CURRENCY
   - HOP_VALUE_AGREEMENT
   - HOP_LEDGER        # build step 3: one result per hop of kind identity, dedup, merge or union_partition
+  - CHAIN_COMPLETENESS  # build step 6, parametrised: runs on a chain's source where check_params names its terminal
 
 # Cause checks per failure type, in order (spec section 7); see file_cyclic.yaml.
 causes:

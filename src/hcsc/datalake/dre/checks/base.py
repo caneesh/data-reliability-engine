@@ -35,6 +35,9 @@ REASONS: dict[str, str] = {
     "partition_missing": "DATA_UNAVAILABLE",
     "landing_unreadable": "DATA_UNAVAILABLE",
     "empty_population": "DATA_UNAVAILABLE",
+    # CHAIN_COMPLETENESS: no record lost, but some crossed an edge the ledger cannot judge (default taken:
+    # never holds a window; the unobservable edge does not become observable by waiting)
+    "partial_chain": "DATA_UNAVAILABLE",
     "window_gap": "DATA_UNAVAILABLE",  # a held span given up after max_window_hours: never checked
     "metastore_unavailable": "PLATFORM",
     "hdfs_unavailable": "PLATFORM",
@@ -154,6 +157,9 @@ class CheckContext:
     # The check's parameters (an instance of Check.params_model), resolved by resolve_params (called from
     # run_check) from the pattern's defaults, the feed's and the dataset's `check_params`; None without.
     params: Any = None
+    # The loaded configuration (config/loader.Config), for a check that reads beyond the dataset's own
+    # upstreams (CHAIN_COMPLETENESS follows a key_map path to its terminal); None when built by hand.
+    config: Any = None
 
 
 class Check(ABC):
