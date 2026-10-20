@@ -635,7 +635,9 @@ class RejectsSource(Model):
 class EdgeContract(Model):
     """The reconciliation contract of one hop (this dataset, one upstream): reconciliation model
     sections 3 to 6. `reference` (join_contribution): this dataset's column -> the contributor's key
-    column. `precedence` (survivorship): the upstreams in order, the winner first. `rejects`: where
+    column. `contributes` (join_contribution): the contributor's column -> this dataset's column it
+    supplies, compared by HOP_CONTRIBUTION. `precedence` (survivorship): the upstreams in order, the
+    winner first. `rejects`: where
     the rejects evidence the reject policy applies to is read (without it, a rejected record counts
     as missing)."""
 
@@ -645,6 +647,7 @@ class EdgeContract(Model):
     deletion: Deletion | None = None
     tolerance: Tolerance = Tolerance()
     reference: dict[Identifier, Identifier] = {}
+    contributes: dict[Identifier, Identifier] = {}
     precedence: list[Identifier] = []
     rejects: RejectsSource | None = None
 

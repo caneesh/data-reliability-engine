@@ -4,9 +4,9 @@ docs/design/reconciliation-model.md sections 1 to 5; ADR-01, ADR-02, ADR-04, ADR
 One result per hop (group `upstream`). The due population is each upstream key whose version under
 judgement (its latest by record time, among rows loaded before the window end) has its deadline
 (that version's load time + sla_hours) in the window. Each due record lands in the first matching
-disposition, in the model's precedence: unassessable, deleted, deleted_not_applied,
-excluded[rule@version], excluded_but_present, rejected[reason], superseded, delivered, divergent,
-stale, missing. The engine asserts the identity (every due record in exactly one bucket); when it
+disposition, in the model's precedence: unassessable, deleted, superseded[winner],
+deleted_not_applied, excluded[rule@version], excluded_but_present, rejected[reason], delivered,
+divergent, stale, missing. The engine asserts the identity (every due record in exactly one bucket); when it
 does not hold, the result is DID_NOT_RUN / ledger_unbalanced, an engine defect, never PASSED or
 FAILED. Pending and untimed records, orphans (rows here no upstream row maps to) and overlap
 diagnostics are reported beside the ledger.
@@ -14,9 +14,18 @@ diagnostics are reported beside the ledger.
 FAILED when any record is unassessable, in a breach (deleted_not_applied, excluded_but_present,
 orphans) or a defect reject reason; when a deficit (missing, stale, divergent) exceeds its
 tolerance; or when an exclusion or an authorised reject reason exceeds its max_share of the due
-records. PASSED otherwise. Only hops of kind identity, dedup, merge and union_partition are judged;
-the others are DID_NOT_RUN / unsupported_mapping (an inferred aggregate included: aggregation is never
-reconciled from an inferred kind, D6 condition 3).
+records. PASSED otherwise. Only hops of kind identity, dedup, merge, union_partition and survivorship
+are judged; the others are DID_NOT_RUN / unsupported_mapping (an inferred aggregate included:
+aggregation is never reconciled from an inferred kind, D6 condition 3; a join_contribution
+contributor is checked by HOP_CONTRIBUTION, its rows counted by the primary edge's ledger).
+
+Build step 5 (workstreams-c4-c8.md section 3.3). A union_partition hop's attribution is `verified`
+when this evaluation proves its siblings' feed_filters disjoint and complete over the table, with the
+SQL T1_SOURCE_ATTRIBUTION runs (checks/hop/attribution.py); otherwise it stays
+`feed_filter_unverified` (or `unknown`) and the claim keeps `attribution_unverified`. Under
+survivorship (model section 6.3), a due key that a higher-precedence upstream delivers as of the same
+cutoff (its latest version is what this dataset holds, compared as `delivered` is) is
+`superseded[<winner>]` on a lower edge; otherwise the lower edge judges it normally.
 
 Every result carries its scope (in `detail`, and on every dq_reconciliation row): the edge, the kind,
 whether the contract is declared or inferred and its hash, the claim (contract-proven only under a
@@ -45,6 +54,7 @@ from hcsc.datalake.dre.checks.times import utc_expr
 
 if TYPE_CHECKING:
     from hcsc.datalake.dre.checks.events import Event
+    from hcsc.datalake.dre.checks.hop.attribution import Proof
     from hcsc.datalake.dre.config.contracts import Hop
     from hcsc.datalake.dre.config.models import Dataset
 
@@ -53,11 +63,13 @@ CHECK_ID = "HOP_LEDGER"
 DISPOSITIONS = (
     ("unassessable", "unknown", "observed"),
     ("deleted", "authorised", "reconstructed"),
+    # survivorship only (build step 5), labelled with the winner: ranked after deleted (workstreams-c4-c8.md
+    # section 3.3), so a record the winner owns here is never judged by the loser's presence rules
+    ("superseded", "authorised", "observed"),
     ("deleted_not_applied", "breach", "reconstructed"),
     ("excluded", "authorised", "reconstructed"),
     ("excluded_but_present", "breach", "reconstructed"),
     ("rejected", "authorised", "reported"),  # or defect, by the reject policy
-    ("superseded", "authorised", "observed"),  # survivorship only: build step 5
     ("delivered", "ok", "observed"),
     ("divergent", "deficit", "observed"),
     ("stale", "deficit", "observed"),
@@ -110,34 +122,38 @@ def orphans_unchecked(ctx: CheckContext, hop: Hop) -> str | None:
 QUALIFICATIONS = {
     "inferred_contract": "the hop's kind is inferred from key_map, not declared",
     "legacy_exclusion": "an exclusion comes from hop_exclusions: no id, version, approval or volume guard",
-    "attribution_unverified": "the rows here are not proven to belong to this source (T1_SOURCE_ATTRIBUTION, "
-                              "build step 5)",
+    "attribution_unverified": "the rows here are not proven to belong to this source: this evaluation did not "
+                              "prove the siblings' feed_filters disjoint and complete over the table "
+                              "(T1_SOURCE_ATTRIBUTION)",
     "orphans_unchecked": "rows here that no upstream row maps to were not counted",
     "evidence_reported": "the claim rests on evidence the pipeline reported (its rejects)",
 }
 
 
-def attribution_of(ctx: CheckContext, hop: Hop) -> str:
+def attribution_of(ctx: CheckContext, hop: Hop, proof: Proof | None = None) -> str:
     """Which rows here belong to this hop (C3-02): single_source (this dataset has one upstream),
     shared_target_unattributed (several upstreams, no attribution: completeness is judged per hop,
-    orphans cannot be), feed_filter_unverified (a union_partition read through its feed_filter, decision
-    D5, whose disjointness and completeness are proven from build step 5), unknown (a union_partition
-    without one). `verified` comes with T1_SOURCE_ATTRIBUTION (build step 5)."""
+    orphans cannot be), and for a union_partition read through its feed_filter (decision D5):
+    verified when this evaluation's proof (checks/hop/attribution.py) found the siblings' predicates
+    disjoint and complete over the table, feed_filter_unverified otherwise; unknown (a union_partition
+    without one)."""
     ds = ctx.dataset
     if hop.contract.mapping == "union_partition":
-        return "feed_filter_unverified" if ds.feed_filter else "unknown"
+        if not ds.feed_filter:
+            return "unknown"
+        return "verified" if proof is not None and proof.verified else "feed_filter_unverified"
     if len({*ds.key_map, *ds.contracts}) > 1:
         return "shared_target_unattributed"
     return "single_source"
 
 
-def qualifications_of(ctx: CheckContext, hop: Hop, level: str | None) -> tuple[str, ...]:
+def qualifications_of(ctx: CheckContext, hop: Hop, level: str | None, proof: Proof | None = None) -> tuple[str, ...]:
     found = []
     if not hop.declared:
         found.append("inferred_contract")
     if hop.legacy_exclusion is not None:
         found.append("legacy_exclusion")
-    if attribution_of(ctx, hop) in ("feed_filter_unverified", "unknown"):
+    if attribution_of(ctx, hop, proof) in ("feed_filter_unverified", "unknown"):
         found.append("attribution_unverified")
     if orphans_unchecked(ctx, hop) is not None:
         found.append("orphans_unchecked")
@@ -173,7 +189,8 @@ def value_coverage(ctx: CheckContext) -> dict[str, Any]:
 
 
 def scope_of(ctx: CheckContext, event: Event, hop: Hop, up: Dataset | None, level: str | None,
-             note: str | None = None, judged: tuple[Any, Any] | None = None) -> dict[str, Any]:
+             note: str | None = None, judged: tuple[Any, Any] | None = None,
+             proof: Proof | None = None) -> dict[str, Any]:
     """The result's scope (ADR-01): what its claim covers, and what it does not."""
     from hcsc.datalake.dre.config.contracts import blind_spots
 
@@ -183,14 +200,14 @@ def scope_of(ctx: CheckContext, event: Event, hop: Hop, up: Dataset | None, leve
     unchecked = orphans_unchecked(ctx, hop)
     if unchecked is not None:
         spots.append(f"orphans not checked: {unchecked}")
-    qualifications = qualifications_of(ctx, hop, level)
+    qualifications = qualifications_of(ctx, hop, level, proof)
     values = value_coverage(ctx)
     sweep = "at or before the end of" if ctx.full_sweep else "in"
     scope = {
         "edge": hop_label(hop.upstream, ds.dataset), "mapping": hop.contract.mapping,
         "contract": "declared" if hop.declared else "inferred from key_map",
         "contract_hash": contract_hash(hop, ds), "claim": claim_of(hop, qualifications),
-        "qualifications": list(qualifications), "attribution": attribution_of(ctx, hop),
+        "qualifications": list(qualifications), "attribution": attribution_of(ctx, hop, proof),
         "population": (f"each upstream key's latest version (by record time, among rows loaded before the window "
                        f"end) whose deadline (its load time + {ctx.settings.sla_hours:g}h) falls {sweep} the hop's "
                        f"deadline range, which continues from its committed coverage"),
@@ -203,6 +220,10 @@ def scope_of(ctx: CheckContext, event: Event, hop: Hop, up: Dataset | None, leve
         "values": values, "unverified_columns": values["unverified"],
         "orphans": "checked" if unchecked is None else "not checked",
     }
+    if proof is not None:  # a union hop: what this evaluation's attribution proof found, and why it failed
+        scope["attribution_proof"] = proof.as_dict()
+    if hop.contract.mapping == "survivorship":
+        scope["precedence"] = list(hop.contract.precedence)
     if note:
         scope["note"] = note
     return scope
@@ -214,8 +235,8 @@ def unsupported(ctx: CheckContext, event: Event, hop: Hop, up: Dataset | None) -
     reasons = {
         "aggregate": "aggregation is not reconciled by the ledger yet; it is never reconciled from an inferred kind "
                      "(the group-level hop checks still run)",
-        "join_contribution": "a contributor is checked by HOP_CONTRIBUTION (build step 5), not by a completeness ledger",
-        "survivorship": "survivorship is judged from build step 5",
+        "join_contribution": "a contributor is checked by HOP_CONTRIBUTION, not by a completeness ledger: the "
+                             "primary edge's ledger counts each row once",
         "fan_out": "one upstream record to several records cannot be judged",
     }
     note = f"{kind} ({source}): {reasons.get(kind, 'not judged by HOP_LEDGER')}"
@@ -251,6 +272,9 @@ def ledger_params(ctx: CheckContext, event: Event, hop: Hop, up: Dataset) -> dic
         if not exists:
             what = "the rejects evidence" if code == "insufficient_evidence" else "table"
             return did_not_run(code, detail=f"{what} {table} not found", group_values=groups)
+    winners = winner_params(ctx, hop)
+    if isinstance(winners, CheckResult):
+        return winners
     mapping = ds.key_map[up_id]
     up_cols = [mapping[c] for c in ds.key]
     start, end = judged_range(ctx, event, CHECK_ID, up_id)
@@ -276,7 +300,49 @@ def ledger_params(ctx: CheckContext, event: Event, hop: Hop, up: Dataset) -> dic
         "deadline_start": utc_literal(start), "deadline_end": utc_literal(end),
         "pending_from": utc_literal(max(start, end)), "coverage": coverage_of(start, end), "judged": (start, end),
         "full_sweep": ctx.full_sweep, "one_to_one": hop.contract.mapping == "identity",
+        "winners": winners,
     }
+
+
+def winner_params(ctx: CheckContext, hop: Hop) -> list[dict[str, Any]] | CheckResult:
+    """Survivorship (model section 6.3): each upstream ahead of this one in the contract's precedence,
+    as template parameters to tell whether it delivers a key here as of the cutoff (its latest version
+    is what this dataset holds, compared as the ledger compares delivered). Empty for any other kind,
+    and for the winner itself, which judges its keys normally. A higher-precedence upstream that cannot
+    be read makes the hop DID_NOT_RUN: without it, no key can be said to be superseded."""
+    if hop.contract.mapping != "survivorship":
+        return []
+    ds, tz, groups = ctx.dataset, ctx.default_timezone, {"upstream": hop.upstream}
+    precedence = hop.contract.precedence
+    ahead = precedence[:precedence.index(hop.upstream)] if hop.upstream in precedence else []
+    found = []
+    for winner_id in ahead:
+        winner = ctx.upstreams.get(winner_id)
+        if winner is None or winner_id not in ds.key_map or winner.record_time is None:
+            return did_not_run("invalid_config", detail=(
+                f"survivorship: {winner_id}, ahead of {hop.upstream} in precedence, is not configured as a keyed "
+                "upstream with a record_time; no key can be judged superseded"), group_values=groups)
+        try:
+            source = source_of(winner, ctx.upstreams, tz)
+        except (KeyError, ValueError) as exc:
+            return did_not_run("invalid_config", detail=f"upstream {winner_id} cannot be read: {type(exc).__name__}",
+                               group_values=groups)
+        if winner.table is not None:
+            try:
+                exists = ctx.spark.catalog.tableExists(winner.table)
+            except Exception as exc:
+                return did_not_run("metastore_unavailable", detail=error_detail(exc), group_values=groups)
+            if not exists:
+                return did_not_run("table_missing", detail=f"table {winner.table} not found", group_values=groups)
+        cols = [ds.key_map[winner_id][c] for c in ds.key]
+        found.append({
+            "label": winner_id, "table": source, "filter": f"({winner.feed_filter})" if winner.feed_filter else None,
+            "key": key_string([column_expr(winner, c) for c in cols]), "keyed": has_a_key(cols),
+            "record": utc_expr(winner.record_time, tz),
+            "load": utc_expr(winner.load_time, tz) if winner.load_time is not None else None,
+            "owned": [column_expr(winner, u) for u in ds.owned_columns],
+        })
+    return found
 
 
 def rejects_params(hop: Hop, up: Dataset, up_cols: list[str], tz: str) -> dict[str, Any]:
@@ -488,6 +554,11 @@ class HopLedger(Check):
         params = ledger_params(ctx, event, hop, up)
         if isinstance(params, CheckResult):
             return params
+        proof = None
+        if hop.contract.mapping == "union_partition" and ctx.dataset.feed_filter:
+            from hcsc.datalake.dre.checks.hop.attribution import ledger_proof
+
+            proof = ledger_proof(ctx)  # the same SQL as T1_SOURCE_ATTRIBUTION, in this evaluation
         view = ledger_view(ctx.dataset.dataset, up_id)
         assessed = ctx.spark.sql(render_sql("hop_ledger.sql.j2", p=params, mode="assessed", source=None))
         assessed = assessed.localCheckpoint()
@@ -496,7 +567,7 @@ class HopLedger(Check):
         ledger = counted(rows)
         state, violations, parts, failures, reject_class = judge(hop, ledger)
         level = ceiling(ledger, reject_class)
-        scope = scope_of(ctx, event, hop, up, level, judged=params["judged"])
+        scope = scope_of(ctx, event, hop, up, level, judged=params["judged"], proof=proof)
         if state == FAILED:
             scope["triage"] = triage(ledger, reject_class, failures)
         scope_json = json.dumps(scope, sort_keys=True)

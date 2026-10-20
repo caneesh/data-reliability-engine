@@ -72,6 +72,8 @@ log = logging.getLogger(__name__)
 SCHEMA_DRIFT = "T1_SCHEMA_DRIFT"  # runs once per physical table (spec section 6)
 PARTITION_DRIFT = "T1_PARTITION_DRIFT"  # likewise; both read the table as it is now, never a window
 TABLE_CHECKS = (SCHEMA_DRIFT, PARTITION_DRIFT)
+# Once per physical table too, but over a window, so RERUN and REPLAY keep it (build step 5).
+SOURCE_ATTRIBUTION = "T1_SOURCE_ATTRIBUTION"
 EXECUTION_TYPES = ("NORMAL", "RERUN", "REPLAY")
 _HEX = re.compile(r"^[0-9a-f]{64}$")
 # The columns that make two results of one evaluation the same outcome (idempotent reruns).
@@ -213,8 +215,9 @@ def is_full_sweep(config: Config, dataset_id: str, event: Event) -> bool:
 
 
 def once_per_table_checks(work: list[Planned]) -> list[Planned]:
-    """once_per_table for every check that reads the table as a whole (TABLE_CHECKS)."""
-    for check_id in TABLE_CHECKS:
+    """once_per_table for every check that reads the table as a whole (TABLE_CHECKS, and
+    T1_SOURCE_ATTRIBUTION: one result per union target, whichever sibling dataset carries it)."""
+    for check_id in (*TABLE_CHECKS, SOURCE_ATTRIBUTION):
         work = once_per_table(work, check_id)
     return work
 
@@ -355,10 +358,11 @@ def refresh_landing(spark: SparkSession, config: Config, work: list[Planned], ru
 
 
 def upstreams_of(config: Config, ds: Dataset) -> dict[str, Dataset]:
-    """The datasets a check on `ds` reads: each key_map upstream and, when one is derived, the
-    datasets it is derived from."""
+    """The datasets a check on `ds` reads: each key_map upstream, each contract's upstream (a
+    join_contribution contributor has no key_map entry) and, when one is derived, the datasets it is
+    derived from."""
 
-    found = {u: config.datasets[u] for u in ds.key_map if u in config.datasets}
+    found = {u: config.datasets[u] for u in [*ds.key_map, *ds.contracts] if u in config.datasets}
     for up in list(found.values()):
         found.update(base_datasets(up, config.datasets))
     return found
@@ -373,7 +377,7 @@ def check_context(spark: SparkSession, config: Config, planned: Planned, event: 
     return CheckContext(
         spark, ds, planned.feed, config.dataset_settings(ds.dataset), config.defaults.timezone,
         config.defaults.dq_database, landing_problem,
-        upstreams=upstreams_of(config, ds),
+        upstreams=upstreams_of(config, ds), datasets=config.datasets,
         key_secret=key_secret,
         full_sweep=force_full_sweep or is_full_sweep(config, ds.dataset, event),
         budget_minutes=budget_minutes, scan_mb_per_minute=config.defaults.scan_mb_per_minute,

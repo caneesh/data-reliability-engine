@@ -72,7 +72,9 @@ def test_validate_prints_each_hop_its_kind_and_its_blind_spots(capsys: pytest.Ca
     assert "contracts: 2 hop(s)" in out
     assert "  example_curated_enrollment->gold_member_coverage: union_partition (declared)" in out
     assert "  provider_roster_raw->provider_directory: dedup (inferred from key_map)" in out
-    assert "blind spot: attribution (each row here owned by exactly one source) is not proven until build step 5" in out
+    # build step 5: the attribution is proven at run time (T1_SOURCE_ATTRIBUTION, HOP_LEDGER), never from config
+    assert "blind spot: attribution (each row here owned by exactly one source) is proven at run time, not from " \
+        "configuration" in out
     assert "blind spot: as-of replay unavailable: gold_member_coverage is mutable" in out
     assert "blind spot: deletions not modelled" in out  # the provider hop declares none
     # D6 conditions 1 and 2 (2026-10-17): an inferred kind is labelled, and says it proves nothing by contract
@@ -105,6 +107,11 @@ CASES = [
      f"{HOP}.reference", "reference:", "join_contribution only", "remove it"),
     ("precedence-without-survivorship", GOLD, MAPPING, MAPPING + "    precedence: [example_curated_enrollment]\n",
      f"{HOP}.precedence", "precedence:", "survivorship only", "remove it"),
+    # build step 5: contributes (the contributor's column -> this dataset's) belongs to a contributor hop
+    ("contributes-without-join", GOLD, MAPPING, MAPPING + "    contributes: { enddate: mbr_mbrshp_covrg_end_dt }\n",
+     f"{HOP}.contributes", "contributes:", "join_contribution only", "remove it"),
+    ("contributes-names-columns", GOLD, MAPPING, MAPPING + "    contributes: { enddate: \"not a column\" }\n",
+     f"{HOP}.contributes.enddate", "contributes:", "is not a plain identifier", "letters, digits"),
     ("exclusion-needs-approval", GOLD, MAPPING, MAPPING + EXCLUSION.replace(" approved_by: CHG-0000,", ""),
      f"{HOP}.exclusions[0].approved_by", "- { id: drop_test_members", "missing", "add `approved_by`"),
     ("exclusion-needs-volume-guard", GOLD, MAPPING, MAPPING + EXCLUSION.replace(", max_share: 0.05", ""),
@@ -179,14 +186,20 @@ def test_exclusions_given_twice_are_an_error_and_hop_exclusions_alone_a_warning(
 
 
 def test_kinds_judged_later_or_never_are_warnings_never_silent(conf: Path) -> None:
-    """A join_contribution hop is not keyed, needs a reference covering the contributor's key, and is a
-    blind spot until build step 5. A fan_out hop is a blind spot for good (unsupported_mapping)."""
+    """A join_contribution hop is not keyed and needs a reference covering the contributor's key; from
+    build step 5 it is judged (HOP_CONTRIBUTION), so it is no longer a blind spot until a later step, and
+    its blind spot says it is checked for correctness, not completeness. A fan_out hop is a blind spot for
+    good (unsupported_mapping)."""
     edit(conf, GOLD, MAPPING, "    mapping: join_contribution\n    reference: { sub_id: subscriberidnumber }\n")
-    _, errors, warnings = validate_conf(conf)
+    config, errors, warnings = validate_conf(conf)
     fields = {e.field: e.problem for e in errors}
     assert "cannot be judged through key_map" in fields[f"{HOP}.mapping"]
     assert "must map to all of example_curated_enrollment's key" in fields[f"{HOP}.reference"]
-    assert "not judged until build step 5" in _find(warnings, conf / GOLD, f"{HOP}.mapping").problem
+    assert not [w for w in warnings if w.field == f"{HOP}.mapping" and "not judged until" in w.problem]
+    [joined] = [h for h in hops(config) if h.dataset == "gold_member_coverage"]
+    spots = blind_spots(config, joined)
+    assert any("HOP_CONTRIBUTION" in s and "not for completeness" in s for s in spots)
+    assert not any("not judged until build step" in s for s in spots)
 
     edit(conf, GOLD, "    mapping: join_contribution\n    reference: { sub_id: subscriberidnumber }\n",
          "    mapping: fan_out\n")

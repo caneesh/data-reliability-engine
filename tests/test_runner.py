@@ -51,8 +51,9 @@ def test_run_writes_results_and_windows_follow_on(spark, tmp_path, capsys) -> No
 
     # Every check on a dataset in one run shares the same event (the window is fixed before any write).
     gold_run1 = [r for r in spark.table(f"{replay.dq}.dq_check_result").collect() if r.dataset == "gold_member_coverage"]
-    # 14 checks (7 Tier 1 with T1_FRESHNESS, 3 hop, 4 rules); schema drift for this table runs under the table-wide dataset.
-    assert len(gold_run1) == 13
+    # 15 checks (7 Tier 1 with T1_FRESHNESS, 3 hop, 4 rules, T1_SOURCE_ATTRIBUTION: gold is a union_partition
+    # target); schema drift for this table runs under the table-wide dataset.
+    assert len(gold_run1) == 14
     assert "HOP_LEDGER" in {r.check_id for r in gold_run1}
     assert {(r.event_id, r.window_start, r.window_end) for r in gold_run1} == {
         (first.event_id, first.window_start, first.window_end)}

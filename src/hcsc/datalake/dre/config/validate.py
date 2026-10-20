@@ -379,6 +379,9 @@ def _check_contracts(r: _Reporter, ds_id: str) -> None:
         elif c.reference:
             r.err("dataset", ds_id, loc + ("reference",), "reference goes with mapping join_contribution only",
                 "remove it")
+        if c.contributes and c.mapping != "join_contribution":
+            r.err("dataset", ds_id, loc + ("contributes",), "contributes goes with mapping join_contribution only",
+                "remove it, or compare this hop's columns through owned_columns")
         if c.mapping == "survivorship":
             if up_id not in c.precedence:
                 r.err("dataset", ds_id, loc + ("precedence",), f"precedence must list {up_id!r} among the "

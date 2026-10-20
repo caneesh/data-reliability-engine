@@ -139,6 +139,9 @@ class CheckContext:
     dq_database: str | None = None  # for checks that read their own history (T1_VOLUME, T1_SCHEMA_DRIFT)
     landing_problem: CheckResult | None = None  # the feed's landing roots could not be listed this run
     upstreams: dict[str, Dataset] = field(default_factory=dict)  # datasets named in this dataset's key_map
+    # Every configured dataset, for a check that looks across datasets: a union_partition's siblings on
+    # the same physical table (checks/hop/attribution.py). Empty: only this dataset is known.
+    datasets: dict[str, Dataset] = field(default_factory=dict)
     key_secret: bytes | None = None  # HMAC secret for key_hash (from hmac_secret_file); None: no key events
     full_sweep: bool = False  # today is full_sweep_day: hop checks read every key, not only changed ones
     budget_minutes: float | None = None  # this check's budget; None: settings.compute_budget_minutes
