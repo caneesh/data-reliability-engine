@@ -52,11 +52,14 @@ def build_parser() -> argparse.ArgumentParser:
             cmd.add_argument("--key-file", help="a file whose first line is the key (- reads it from stdin)")
         if name == "run":
             cmd.add_argument("--feed", help="run one feed only (default: all feeds)")
-            cmd.add_argument("--execution-type", default="NORMAL", choices=("NORMAL", "RERUN", "REPLAY"),
-                             help="NORMAL: the next eligible windows (scheduled); RERUN: one historical window; "
-                                  "REPLAY: every window of a historical range")
-            cmd.add_argument("--window-start", type=utc_time, help="RERUN: the window's start (ISO 8601, UTC)")
-            cmd.add_argument("--window-end", type=utc_time, help="RERUN: the window's end, excluded")
+            cmd.add_argument("--execution-type", default="NORMAL", choices=("NORMAL", "RERUN", "REPLAY", "AS_OF_REPLAY"),
+                             help="NORMAL: the next eligible windows (scheduled); RERUN: one historical window, "
+                                  "and REPLAY: every window of a historical range, both current rechecks (the "
+                                  "tables as they are now, never a historical result); AS_OF_REPLAY: one "
+                                  "historical window as the data stood at its end, where that can be proven")
+            cmd.add_argument("--window-start", type=utc_time,
+                             help="RERUN, AS_OF_REPLAY: the window's start (ISO 8601, UTC)")
+            cmd.add_argument("--window-end", type=utc_time, help="RERUN, AS_OF_REPLAY: the window's end, excluded")
             cmd.add_argument("--from", dest="range_from", type=utc_time, help="REPLAY: the range's start")
             cmd.add_argument("--to", dest="range_to", type=utc_time, help="REPLAY: the range's end, excluded")
         if name == "retention":
@@ -168,10 +171,10 @@ def main(argv: list[str] | None = None) -> int:
             start, end = (args.range_from, args.range_to) if args.execution_type == "REPLAY" else (
                 args.window_start, args.window_end)
             if args.execution_type != "REPLAY" and (args.range_from or args.range_to):
-                print("dre run: --from and --to are for REPLAY; RERUN takes --window-start and --window-end")
+                print("dre run: --from and --to are for REPLAY; RERUN and AS_OF_REPLAY take --window-start and --window-end")
                 return runner.EXIT_CANNOT_START
             if args.execution_type == "REPLAY" and (args.window_start or args.window_end):
-                print("dre run: REPLAY takes --from and --to; --window-start and --window-end are for RERUN")
+                print("dre run: REPLAY takes --from and --to; --window-start and --window-end are for RERUN and AS_OF_REPLAY")
                 return runner.EXIT_CANNOT_START
             selection = runner.Selection(args.execution_type, start, end)
             return runner.run(get_spark(), args.conf, args.feed, selection)

@@ -8,12 +8,15 @@ from __future__ import annotations
 import pytest
 
 from tests.conftest import SRC_ROOT
-from tests.guard.scan import DDL_FILE, LOCAL_SETUP_MODULE, RETENTION_MODULE, WRITER_MODULE, scan_text, scan_tree
+from tests.guard.scan import (
+    DDL_FILE, LOCAL_SETUP_MODULE, MIGRATIONS_MODULE, RETENTION_MODULE, WRITER_MODULE, scan_text, scan_tree,
+)
 
 RETENTION = f"src/{RETENTION_MODULE}"
 WRITER = f"src/{WRITER_MODULE}"
 LOCAL_SETUP = f"src/{LOCAL_SETUP_MODULE}"
 DDL = f"src/{DDL_FILE}"
+MIGRATIONS = f"src/{MIGRATIONS_MODULE}"
 OTHER = "src/hcsc/datalake/dre/checks/base.py"
 
 
@@ -65,6 +68,13 @@ CAUGHT = [
     ("drop-partition-not-retention", "ALTER TABLE dq.dq_run DROP IF EXISTS PARTITION (run_date = DATE'2019-01-01')", WRITER),
     ("drop-partition-outside-dq", "ALTER TABLE gold_db.member_coverage DROP PARTITION (load_dt = '2019-01-01')", RETENTION),
     ("alter-other-in-retention", "ALTER TABLE dq.dq_run ADD PARTITION (run_date = DATE'2026-01-01')", RETENTION),
+    # migrations add columns to dq tables, and do nothing else (build step 4)
+    ("add-columns-outside-dq-in-migrations", "ALTER TABLE gold_db.member_coverage ADD COLUMNS (x INT)", MIGRATIONS),
+    ("drop-columns-in-migrations", "ALTER TABLE dq.dq_run DROP COLUMNS (x)", MIGRATIONS),
+    ("rename-in-migrations", "ALTER TABLE dq.dq_run RENAME TO dq.dq_old", MIGRATIONS),
+    ("replace-columns-in-migrations", "ALTER TABLE dq.dq_run REPLACE COLUMNS (x INT)", MIGRATIONS),
+    ("drop-partition-in-migrations", "ALTER TABLE dq.dq_run DROP PARTITION (run_date = DATE'2019-01-01')", MIGRATIONS),
+    ("add-columns-dq-in-install", "ALTER TABLE {dq_database}.dq_run ADD COLUMNS (x INT)", "src/hcsc/datalake/dre/store/install.py"),
     # DataFrameWriter path writes
     ("path-save", 'df.write.mode("append").format("orc").save("/data/landing/example_feed")', WRITER),
     ("path-orc", "df.write.orc(path)", WRITER),
@@ -100,6 +110,7 @@ ALLOWED = [
     ("write-text-not-write-api", "path.write_text(body)", OTHER),
     ("drop-partition-retention", "ALTER TABLE dq.dq_file DROP IF EXISTS PARTITION (run_date = DATE'2019-01-01')", RETENTION),
     ("drop-partition-retention-fstring", 'f"ALTER TABLE {dq_database}.{table} DROP IF EXISTS PARTITION "', RETENTION),
+    ("add-columns-dq-migrations", 'spark.sql(f"ALTER TABLE {dq_database}.{m.table} ADD COLUMNS ({cols})")', MIGRATIONS),
     ("read-select", "SELECT * FROM gold_db.member_coverage WHERE updated_flag = 1", WRITER),
     ("read-orc", "spark.read.orc(path)", WRITER),
     ("read-parquet-chain", 'spark.read.option("mergeSchema", True).parquet("/data/landing/example_feed")', WRITER),

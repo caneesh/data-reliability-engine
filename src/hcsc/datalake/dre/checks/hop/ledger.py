@@ -203,6 +203,9 @@ def scope_of(ctx: CheckContext, event: Event, hop: Hop, up: Dataset | None, leve
         "values": values, "unverified_columns": values["unverified"],
         "orphans": "checked" if unchecked is None else "not checked",
     }
+    if ctx.as_of is not None:  # ADR-05: "as the data stood at C", and what that rests on
+        scope["evaluation_mode"] = "AS_OF_REPLAY"
+        scope["as_of"] = ctx.as_of_proof
     if note:
         scope["note"] = note
     return scope
@@ -276,6 +279,7 @@ def ledger_params(ctx: CheckContext, event: Event, hop: Hop, up: Dataset) -> dic
         "deadline_start": utc_literal(start), "deadline_end": utc_literal(end),
         "pending_from": utc_literal(max(start, end)), "coverage": coverage_of(start, end), "judged": (start, end),
         "full_sweep": ctx.full_sweep, "one_to_one": hop.contract.mapping == "identity",
+        "as_of": utc_literal(ctx.as_of) if ctx.as_of is not None else None,
     }
 
 
@@ -462,6 +466,7 @@ def ledger_lines(hop: Hop, ledger: dict[str, Any], reject_class: dict[str, str],
 
 class HopLedger(Check):
     check_id = CHECK_ID
+    as_of_capable = True  # every read bounded by the cutoff: upstream (window end) and here (ctx.as_of)
 
     def applies_to(self, dataset: Dataset, pattern: str | None) -> bool:
         return bool(dataset.key_map) or bool(dataset.contracts)

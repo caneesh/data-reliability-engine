@@ -69,11 +69,12 @@ each workstream is merged into it, in order, after its tests pass, and the full 
 
 - `store/migrations.py`: an ordered tuple of `Migration(version, table, columns)` (additive only: `ADD COLUMNS`), and
   `pending(spark, db) -> list[Migration]` (a migration is pending while any of its columns is absent).
-- `dre install --apply` applies pending migrations after creating missing objects, then records each in a new
-  append-only table `dq_migration (version INT, table_name STRING, columns STRING, applied_at TIMESTAMP,
-  engine_version STRING)`. `dre install --check` reports pending migrations. `dre run` refuses to start while one is
+- `dre install --apply` creates the missing tables, applies the pending migrations, then replaces the views.
+  No bookkeeping table (as first frozen): the store's own columns say which migrations it has, and a new table
+  would have changed `retention_months`, which must list every dq table (changed at build, decisions M1).
+  `dre install --check` reports a pending migration as PENDING. `dre run` refuses to start while one is
   pending, naming `dre install --apply`.
-- Guard (spec section 9): `ALTER TABLE <dq>.<table> ADD COLUMNS` is allowed only in `store/install.py`; any other
+- Guard (spec section 9, rule 11): `ALTER TABLE <dq>.<table> ADD COLUMNS` is allowed only in `store/migrations.py`; any other
   ALTER stays forbidden there. Never DROP, never recreate, never rewrite a stored row.
 
 ### 3.3 Contract and mapping (C5)
