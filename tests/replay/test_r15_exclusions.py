@@ -70,7 +70,7 @@ def test_r15_approved_exclusion_is_excluded_and_an_unapproved_filter_is_missing(
     assert ledger[("missing", None)][1] == "deficit"
     assert_balanced(ledger, 3)
     assert scope(result)["evidence_level"] == "reconstructed"  # the exclusion is re-applied, not observed
-    assert result.qualifications == "attribution_unverified" and result.healthy is False
+    assert result.qualifications is None and result.healthy is False  # FAILED; attribution proven (step 5)
     # The key check leaves the approved exclusion out and finds the other key MISSING; its cause is the
     # rule the pipeline reports, by id and code reference (never the key).
     [currency] = latest(spark, replay)[("gold_member_coverage", "HOP_KEY_CURRENCY")]
@@ -83,10 +83,11 @@ def test_r15_approved_exclusion_is_excluded_and_an_unapproved_filter_is_missing(
     assert "drop_inactive_agreements" in filtered.evidence and "example_build.sql:40" in filtered.evidence
 
 
-def test_r15_only_the_approved_exclusion_passes_qualified_by_its_unproven_attribution(spark, tmp_path) -> None:
+def test_r15_only_the_approved_exclusion_passes_and_is_contract_proven(spark, tmp_path) -> None:
     """PS2, the PASS side: only the approved exclusion applies, so the ledger PASSED. The sample hop is a
-    union_partition whose attribution is unproven until build step 5, so the PASS carries exactly the
-    qualification attribution_unverified and is not healthy (C3-02, C3-04); nothing else qualifies it."""
+    union_partition whose attribution the ledger proves (build step 5: every gold row is SRC_A), so
+    nothing qualifies the PASS: contract-proven and healthy. (Before step 5 it carried
+    attribution_unverified; R17 shows a union whose proof fails keeps it.)"""
     loaded = curated_load_time(12)
     replay = setup(spark, tmp_path, "r15_ok", {GOLD_YAML: [(MAPPING, MAPPING + APPROVED)]})
     create_table(spark, replay.curated, CURATED_COLUMNS, [
@@ -103,8 +104,8 @@ def test_r15_only_the_approved_exclusion_passes_qualified_by_its_unproven_attrib
     ledger = lines(spark, replay, result.evaluation_id)
     assert nonzero(ledger) == {("due", None): 3, ("excluded", "drop_test_agreements@2"): 1, ("delivered", None): 2}
     assert_balanced(ledger, 3)
-    assert (result.qualifications, result.evidence_state, result.healthy) == ("attribution_unverified", "VALID", False)
-    assert scope(result)["claim"] == "declared contract, qualified: attribution_unverified"
+    assert (result.qualifications, result.evidence_state, result.healthy) == (None, "VALID", True)
+    assert (scope(result)["claim"], scope(result)["attribution"]) == ("contract-proven", "verified")
 
 
 def test_r15_the_approved_exclusion_alone_under_a_merge_contract_is_healthy(spark, tmp_path) -> None:

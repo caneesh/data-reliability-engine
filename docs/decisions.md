@@ -505,6 +505,18 @@ The traceability matrix comes before code (exit criterion 6).
    - **Backpressure:** at 80% of the budget the next run defers the full sweep.
    - **Load test:** on a representative cluster, which needs the platform team.
 
+## Phase 1 build step 8: run budget, kill switch, queue, backpressure (2026-10-20)
+
+Built under the master implementation prompt of 2026-10-20, not ratified. Defaults taken, for Gate B:
+
+- **O1, the run budget** (`run_budget_minutes`, 40) applies to NORMAL runs only ("of the hourly run", ADR-08), measured from the run's start. A job reached at or past it is written and committed as DID\_NOT\_RUN / BUDGET / run\_budget\_exceeded (the budget and the minutes elapsed in `detail`); BUDGET holds its window. The run still ends COMPLETED: every result is written, as for the per-check budget\_exceeded; PARTIAL would hold every window of the run, not only the cut ones. A check already running may overrun by up to its own compute budget.
+- **O2, priority:** on-time and completeness checks first (T1\_ON\_TIME, T1\_ZERO\_ROWS, T1\_FILES\_NOT\_LOADED, HOP\_FILE\_COMPLETENESS, HOP\_LEDGER, CHAIN\_COMPLETENESS), every other check after; stable within a class.
+- **O3, the kill switch** (`kill_switch_file`, null) applies to every execution type, read at the start and before each check; once seen it stays on for the run. An unreadable location counts as on (fail closed). Remaining checks are DID\_NOT\_RUN / PLATFORM / disabled, written and committed but not counted as written, so the run is PARTIAL and the watchdog alerts: a forgotten switch is never silent. The path is never printed. A halted run skips the retried investigations and the integrity sweep (the next run does them).
+- **O4, the queue** is read from `spark.yarn.queue`. `dre run` refuses to start when it is a `protected_queues` entry, or when `yarn_queue` is set and the application runs in another queue or names none. Local mode without a queue is not refused. Protected queue names are never printed.
+- **O5, backpressure:** the latest finished NORMAL run took more than `backpressure_share` (0.8) of the run budget, so this run defers the calendar's full sweep. A deferral is recorded in `dq_integrity` as SWEEP\_DEFERRED (a new record kind, operational, needs ratification; the alternative is a dedicated table through a migration), and the first run not under backpressure forces the owed sweep. Records unreadable: every dataset counts as owed (fail closed). Integrity's forced sweeps are never deferred.
+- **O6, concurrency (N):** not enforced and not measured. The runner evaluates one check at a time, but one SQL action can run several Spark jobs, and a check cancelled by its budget can keep a daemon thread starting jobs; the effective cap is the YARN queue's share, a platform setting.
+- **O7, measurements:** `scripts/measure_run.py` prints a run's elapsed time against the budget and per-check duration statistics, read-only, locally or on the cluster. The load test (acceptance criterion 7) still needs a representative cluster.
+
 ## Phase 1 build step 6: CHAIN_COMPLETENESS (2026-10-20)
 
 Built under the master implementation prompt of 2026-10-20, not ratified. Defaults taken, for Gate B:

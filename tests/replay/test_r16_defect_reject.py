@@ -85,8 +85,8 @@ def test_r16_a_reject_for_a_defect_reason_or_an_unlisted_one_is_failed(spark, tm
 def test_r16_an_authorised_reason_accounts_for_its_record_and_is_reported_evidence(spark, tmp_path) -> None:
     """PS3, the contrast: the same record rejected for INVALID_CODE, which the policy authorises, is
     `rejected INVALID_CODE (authorised)` and the ledger PASSED. Rejects are reported evidence, so the
-    claim ceiling is `reported` and the PASS carries evidence_reported (with the sample union's
-    attribution_unverified): never healthy."""
+    claim ceiling is `reported` and the PASS carries evidence_reported (the sample union's attribution
+    is proven since build step 5): never healthy."""
     replay = scenario(spark, tmp_path, "r16_ok", {"123402": "INVALID_CODE"})
     result = current_ledger(spark, replay)
     assert (result.state, result.population, result.violations) == ("PASSED", 2, 0)
@@ -95,4 +95,4 @@ def test_r16_an_authorised_reason_accounts_for_its_record_and_is_reported_eviden
     assert ledger[("rejected", "INVALID_CODE")] == (1, "authorised")
     assert_balanced(ledger, 2)
     assert scope(result)["evidence_level"] == "reported"
-    assert (result.qualifications, result.healthy) == ("attribution_unverified,evidence_reported", False)
+    assert (result.qualifications, result.healthy) == ("evidence_reported", False)

@@ -122,4 +122,5 @@ def test_r19_every_version_applied_passes(spark, tmp_path) -> None:
     assert (result.state, result.population, result.violations) == ("PASSED", 3, 0)
     assert result.observed == "due 3 (pending 1): deleted 1, delivered 2; orphans 0"
     assert_balanced(lines(spark, replay, result.evaluation_id), 3)
-    assert (result.qualifications, result.healthy) == ("attribution_unverified", False)
+    # the sample union's attribution is proven by the ledger (build step 5): nothing qualifies the PASS
+    assert (result.qualifications, result.healthy) == (None, True)

@@ -50,8 +50,8 @@ def test_r14_equal_counts_with_a_substituted_key_is_a_missing_key_and_an_orphan(
 
 def test_r14_the_same_counts_with_the_right_keys_pass(spark, tmp_path) -> None:
     """PS1, the PASS side: the same two rows each side, the right keys, nothing missing and no orphan.
-    The sample's union attribution is unproven until build step 5, so the PASS is qualified and not
-    healthy (C3-02)."""
+    Since build step 5 the ledger proves the sample union's attribution (every gold row is SRC_A), so
+    the PASS has no qualification and is healthy."""
     replay = setup(spark, tmp_path, "r14_ok")
     loaded = curated_load_time(12)
     create_table(spark, replay.curated, CURATED_COLUMNS, [curated_row(sub_id="123401", updated=loaded),
@@ -64,5 +64,6 @@ def test_r14_the_same_counts_with_the_right_keys_pass(spark, tmp_path) -> None:
     result = current_ledger(spark, replay)
     assert (result.state, result.population, result.violations) == ("PASSED", 2, 0)
     assert result.observed == "due 2 (pending 0): delivered 2; orphans 0"
-    assert (result.qualifications, result.healthy) == ("attribution_unverified", False)
+    assert (result.qualifications, result.healthy) == (None, True)
+    assert scope(result)["attribution"] == "verified"
     assert_balanced(lines(spark, replay, result.evaluation_id), 2)
