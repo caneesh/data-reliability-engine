@@ -104,6 +104,13 @@ exit 0
 | --- | --- | --- | --- |
 | `pytest -q -p no:cacheprovider`, then `tests/e2e/build_synthetic.py`, `dre install --conf conf --apply`, `dre run --conf conf`, `tests/e2e/verify.py` | the corrections commit (tested as its working tree on `88df3e5`; the only commit between, `2cf8def`, changes documentation) | 0, 0, 0, 0, 0 | **977 passed** (70.2 min; 955 before the corrections, 22 new); e2e run COMPLETED, 41 of 41 checks written, `concurrency: at most 1 unit(s) of Spark work at a time; peak 1`; verify: 51 results, no problem |
 
+### CI run #97 on `8eebd31`: red, then fixed
+
+CI's `test` job failed (`e2e` and `package` green): 2 failed, 975 passed. Both failures are `tests/test_evidence_integrity.py` tests written before O6: `test_f01_a_cancelled_investigation_that_finishes_late_never_publishes` and `test_f01_a_cancelled_evidence_write_that_lands_late_stays_invisible`. Each lets a cancelled unit write rows late and asserts they land (`assert 0 == 1` on CI) and stay unpublished. O6's re-cancellation now usually kills that late write; on CI it did, in the local full run the write finished between two cancellations. The tests prove what holds when a late write does land, which can still happen (KI-17), so their late write now runs under its own job group; every assertion is unchanged.
+
+- Reproduced deterministically: with `budget.RECANCEL_SECONDS` patched to 0.01 s, both tests fail exactly as on CI (`assert 0 == 1`, exit 1).
+- After the fix, under the same 0.01 s reaper: exit 0, `2 passed`; normally, `pytest tests/test_evidence_integrity.py tests/test_concurrency.py tests/checks/test_budget.py` → exit 0, `30 passed`.
+
 ## 6. Performance (not done)
 
 The representative load test (resource consumption, scan volume, elapsed time, whether the run budget is met) needs platform infrastructure that is not available: KI-01, BLOCKED. `scripts/measure_run.py` is ready for it. Local synthetic figures are in the Gate B evidence and are not a substitute.

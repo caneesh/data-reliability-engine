@@ -125,6 +125,15 @@ def test_f01_evidence_changed_after_verification_is_invalid_and_never_healthy(sp
     assert spark.table(f"{store}.v_committed_key_event").where("evaluation_id = 'f01'").count() == 0  # ...its evidence is not
 
 
+def escape_the_cancelled_group(spark) -> None:
+    """The late work's Spark jobs run outside the cancelled unit's job group. Since the concurrency
+    limit (final review O6) a lingering unit's group is cancelled again every RECANCEL_SECONDS, which
+    usually kills a late write; a short one can still finish between two cancellations (CI run #97
+    caught the reaper winning, a local run the write). These tests prove what holds when a late write
+    does land, so they make it land."""
+    spark.sparkContext.setJobGroup("dre-test-late-write", "late work that escaped cancellation", interruptOnCancel=False)
+
+
 def test_f01_a_cancelled_investigation_that_finishes_late_never_publishes(spark, tmp_path, monkeypatch) -> None:
     """F01, late thread: an investigation cancelled by its budget keeps running and stores its cause
     rows afterwards. The cause commit is written only by the run's thread after a successful
@@ -152,6 +161,7 @@ def test_f01_a_cancelled_investigation_that_finishes_late_never_publishes(spark,
 
     def slow_explain(cx, result, evaluation_id, run_id, run_date, now):
         time.sleep(3)
+        escape_the_cancelled_group(spark)
         return [{"run_id": run_id, "evaluation_id": evaluation_id, "failure_ref": "x", "order_no": 1,
                  "state": "CONFIRMED", "cause_code": "NOT_RUN", "evaluated_at": now, "run_date": run_date}]
 
@@ -194,6 +204,7 @@ def test_f01_a_cancelled_evidence_write_that_lands_late_stays_invisible(spark, t
 
     def slow_write(spark_, db, evaluation_, rows_, run_):
         time.sleep(3)
+        escape_the_cancelled_group(spark_)
         append_rows(spark_, db, "dq_key_event", key_event_rows(run_, rows_[0]["evaluation_id"], 1, "FLAGGED"),
                     commit=False)
         return {rows_[0]["evaluation_id"]: (1, 0, 0)}
