@@ -110,6 +110,7 @@ CI's `test` job failed (`e2e` and `package` green): 2 failed, 975 passed. Both f
 
 - Reproduced deterministically: with `budget.RECANCEL_SECONDS` patched to 0.01 s, both tests fail exactly as on CI (`assert 0 == 1`, exit 1).
 - After the fix, under the same 0.01 s reaper: exit 0, `2 passed`; normally, `pytest tests/test_evidence_integrity.py tests/test_concurrency.py tests/checks/test_budget.py` → exit 0, `30 passed`.
+- **CI run #98 on `0c4fabd` (the corrections with this fix): green**, all three jobs (`test`, `e2e`, `package`).
 
 ## 6. Performance (not done)
 

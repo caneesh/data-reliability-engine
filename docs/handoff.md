@@ -74,8 +74,11 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
 | Revised checkpoint 3 CI line | `486792a` | #91 |
 | Workstreams C4 to C8: inventory, frozen interfaces, ownership | `ab36f21` | #92 |
 | Steps 4 and 5 (Gate A): evaluation modes, AS_OF_REPLAY, migrations; source attribution, contribution, survivorship | `4da17be` | #93 (green) |
-| Steps 6 to 8 (Gate B): CHAIN_COMPLETENESS, replays, run budget and kill switch | `1b800ca` | #94 (still running at 11:21 UTC; the same code is green in #95) |
+| Steps 6 to 8 (Gate B): CHAIN_COMPLETENESS, replays, run budget and kill switch | `1b800ca` | #94 (green) |
 | Gate A and Gate B evidence packages; handoff and checkpoints (docs only, on `1b800ca`) | `88df3e5` | #95 (green) |
+| CI records for Gate A and Gate B | `2cf8def` | #96 (green) |
+| Final review corrections P1-01, P1-02, P1-03, O6; known-issues register | `8eebd31` | #97 (red: 2 F01 late-write tests, `test` job) |
+| Fix for #97: the late-write tests escape O6's re-cancellation explicitly | `0c4fabd` | #98 (green) |
 
 Each row has a section in `docs/decisions.md` saying what was decided and why.
 
@@ -84,7 +87,7 @@ Each row has a section in `docs/decisions.md` saying what was decided and why.
 **Next action**, in this order unless the user says otherwise:
 
 0. ~~Confirm CI for the corrections commit.~~ Run #90 on `6387989`, green, with the `test-report` and `e2e-logs` artifacts kept.
-1. ~~Confirm CI for Gate A and Gate B.~~ #93 green on `4da17be`; #95 green on `88df3e5` (Gate B's code plus documentation); #94 on `1b800ca` itself was still running when recorded.
+1. ~~Confirm CI for Gate A and Gate B.~~ #93 green on `4da17be`; #95 green on `88df3e5` (Gate B's code plus documentation); #94 on `1b800ca` green too.
 2. **Wait for the reviews:** the revised checkpoint 3, then Gate A (`docs/design/evidence/gate-a.md`), then Gate B (`gate-b.md`). Record each verdict in `docs/decisions.md`; a change asked for is built the controlled way (failing test first).
 3. **Still open in the build order:** R18 (no aggregate configured to replay), R22 (needs release 4 step 2), the concurrency cap N (decisions O6), the load test (a representative cluster).
 4. **Pending values**:
