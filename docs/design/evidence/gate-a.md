@@ -69,4 +69,4 @@ The first, unrecorded attempt at the C4 store tests showed one failure that did 
 
 1. Independent review of the revised checkpoint 3 (unchanged by this package).
 2. Ratify or correct M1 to M9 and S1 to S6.
-3. CI on the pushed head (recorded in `docs/handoff.md` once green).
+3. ~~CI on the pushed head.~~ Run #93 on `4da17be`: green.

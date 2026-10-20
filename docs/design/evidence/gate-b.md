@@ -73,4 +73,4 @@ These are synthetic-volume figures. They say nothing about a production table: t
 
 1. Ratify or correct K1 to K9 and O1 to O7, after Gate A.
 2. The platform team: a representative cluster for the load test, the YARN queue and the kill switch path.
-3. CI on the pushed head (recorded in `docs/handoff.md` once green).
+3. ~~CI on the pushed head.~~ Run #95 on `88df3e5` (this code plus documentation): green; #94 on `1b800ca` itself was still running when recorded.
