@@ -62,10 +62,12 @@ def gold(table: str, dataset: str = "gold", **extra) -> Dataset:
 
 
 def run(spark, check, ds: Dataset, up: Dataset | None, event: Event = EVENT, secret: bytes | None = None,
-        full_sweep: bool = False, history_since: date | None = None):
+        full_sweep: bool = False, history_since: date | None = None, datasets: list[Dataset] | None = None):
+    """datasets: other configured datasets the check may look across (a union's siblings)."""
     upstreams = {up.dataset: up} if up is not None else {}
+    known = {d.dataset: d for d in [ds, *(datasets or [])]}
     ctx = CheckContext(spark, ds, None, SETTINGS, "UTC", DQ, upstreams=upstreams, key_secret=secret,
-                       full_sweep=full_sweep, history_since=history_since)
+                       full_sweep=full_sweep, history_since=history_since, datasets=known)
     results, _ = run_check(check, ctx, event)
     return results
 

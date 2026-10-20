@@ -6,7 +6,7 @@
      rows loaded before the cutoff; rows tied at it kept) has its deadline (that version's load time +
      sla_hours) in the window (at or before the window end on the full sweep), with its disposition
      (the first rule that matches, in the model's precedence), the disposition's label (the exclusion
-     rule@version, the reject reason, why it is unassessable) and every explaining rule that matched
+     rule@version, the reject reason, the winner that supersedes it, why it is unassessable) and every explaining rule that matched
      (`matched`; the ones after the first are overlap diagnostics; the residual dispositions, delivered
      to missing, are D's state when no rule explains the record, so they never overlap); and each
      upstream row with no key in that range
@@ -124,6 +124,33 @@ dn_sets AS (
   FROM dn_top GROUP BY k
 ),
 {% endif %}
+{% for w in p.winners %}
+{% set wi = loop.index %}
+-- survivorship (build step 5; model section 6.3): {{ w.label }}, ahead of this upstream in precedence,
+-- delivers a due key when its latest version as of the cutoff (rows tied at it kept) is what this
+-- dataset holds, compared as `delivered` is: this version or a newer one here, and the mapped values agree
+w{{ wi }}_rows AS (
+  SELECT {{ w.key }} AS k, {{ w.record }} AS record_ts
+{% for c in w.owned %}
+       , CAST({{ c }} AS STRING) AS u_{{ loop.index }}
+{% endfor %}
+  FROM {{ w.table }}
+  WHERE {{ w.keyed }}{% if w.filter %} AND {{ w.filter }}{% endif %}{% if w.load %} AND ({{ w.load }} IS NULL OR {{ w.load }} < {{ p.window_end }}){% endif %}
+
+),
+w{{ wi }}_top AS (
+  SELECT t.* FROM (SELECT r.*, MAX(r.record_ts) OVER (PARTITION BY r.k) AS top_ts
+                   FROM w{{ wi }}_rows r JOIN due_keys d ON d.k = r.k) t
+  WHERE t.record_ts = t.top_ts
+),
+w{{ wi }}_keys AS (
+  SELECT k, MAX(record_ts) AS w_record_ts
+{% if p.owned %}
+       , array_sort(collect_set(to_json(named_struct({% for c in w.owned %}'c{{ loop.index }}', u_{{ loop.index }}{% if not loop.last %}, {% endif %}{% endfor %})))) AS vals
+{% endif %}
+  FROM w{{ wi }}_top GROUP BY k
+),
+{% endfor %}
 {% if p.rejects %}
 -- reported evidence (checkpoint 3, C3-01): a reject accounts for the version under judgement only when
 -- its key and its lineage (the refused record's version, or its batch) match that version, and it was
@@ -175,9 +202,14 @@ judged AS (
          {% if p.rejects %}r.latest.reason{% else %}CAST(NULL AS STRING){% endif %} AS reject_reason,
          {% if p.rejects %}r.latest.rule{% else %}CAST(NULL AS STRING){% endif %} AS reject_rule,
          {% if p.owned %}us.vals <> ds.vals{% else %}FALSE{% endif %} AS diverges,
-         coalesce(n.soft = 1, FALSE) AS soft_applied
+         coalesce(n.soft = 1, FALSE) AS soft_applied,
+         -- the first upstream ahead in precedence that delivers the key here (survivorship only)
+         {% if p.winners %}CASE {% for w in p.winners %}WHEN w{{ loop.index }}.k IS NOT NULL AND n.k IS NOT NULL AND n.dn_record_ts >= w{{ loop.index }}.w_record_ts{% if p.owned %} AND w{{ loop.index }}.vals = ds.vals{% endif %} THEN '{{ w.label }}' {% endfor %}END{% else %}CAST(NULL AS STRING){% endif %} AS superseded_by
   FROM due_keys d
   LEFT JOIN dn_keys n ON n.k = d.k
+{% for w in p.winners %}
+  LEFT JOIN w{{ loop.index }}_keys w{{ loop.index }} ON w{{ loop.index }}.k = d.k
+{% endfor %}
 {% if p.owned %}
   LEFT JOIN up_sets us ON us.k = d.k
   LEFT JOIN dn_sets ds ON ds.k = d.k
@@ -190,14 +222,19 @@ judged AS (
 ledger AS (
   -- matched: the explaining rules (1 to 6) that hold, in precedence; the residual (delivered,
   -- divergent, stale, missing) is what D shows when none of them does
-  SELECT k, unknown_reason, excluded_by, reject_reason, reject_rule,
+  SELECT k, unknown_reason, excluded_by, reject_reason, reject_rule, superseded_by,
          filter(array(
            CASE WHEN unknown_reason IS NOT NULL THEN 'unassessable' END,
 {% if p.applied_as == "soft" %}
            CASE WHEN tomb AND present AND soft_applied THEN 'deleted' END,
-           CASE WHEN tomb AND present AND NOT soft_applied THEN 'deleted_not_applied' END,
 {% else %}
            CASE WHEN tomb AND NOT present THEN 'deleted' END,
+{% endif %}
+           -- survivorship: the record here is the winner's, so this edge's presence rules do not judge it
+           CASE WHEN superseded_by IS NOT NULL THEN 'superseded' END,
+{% if p.applied_as == "soft" %}
+           CASE WHEN tomb AND present AND NOT soft_applied THEN 'deleted_not_applied' END,
+{% else %}
            CASE WHEN tomb AND present THEN 'deleted_not_applied' END,
 {% endif %}
            CASE WHEN excluded_by IS NOT NULL AND NOT present THEN 'excluded' END,
@@ -212,13 +249,14 @@ ledger AS (
 ),
 placed AS (
   SELECT k, coalesce(element_at(matched, 1), residual) AS disposition, unknown_reason, excluded_by, reject_reason,
-         reject_rule, matched
+         reject_rule, superseded_by, matched
   FROM ledger
 )
 SELECT 'due' AS line, k, disposition,
        CASE disposition WHEN 'unassessable' THEN unknown_reason
                         WHEN 'excluded' THEN excluded_by
                         WHEN 'excluded_but_present' THEN excluded_by
+                        WHEN 'superseded' THEN superseded_by
                         WHEN 'rejected' THEN concat_ws(' ', reject_reason, reject_rule) END AS label,
        -- a reject's class under the policy: authorised only for a reason the policy authorises and, where
        -- the policy lists rules, a rule it lists; every other reason, or rule, is a defect (ADR-04)

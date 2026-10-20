@@ -1,0 +1,27 @@
+{# T1_SOURCE_ATTRIBUTION, and HOP_LEDGER's attribution proof (build step 5; docs/design/reconciliation-model.md
+   section 6.1). One rendering, checks/hop/attribution.py attribution_sql, serves both, so they never disagree.
+   p.table: the union target's physical table; p.predicates: each sibling's feed_filter (validated config), in
+   sibling order. Every row of the table is read: the attribution must hold over every row any edge reads.
+   A predicate that evaluates to NULL does not match. One row: the rows, those matching no predicate
+   (unattributed), those matching more than one (overlap), and per predicate (rows_i, overlap_i) the rows it
+   matches and how many of them another predicate matches too. Counts only. #}
+WITH attributed AS (
+  SELECT
+{% for x in p.predicates %}
+    CASE WHEN coalesce(({{ x }}), FALSE) THEN 1 ELSE 0 END AS m_{{ loop.index }}{% if not loop.last %},{% endif %}
+
+{% endfor %}
+  FROM {{ p.table }}
+),
+matched AS (
+  SELECT *, {% for x in p.predicates %}m_{{ loop.index }}{% if not loop.last %} + {% endif %}{% endfor %} AS matches
+  FROM attributed
+)
+SELECT COUNT(*) AS population,
+       coalesce(SUM(CASE WHEN matches = 0 THEN 1 ELSE 0 END), 0) AS unattributed,
+       coalesce(SUM(CASE WHEN matches > 1 THEN 1 ELSE 0 END), 0) AS overlap
+{% for x in p.predicates %}
+     , coalesce(SUM(m_{{ loop.index }}), 0) AS rows_{{ loop.index }}
+     , coalesce(SUM(CASE WHEN m_{{ loop.index }} = 1 AND matches > 1 THEN 1 ELSE 0 END), 0) AS overlap_{{ loop.index }}
+{% endfor %}
+FROM matched

@@ -177,3 +177,24 @@ def test_stored_outcomes_are_read_by_dataset_and_span(spark) -> None:
     found = stored_outcomes(spark, "dq_outcomes", jobs)
     assert set(found) == {"in"} and found["in"][0] == "FAILED"  # the latest row; other datasets and spans left out
     assert stored_outcomes(spark, "dq_outcomes", []) == {}
+
+
+def test_a_recheck_keeps_one_source_attribution_per_table_and_window() -> None:
+    """T1_SOURCE_ATTRIBUTION gives one result per target per window (build step 5): a RERUN or REPLAY
+    plans the datasets sharing a table one by one, so the duplicates are dropped there too."""
+    from types import SimpleNamespace
+
+    from hcsc.datalake.dre.runner import once_per_table_window
+
+    def job(ds: str, table: str, check: str, hour: int):
+        planned = SimpleNamespace(dataset=SimpleNamespace(dataset=ds, table=table),
+                                  check=SimpleNamespace(check_id=check))
+        return planned, Event(ds, at(hour), at(hour + 1))
+
+    jobs = [job("gold_a", "gold_db.member_coverage", "T1_SOURCE_ATTRIBUTION", 1),
+            job("gold_b", "gold_db.member_coverage", "T1_SOURCE_ATTRIBUTION", 1),  # same table, same window
+            job("gold_b", "gold_db.member_coverage", "T1_SOURCE_ATTRIBUTION", 2),  # another window
+            job("gold_b", "gold_db.member_coverage", "HOP_LEDGER", 1)]
+    kept = once_per_table_window(jobs, "T1_SOURCE_ATTRIBUTION")
+    assert [(p.dataset.dataset, p.check.check_id, e.window_start.hour) for p, e in kept] == [
+        ("gold_a", "T1_SOURCE_ATTRIBUTION", 1), ("gold_b", "T1_SOURCE_ATTRIBUTION", 2), ("gold_b", "HOP_LEDGER", 1)]

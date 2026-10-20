@@ -43,7 +43,7 @@ def store(spark):
     create_store(spark, DQ)
 
 
-def ledger_of(spark, ds: Dataset, up: Dataset | None, **kwargs):
+def ledger_of(spark, ds: Dataset, up: Dataset | None, **kwargs):  # kwargs: test_hop.run's (datasets: siblings)
     [r] = run(spark, HopLedger(), ds, up, **kwargs)
     assert r.group_values == {"upstream": UP}
     return r
@@ -450,8 +450,10 @@ def test_orphans_are_not_checked_where_rows_here_cannot_be_attributed(spark) -> 
 
 # --- kinds, scope and claim (proof scenario 10) ---
 
-@pytest.mark.parametrize("kind", ["aggregate", "join_contribution", "survivorship", "fan_out"])
+@pytest.mark.parametrize("kind", ["aggregate", "join_contribution", "fan_out"])
 def test_kinds_the_ledger_does_not_judge_are_unsupported(spark, kind: str) -> None:
+    """survivorship is judged from build step 5 (test_hop_ledger_sources.py); a join_contribution
+    contributor is checked by HOP_CONTRIBUTION, its rows counted by the primary edge's ledger."""
     up, dn = tables(spark, f"lg_kind_{kind}", [curated_row(updated=IN_WINDOW)], [gold_row(record=IN_WINDOW)])
     r = ledger_of(spark, contract(dn, mapping=kind), up)
     assert (r.state, r.reason_category, r.reason_code) == ("DID_NOT_RUN", "CONFIGURATION", "unsupported_mapping")
@@ -507,10 +509,11 @@ def test_only_a_declared_contract_with_nothing_unproven_claims_contract_proven_c
 
 
 def test_a_union_is_never_contract_proven_until_its_attribution_is(spark) -> None:
-    """C3-02: a union_partition target is read through its feed_filter (decision D5), but whether the
-    filters are disjoint and complete is proven only from build step 5. Until then the claim is
-    capped, whatever the data: rows of another source are left out of the count and of orphans,
-    and filters that overlap or leave rows uncovered (not detected before step 5) still cap it."""
+    """C3-02: a union_partition target is read through its feed_filter (decision D5); the claim is
+    capped unless the evaluation proves the siblings' filters disjoint and complete over the table
+    (build step 5, test_hop_ledger_sources.py). Rows of another source are left out of the count and
+    of orphans; here SRC_B's row has no configured sibling, so it is unattributed and the claim stays
+    capped, and filters that overlap a configured sibling, or leave rows uncovered, cap it too."""
     up, dn = tables(spark, "lg_union", [curated_row(sub_id="1", updated=IN_WINDOW)],
                     [gold_row(sub_id="0001", record=IN_WINDOW, loaded=LOADED_HERE),
                      gold_row(sub_id="0077", record=IN_WINDOW, loaded=LOADED_HERE, source="SRC_B")])
@@ -520,10 +523,16 @@ def test_a_union_is_never_contract_proven_until_its_attribution_is(spark) -> Non
     assert (r.state, r.observed) == ("PASSED", "due 1 (pending 0): delivered 1; orphans 0")  # SRC_B is not ours
     assert (scope(r)["attribution"], r.qualifications) == ("feed_filter_unverified", ("attribution_unverified",))
     assert scope(r)["claim"] == "declared contract, qualified: attribution_unverified"
-    overlapping = ledger_of(spark, union.model_copy(update={"feed_filter": "src_sys_nm IN ('SRC_A', 'SRC_B')"}), up)
+    sibling_b = union.model_copy(update={"dataset": "gold_lg_union_b", "feed_filter": "src_sys_nm = 'SRC_B'",
+                                         "contracts": {"other_source": EdgeContract(mapping="union_partition")}})
+    overlapping = ledger_of(spark, union.model_copy(update={"feed_filter": "src_sys_nm IN ('SRC_A', 'SRC_B')"}), up,
+                            datasets=[sibling_b])
     uncovered = ledger_of(spark, union.model_copy(update={"feed_filter": "src_sys_nm = 'SRC_C'"}), up)
     for capped in (overlapping, uncovered):
         assert "attribution_unverified" in capped.qualifications and scope(capped)["claim"] != "contract-proven"
+        assert scope(capped)["attribution"] == "feed_filter_unverified"
+    assert (scope(overlapping)["attribution_proof"]["overlap"], scope(uncovered)["attribution_proof"]["unattributed"]) \
+        == (1, 2)
     unknown = ledger_of(spark, union.model_copy(update={"feed_filter": None}), up)
     assert scope(unknown)["attribution"] == "unknown"
     assert set(unknown.qualifications) == {"attribution_unverified", "orphans_unchecked"}
@@ -632,7 +641,8 @@ def test_an_identity_hop_requires_one_record_on_each_side(spark) -> None:
 
 def test_the_ledger_balances_with_every_disposition_at_once(spark) -> None:
     """The identity, asserted on one hop that puts a record in each disposition (superseded aside, which
-    survivorship alone assigns, from build step 5), including a normalisation collision: each due
+    survivorship alone assigns: test_hop_ledger_sources.py asserts it with superseded), including a
+    normalisation collision: each due
     record lands in exactly one bucket, and the buckets add up to the due population, in the result
     and in the dq_reconciliation lines."""
     void = {"end": "2026-01-01"}

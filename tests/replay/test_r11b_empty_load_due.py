@@ -23,8 +23,8 @@ def test_r11b_load_due_presence_checks_fail_row_checks_did_not_run(spark, tmp_pa
     assert main(["run", "--conf", str(replay.conf)]) == 0  # FAILED checks still complete the run
     rows = [row for (ds, _), group in latest(spark, replay).items() if ds in REALTIME_DATASETS for row in group]
     # gold: 7 Tier 1 (T1_FRESHNESS is configured in the sample) + HOP_KEY_CURRENCY + HOP_VALUE_AGREEMENT + HOP_LEDGER
-    # + 4 rules = 14; curated 6; table-wide 4; drift once per table
-    assert len(rows) == 23
+    # + T1_SOURCE_ATTRIBUTION (build step 5) + 4 rules = 15; curated 6; table-wide 4; drift once per table
+    assert len(rows) == 24
     assert "HOP_LEDGER" in {r.check_id for r in rows}
     for row in rows:
         assert row.state != "PASSED", row

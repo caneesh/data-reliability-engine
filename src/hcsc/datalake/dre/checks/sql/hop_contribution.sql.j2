@@ -1,0 +1,83 @@
+{# HOP_CONTRIBUTION (build step 5; docs/design/reconciliation-model.md section 6.2).
+   p: parameters from checks/hop/contribution.py. All times are UTC TIMESTAMPs.
+
+   The population is the rows here loaded in the window (on the full sweep, every row loaded before the
+   window end). Each row's reference (this dataset's columns, key_normalise applied) resolves to the
+   contributor version current at the row's load time: the latest by the contributor's record time among
+   its rows (key_normalise applied) loaded at or before that load time, every row tied at it kept.
+   A row is
+   - 'unresolved' when no such version exists ('no version') or it references nothing ('no reference');
+   - 'divergent' when a contributed column disagrees with every row of that version (as strings, null
+     equal to null);
+   - 'resolved' otherwise.
+   Rows with no usable load time cannot be placed: they are counted as 'untimed', beside the population.
+   One row per (line, label) with how many rows; 'due' is the population, so the lines can be checked
+   to add up to it. Counts only. #}
+WITH here AS (
+  SELECT {{ p.dn_ref }} AS k, {{ p.dn_referenced }} AS referenced, {{ p.dn_load }} AS load_ts
+{% for c in p.contributed %}
+       , CAST({{ c.dn }} AS STRING) AS d_{{ loop.index }}
+{% endfor %}
+  FROM {{ p.dn_table }}
+{% if p.dn_filter %}
+  WHERE {{ p.dn_filter }}
+{% endif %}
+),
+population AS (
+  SELECT * FROM here
+  WHERE load_ts < {{ p.window_end }}{% if not p.full_sweep %} AND load_ts >= {{ p.window_start }}{% endif %}
+
+),
+grouped AS (
+  SELECT k, referenced, load_ts{% for c in p.contributed %}, d_{{ loop.index }}{% endfor %}, COUNT(*) AS n
+  FROM population
+  GROUP BY k, referenced, load_ts{% for c in p.contributed %}, d_{{ loop.index }}{% endfor %}
+
+),
+contributor AS (
+  SELECT {{ p.up_ref }} AS k, {{ p.up_record }} AS record_ts, {{ p.up_load }} AS load_ts
+{% for c in p.contributed %}
+       , CAST({{ c.up }} AS STRING) AS u_{{ loop.index }}
+{% endfor %}
+  FROM {{ p.up_table }}
+  WHERE {{ p.up_keyed }}{% if p.up_filter %} AND {{ p.up_filter }}{% endif %}
+
+),
+versions AS (
+  SELECT r.k, r.load_ts, MAX(c.record_ts) AS version_ts
+  FROM (SELECT DISTINCT k, load_ts FROM grouped WHERE referenced) r
+  JOIN contributor c ON c.k = r.k AND c.load_ts <= r.load_ts
+  WHERE c.record_ts IS NOT NULL
+  GROUP BY r.k, r.load_ts
+),
+{% if p.contributed %}
+agreeing AS (
+  SELECT DISTINCT g.k, g.load_ts{% for c in p.contributed %}, g.d_{{ loop.index }}{% endfor %}
+
+  FROM grouped g
+  JOIN versions v ON v.k = g.k AND v.load_ts = g.load_ts
+  JOIN contributor c ON c.k = v.k AND c.record_ts = v.version_ts AND c.load_ts <= v.load_ts
+  WHERE {% for c in p.contributed %}g.d_{{ loop.index }} <=> c.u_{{ loop.index }}{% if not loop.last %} AND {% endif %}{% endfor %}
+
+),
+{% endif %}
+judged AS (
+  SELECT CASE WHEN NOT g.referenced OR v.k IS NULL THEN 'unresolved'
+{% if p.contributed %}
+              WHEN a.k IS NULL THEN 'divergent'
+{% endif %}
+              ELSE 'resolved' END AS line,
+         CASE WHEN NOT g.referenced THEN 'no reference' WHEN v.k IS NULL THEN 'no version' END AS label,
+         g.n
+  FROM grouped g
+  LEFT JOIN versions v ON v.k = g.k AND v.load_ts = g.load_ts
+{% if p.contributed %}
+  LEFT JOIN agreeing a ON a.k = g.k AND a.load_ts = g.load_ts{% for c in p.contributed %} AND a.d_{{ loop.index }} <=> g.d_{{ loop.index }}{% endfor %}
+
+{% endif %}
+)
+SELECT line, label, SUM(n) AS n FROM judged GROUP BY line, label
+UNION ALL
+SELECT 'due' AS line, CAST(NULL AS STRING) AS label, COUNT(*) AS n FROM population
+UNION ALL
+SELECT 'untimed' AS line, CAST(NULL AS STRING) AS label, COUNT(*) AS n FROM here WHERE load_ts IS NULL

@@ -26,14 +26,16 @@ if TYPE_CHECKING:
 
 # Kinds the engine judges today, kinds whose checks come in a later build step, and kinds it cannot
 # express (target-architecture.md section 7; reconciliation model section 4).
-JUDGED = ("identity", "dedup", "merge", "union_partition", "aggregate")
-LATER = {"join_contribution": 5, "survivorship": 5}
+JUDGED = ("identity", "dedup", "merge", "union_partition", "join_contribution", "survivorship", "aggregate")
+LATER: dict[str, int] = {}  # none since build step 5 (join_contribution: HOP_CONTRIBUTION; survivorship: HOP_LEDGER)
 UNSUPPORTED = ("fan_out",)
 # Kinds compared through key_map; join_contribution resolves a reference and fan_out cannot be keyed.
 KEYED = ("identity", "dedup", "merge", "union_partition", "survivorship", "aggregate")
-# HOP_LEDGER judges these kinds (build step 3); the others are DID_NOT_RUN / unsupported_mapping
-# there, an inferred aggregate included (D6 condition 3).
-LEDGER_KINDS = ("identity", "dedup", "merge", "union_partition")
+# HOP_LEDGER judges these kinds (build step 3; survivorship from build step 5); the others are
+# DID_NOT_RUN / unsupported_mapping there, an inferred aggregate included (D6 condition 3). A
+# join_contribution hop is a contributor: HOP_CONTRIBUTION checks it, and its rows are counted by the
+# primary edge's ledger (reconciliation model section 6.2).
+LEDGER_KINDS = ("identity", "dedup", "merge", "union_partition", "survivorship")
 
 
 @dataclass(frozen=True)
@@ -99,7 +101,16 @@ def blind_spots(config: Config, hop: Hop) -> list[str]:
     elif c.mapping in LATER:
         spots.append(f"{c.mapping} is not judged until build step {LATER[c.mapping]}")
     if c.mapping == "union_partition":
-        spots.append("attribution (each row here owned by exactly one source) is not proven until build step 5")
+        spots.append("attribution (each row here owned by exactly one source) is proven at run time, not from "
+                     "configuration: T1_SOURCE_ATTRIBUTION and HOP_LEDGER test the siblings' feed_filters over the "
+                     "table in each evaluation, and a run where they overlap or leave rows unattributed keeps the "
+                     "claim qualified (attribution_unverified)")
+    if c.mapping == "join_contribution":
+        spots.append("a contributor is checked for resolution and value agreement (HOP_CONTRIBUTION), not for "
+                     "completeness: the primary edge's ledger counts each row once")
+        if not c.contributes:
+            spots.append("no contributes: only the reference's resolution is checked, no contributed value is "
+                         "compared")
     if c.mapping == "aggregate":
         spots.append("contribution unavailable: judged at group level only")
         spots.append("HOP_LEDGER does not reconcile aggregate hops yet: unsupported_mapping (group-level hop "

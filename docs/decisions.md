@@ -505,6 +505,17 @@ The traceability matrix comes before code (exit criterion 6).
    - **Backpressure:** at 80% of the budget the next run defers the full sweep.
    - **Load test:** on a representative cluster, which needs the platform team.
 
+## Phase 1 build step 5: source attribution, contribution, survivorship (2026-10-20)
+
+Built under the master implementation prompt of 2026-10-20, not ratified. Defaults taken, for Gate A:
+
+- **S1, where `superseded` ranks.** Directly after `deleted` (the model's table puts it after `rejected`). Ranked there, the losing source's own exclusion and tombstone rules never judge the winner's row as a breach (`excluded_but_present`, `deleted_not_applied`); such a pair is an overlap diagnostic instead. Moving it is one tuple and one SQL line.
+- **S2, "the winner delivered it".** The losing edge recomputes the winner's latest version as of the cutoff and compares it with this dataset as `delivered` does; it does not read the winner's due set (the winner's version may have been due in another window), nor the winner's own tombstone or exclusion rules. A winner that cannot be read makes the losing hop DID\_NOT\_RUN (invalid\_config or table\_missing).
+- **S3, the attribution proof** reads every row of the table, with no time bound, in T1\_SOURCE\_ATTRIBUTION and again in each union hop's ledger (one scan per sibling). A proof over every row also holds for the rows loaded before an AS\_OF\_REPLAY's cutoff.
+- **S4, one attribution result per table per window** in rechecks too: a RERUN or REPLAY plans datasets one by one, so duplicates per table and window are dropped (`runner.once_per_table_window`).
+- **S5, HOP\_CONTRIBUTION.** A row whose reference is entirely null is `unresolved` ("no reference"): the strict reading, so an optional reference fails. Tied contributor versions: a row agrees if it matches any. Contributor rows without record or load time are ignored. The contract's tolerance is not applied. Its scope's `claim` is free text.
+- **S6, `CheckContext.datasets`** carries every configured dataset, so a check can find a union's siblings; `upstreams_of` also includes contract upstreams (a contributor has no `key_map` entry).
+
 ## Phase 1 build step 4: evaluation modes and AS_OF_REPLAY (2026-10-20)
 
 Built under the master implementation prompt of 2026-10-20 (parallel development of checkpoints 3 to 8, reviewed at Gate A and Gate B). The revised checkpoint 3 still awaits its independent review; step 4 is built against it on that authority and is not ratified. Each item is a default taken, for ratification at Gate A:
