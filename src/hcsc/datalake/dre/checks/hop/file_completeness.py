@@ -45,7 +45,8 @@ class FileCompleteness(Check):
         params = hop_params(ctx, event, up_id, up, "HOP_FILE_COMPLETENESS")
         if isinstance(params, CheckResult):
             return params
-        return replace(FileCompleteness._judge(ctx, up_id, up, params, groups), coverage=params["coverage"])
+        return replace(FileCompleteness._judge(ctx, up_id, up, params, groups), coverage=params["coverage"],
+                       qualifications=params["qualifications"])
 
     @staticmethod
     def _judge(ctx: CheckContext, up_id: str, up: Dataset | None, params: dict, groups: dict) -> CheckResult:

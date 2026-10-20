@@ -344,17 +344,22 @@ AFTER = Event(RAW, datetime(2026, 1, 17, 12, tzinfo=UTC), datetime(2026, 1, 18, 
 CHAIN_DQ = "dq_chain_carry"
 
 
-def chain_at(spark, datasets: dict[str, Dataset], event: Event, secret: bytes | None = SECRET):
-    """The chain evaluated as a NORMAL run would, reading its own committed history in CHAIN_DQ."""
+def chain_at(spark, datasets: dict[str, Dataset], event: Event, secret: bytes | None = SECRET,
+             history_since: date | None = None, key_events_since: date | None = None, full_sweep: bool = False,
+             coverage_since: date | None = None):
+    """The chain evaluated as a NORMAL run would, reading its own committed history in CHAIN_DQ;
+    history_since and key_events_since as the runner sets them (the lookback, dq_key_event's retention)."""
     cfg = config(datasets)
     cfg = dataclasses.replace(cfg, defaults=cfg.defaults.model_copy(update={"dq_database": CHAIN_DQ}))
+    retention = {"key_events_since": key_events_since} if key_events_since is not None else {}
     ctx = CheckContext(spark, datasets[RAW], None, cfg.dataset_settings(RAW), "UTC", CHAIN_DQ,
-                       key_secret=secret, config=cfg)
+                       key_secret=secret, config=cfg, history_since=history_since, full_sweep=full_sweep,
+                       coverage_since=coverage_since, **retention)
     [r], _ = run_check(ChainCompleteness(), ctx, event)
     return r
 
 
-def publish(spark, result, run_id: str, event: Event) -> None:
+def publish(spark, result, run_id: str, event: Event, kept_until: date | None = None) -> None:
     """Commit the chain's result and its key events as the runner does (ADR-07)."""
     from hcsc.datalake.dre.store.commits import Commit, append_commits
     from hcsc.datalake.dre.store.key_events import append_key_events
@@ -370,8 +375,8 @@ def publish(spark, result, run_id: str, event: Event) -> None:
         "coverage_to": result.coverage[1] if covers(result) else None, "run_date": day}], commit=False)
     n = 0 if result.key_events is None else append_key_events(
         result.key_events, CHAIN_DQ, run_id, ev, RAW, "CHAIN_COMPLETENESS", LABEL, event.window_end, day)
-    append_commits(spark, CHAIN_DQ, [Commit(run_id, ev, RAW, "CHAIN_COMPLETENESS", 1, key_event_rows=n)],
-                   event.window_end, day)
+    append_commits(spark, CHAIN_DQ, [Commit(run_id, ev, RAW, "CHAIN_COMPLETENESS", 1, key_event_rows=n,
+                                            evidence_kept_until=kept_until)], event.window_end, day)
 
 
 @pytest.fixture()
@@ -425,3 +430,130 @@ def test_without_key_events_a_pending_record_is_not_carried_and_the_scope_says_s
     first = chain_at(spark, pending_window(spark, "ch_carry_nosecret", gold_holds_it=False), EVENT, secret=None)
     assert first.key_events is None
     assert any("not carried" in s for s in scope(first)["blind_spots"])
+
+
+# --- final conditional approval, CA-02: a long-pending record is never silently forgotten ---
+# The chain carries a record pending at a later edge through its PENDING key event, which every
+# carrying evaluation that still finds it pending records again. The hourly read of those events looks
+# back to history_since; when the chain's own coverage did not continue from inside that lookback (it
+# was not evaluated for longer), the read reaches back to dq_key_event's retention instead (as the
+# coverage read does, P1-02). FAR is 60 days after EVENT; its lookback (30 days) does not reach EVENT.
+
+FAR = Event(RAW, datetime(2026, 3, 16, 12, tzinfo=UTC), datetime(2026, 3, 17, 12, tzinfo=UTC))
+FAR_NEXT = Event(RAW, datetime(2026, 3, 17, 12, tzinfo=UTC), datetime(2026, 3, 18, 12, tzinfo=UTC))
+FAR_LOOKBACK = date(2026, 2, 14)
+
+
+def pending_published(spark, name: str, **kwargs) -> None:
+    """EVENT: 123402 is pending at curated -> gold and recorded PENDING (run_date 2026-01-16)."""
+    first = chain_at(spark, pending_window(spark, name, gold_holds_it=False), EVENT)
+    assert [e for _, e, _, _ in events_of(first)] == ["PENDING"]
+    publish(spark, first, "r-pending", EVENT, **kwargs)
+
+
+def test_a_pending_record_younger_than_the_lookback_is_carried(spark, carry_store) -> None:
+    """CA-02, 1: the PENDING event is inside the lookback: carried and judged (P1-03, with a lookback)."""
+    pending_published(spark, "ch_young")
+    r = chain_at(spark, pending_window(spark, "ch_young", gold_holds_it=True), NEXT, history_since=date(2026, 1, 1))
+    assert scope(r)["carried_in"] == 1 and outcomes(r)["reached"] == 1
+
+
+def test_a_pending_record_older_than_the_lookback_is_carried_and_reaches_gold(spark, carry_store) -> None:
+    """CA-02, 2 and 3: the chain was not evaluated for 60 days, so the PENDING event is older than the
+    lookback. The chain's coverage continues from before the lookback, so the carry read reaches back
+    too: the record is judged (it reached gold), RESOLVED, and counted once; later windows carry nothing."""
+    pending_published(spark, "ch_old_reached")
+    datasets = pending_window(spark, "ch_old_reached", gold_holds_it=True)
+    r = chain_at(spark, datasets, FAR, history_since=FAR_LOOKBACK)
+    assert scope(r)["carried_in"] == 1
+    assert (r.state, r.population, r.violations) == ("PASSED", 1, 0)
+    assert outcomes(r) == {"due": 1, "reached": 1, "accounted": 0, "lost": 0, "unobservable": 0, "pending": 0}
+    assert [(e, v) for _, e, _, v in events_of(r)] == [("RESOLVED", key_of("123402"))]
+    publish(spark, r, "r-far", FAR)
+
+    again = chain_at(spark, datasets, FAR_NEXT, history_since=FAR_LOOKBACK)
+    assert again.reason_code == "empty_population" and scope(again)["carried_in"] == 0  # never judged twice
+
+
+def test_a_long_pending_record_that_never_reaches_gold_is_lost_at_the_first_failing_edge(spark, carry_store) -> None:
+    """CA-02, 4 and 6: gold never receives it. Once due at curated -> gold it is lost there: FAILED,
+    the first observed gap is that edge (not claimed as the origin), one LOST event; repeated later
+    evaluations neither carry it nor record a second terminal outcome."""
+    pending_published(spark, "ch_old_lost")
+    datasets = pending_window(spark, "ch_old_lost", gold_holds_it=False)
+    r = chain_at(spark, datasets, FAR, history_since=FAR_LOOKBACK)
+    assert (r.state, r.population, r.violations) == ("FAILED", 1, 1)
+    gap = scope(r)["first_observed_gap"]
+    assert gap["edge"] == EDGE2 and "not necessarily where the loss began" in gap["note"]
+    assert [(e, v) for _, e, _, v in events_of(r)] == [("LOST", key_of("123402"))]
+    publish(spark, r, "r-far", FAR)
+    for i, event in enumerate((FAR_NEXT, Event(RAW, FAR_NEXT.window_end, FAR_NEXT.window_end.replace(day=19)))):
+        later = chain_at(spark, datasets, event, history_since=FAR_LOOKBACK)
+        assert later.reason_code == "empty_population" and scope(later)["carried_in"] == 0
+        assert later.key_events is None  # nothing to record: no second LOST
+        publish(spark, later, f"r-later-{i}", event)
+
+
+def test_a_pending_record_whose_evidence_has_expired_is_still_judged_from_the_layers(spark, carry_store) -> None:
+    """CA-02, 5: the PENDING event's commit is past evidence_kept_until (EXPIRED). It only names the
+    key to judge again; the outcome comes from this evaluation's own reading of the layers."""
+    pending_published(spark, "ch_expired", kept_until=date(2026, 1, 17))
+    assert spark.sql(f"SELECT evidence_state FROM {CHAIN_DQ}.v_commit_state WHERE run_id = 'r-pending'"
+                     ).collect()[0].evidence_state == "EXPIRED"
+    r = chain_at(spark, pending_window(spark, "ch_expired", gold_holds_it=False), FAR, history_since=FAR_LOOKBACK)
+    assert scope(r)["carried_in"] == 1 and (r.state, r.violations) == ("FAILED", 1)
+
+
+def test_a_pending_record_past_dq_key_event_retention_is_not_carried_says_so_and_the_full_sweep_judges_it(
+        spark, carry_store) -> None:
+    """CA-02, 5: past dq_key_event's retention (key_events_since) the PENDING event is gone by the
+    approved retention policy, so it cannot be carried; the scope names that horizon, and the full
+    sweep, which reads the layers rather than the store, still judges the record."""
+    pending_published(spark, "ch_retained")
+    datasets = pending_window(spark, "ch_retained", gold_holds_it=False)
+    r = chain_at(spark, datasets, FAR, history_since=FAR_LOOKBACK, key_events_since=date(2026, 2, 1))
+    assert scope(r)["carried_in"] == 0
+    assert any("2026-02-01" in s and "retention" in s for s in scope(r)["blind_spots"])
+    sweep = chain_at(spark, datasets, FAR, history_since=FAR_LOOKBACK, key_events_since=date(2026, 2, 1),
+                     full_sweep=True)
+    assert (sweep.state, sweep.violations) == ("FAILED", 1) and scope(sweep)["first_observed_gap"]["edge"] == EDGE2
+
+
+def test_a_pending_record_recorded_by_invalid_evidence_is_judged_again_not_trusted(spark, carry_store) -> None:
+    """CA-02, 5: EVENT's evaluation is found INVALID. Its PENDING event is not trusted and its coverage
+    covers nothing, so NEXT judges EVENT's range again from the layers: the record is found there."""
+    from tests.store.conftest import append_rows
+
+    pending_published(spark, "ch_invalid")
+    append_rows(spark, CHAIN_DQ, "dq_integrity", [{
+        "run_id": "sweep", "record": "EVIDENCE_MISMATCH", "subject_run_id": "r-pending",
+        "subject_run_date": EVENT.window_end.date(), "evaluation_id": "e-chain-r-pending",
+        "commit_kind": "result", "recorded_at": NEXT.window_start, "run_date": NEXT.window_start.date()}])
+    r = chain_at(spark, pending_window(spark, "ch_invalid", gold_holds_it=True), NEXT, history_since=date(2026, 1, 1))
+    assert scope(r)["carried_in"] == 0
+    assert (r.state, r.population, r.violations) == ("PASSED", 2, 0)  # EVENT's two records, judged again
+    assert outcomes(r)["reached"] == 2
+
+
+def test_a_chain_without_retained_coverage_is_a_qualified_pass_until_the_full_sweep(spark, carry_store) -> None:
+    """CA-01 for the chain: its range has the hop checks' rule. The store is older than the retention
+    (a partition at or before coverage_since) and the chain has no coverage retained, so its PASS is
+    qualified (coverage_gap), never healthy; the full sweep is not. In a store that has lost nothing,
+    the same first evaluation is not."""
+    from tests.store.conftest import append_rows
+
+    datasets = build(spark, "ch_gap", reached=["123401"])
+    young = chain_at(spark, datasets, EVENT, history_since=date(2026, 1, 1), coverage_since=date(2025, 7, 1))
+    assert "coverage_gap" not in young.qualifications
+    assert scope(young)["coverage_basis"].startswith("first evaluation")
+    append_rows(spark, CHAIN_DQ, "dq_check_result", [{  # another check's result, before the retention
+        "evaluation_id": "e-old", "run_id": "r-old", "event_id": "x", "window_start": EVENT.window_start,
+        "window_end": EVENT.window_end, "execution_type": "NORMAL", "dataset": CUR, "check_id": "T1_ZERO_ROWS",
+        "state": "PASSED", "evaluated_at": EVENT.window_end, "run_date": date(2025, 6, 1)}])
+    first = chain_at(spark, datasets, EVENT, history_since=date(2026, 1, 1), coverage_since=date(2025, 7, 1))
+    assert first.state == "PASSED" and "coverage_gap" in first.qualifications
+    assert "coverage_gap" in scope(first)["qualifications"]
+    assert scope(first)["coverage_basis"].startswith("unresolved coverage gap")
+    sweep = chain_at(spark, datasets, EVENT, history_since=date(2026, 1, 1), coverage_since=date(2025, 7, 1),
+                     full_sweep=True)
+    assert sweep.state == "PASSED" and "coverage_gap" not in sweep.qualifications

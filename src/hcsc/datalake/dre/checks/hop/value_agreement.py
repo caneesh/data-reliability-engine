@@ -51,7 +51,7 @@ class ValueAgreement(Check):
             expected="owned columns equal to every upstream row at the latest version",
             group_values={"upstream": up_id},
         )
-        return replace(result, coverage=params["coverage"])
+        return replace(result, coverage=params["coverage"], qualifications=params["qualifications"])
 
 
 register_check(ValueAgreement())

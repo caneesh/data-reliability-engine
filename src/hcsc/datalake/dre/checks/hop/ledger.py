@@ -47,7 +47,7 @@ from hcsc.datalake.dre.checks.base import (
 )
 from hcsc.datalake.dre.checks.derived import source_of
 from hcsc.datalake.dre.checks.hop.common import exclusion_terms, has_a_key, hop_label, per_hop
-from hcsc.datalake.dre.checks.hop.coverage import coverage_of, judged
+from hcsc.datalake.dre.checks.hop.coverage import GAP, coverage_of, judged
 from hcsc.datalake.dre.checks.keys import column_expr, key_string
 from hcsc.datalake.dre.checks.registry import register_check
 from hcsc.datalake.dre.checks.times import utc_expr
@@ -127,6 +127,8 @@ QUALIFICATIONS = {
                               "(T1_SOURCE_ATTRIBUTION)",
     "orphans_unchecked": "rows here that no upstream row maps to were not counted",
     "evidence_reported": "the claim rests on evidence the pipeline reported (its rejects)",
+    "coverage_gap": "the hop's range does not continue from trusted committed coverage: records due before it are "
+                    "judged only by the next full sweep (checks/hop/coverage.py; carried until then)",
 }
 
 
@@ -304,7 +306,7 @@ def ledger_params(ctx: CheckContext, event: Event, hop: Hop, up: Dataset) -> dic
         "deadline_start": utc_literal(start), "deadline_end": utc_literal(end),
         "pending_from": utc_literal(max(start, end)), "coverage": coverage_of(start, end), "judged": (start, end),
         "full_sweep": ctx.full_sweep, "one_to_one": hop.contract.mapping == "identity",
-        "coverage_basis": span.basis,
+        "coverage_basis": span.basis, "coverage_gap": span.gap,
         "as_of": utc_literal(ctx.as_of) if ctx.as_of is not None else None,
         "winners": winners,
     }
@@ -576,6 +578,9 @@ class HopLedger(Check):
         level = ceiling(ledger, reject_class)
         scope = scope_of(ctx, event, hop, up, level, judged=params["judged"], proof=proof)
         scope["coverage_basis"] = params["coverage_basis"]  # where the range starts, gaps included (P1-02)
+        if params["coverage_gap"]:  # CA-01: never healthy while records before the range are unjudged
+            scope["qualifications"].append(GAP)
+            scope["claim"] = claim_of(hop, tuple(scope["qualifications"]))
         if state == FAILED:
             scope["triage"] = triage(ledger, reject_class, failures)
         scope_json = json.dumps(scope, sort_keys=True)

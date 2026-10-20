@@ -245,12 +245,13 @@ def history_since(config: Config, run_start: datetime) -> date:
     return (as_utc(run_start) - timedelta(days=config.defaults.history_lookback_days)).date()
 
 
-def coverage_since(config: Config, run_start: datetime) -> date:
-    """The first run_date dq_check_result still retains: how far back a hop's coverage is looked for
-    when history_lookback_days holds none (checks/hop/coverage.py, final review P1-02)."""
+def coverage_since(config: Config, run_start: datetime, table: str = "dq_check_result") -> date:
+    """The first run_date `table` still retains: how far back a hop's coverage (dq_check_result) is
+    looked for when history_lookback_days holds none (checks/hop/coverage.py, final review P1-02), and
+    a chain's PENDING records (dq_key_event) when its coverage lapsed (checks/hop/chain.py, CA-02)."""
     from hcsc.datalake.dre.store.commits import add_months
 
-    return add_months(as_utc(run_start).date(), -config.defaults.retention_months["dq_check_result"])
+    return add_months(as_utc(run_start).date(), -config.defaults.retention_months[table])
 
 
 def events_for(spark: SparkSession, config: Config, work: list[Planned], run_start: datetime,
@@ -399,6 +400,7 @@ def check_context(spark: SparkSession, config: Config, planned: Planned, event: 
         budget_minutes=budget_minutes, scan_mb_per_minute=config.defaults.scan_mb_per_minute,
         record_key_events=record_key_events, history_since=history_since(config, event.window_end),
         coverage_since=coverage_since(config, event.window_end),
+        key_events_since=coverage_since(config, event.window_end, "dq_key_event"),
         as_of=event.window_end if as_of else None,
         config=config,
     )

@@ -164,6 +164,9 @@ class CheckContext:
     # The first run_date still retained in dq_check_result (its retention_months): how far back a hop's
     # coverage is looked for when the lookback holds none (checks/hop/coverage.py, P1-02); None: all.
     coverage_since: date | None = None
+    # The first run_date still retained in dq_key_event: how far back a chain's PENDING records are read
+    # when its coverage did not continue from inside the lookback (checks/hop/chain.py, CA-02); None: all.
+    key_events_since: date | None = None
     # The check's parameters (an instance of Check.params_model), resolved by resolve_params (called from
     # run_check) from the pattern's defaults, the feed's and the dataset's `check_params`; None without.
     params: Any = None

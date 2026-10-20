@@ -505,7 +505,19 @@ The traceability matrix comes before code (exit criterion 6).
    - **Backpressure:** at 80% of the budget the next run defers the full sweep.
    - **Load test:** on a representative cluster, which needs the platform team.
 
-## Final consolidated review: corrections P1-01 to P1-03 and O6 (2026-10-20)
+## Final conditional approval: conditions CA-01 and CA-02 (2026-10-20)
+
+The user's conditional approval named two correctness conditions. Both were reproduced as defects on the current code (`docs/design/evidence/final-conditional-approval.md`). The smallest corrections, to ratify:
+
+- **CA-01, an unresolved coverage gap is a qualification.** A hop range that does not continue from trusted committed coverage that may have existed is qualified `coverage_gap`. That is the case when only INVALID results are retained, or when nothing is retained in a store older than `dq_check_result`'s retention (a partition at or before the retention's first day, from the metastore's partition list, read only in that branch), where retention may have dropped the hop's coverage. It uses the existing qualification mechanism (C3-03), so the PASS is published as it is, never healthy, listed in the digest and counted in its subject. No new result state, column or view. A later window continuing from such a result's coverage carries the qualification, read from the covering row (on a tie of `coverage_to`, the gapped row wins). Only a full sweep that covers the hop clears it, because a full sweep judges every record due before its range end; a sweep that did not cover (DID\_NOT\_RUN) resolves nothing. This applies to every hop check (HOP\_LEDGER, HOP\_KEY\_CURRENCY, HOP\_VALUE\_AGREEMENT, HOP\_FILE\_COMPLETENESS) and to CHAIN\_COMPLETENESS, whose scope now also states `coverage_basis`.
+  - A first evaluation in a store that has lost nothing to retention is not a gap: no history is missing, and its clean PASS stays healthy. This keeps the approved proof scenarios (PS2's healthy, contract-proven PASS on a fresh store).
+    - A first version qualified every first evaluation. It failed seven runner-level tests (R14, R15, R16, R19, and the store's reconciliation test), so it was narrowed, not those tests restated.
+    - In a store older than the retention, a first evaluation is indistinguishable from dropped coverage and is qualified until the hop's first full sweep (fail closed; KI-18).
+  - A context without a history bound (`history_since` null, check-level tests only; the runner always sets it) keeps the earlier "first evaluation" basis, unqualified.
+- **CA-02, the carry read follows the chain's continuity.** Each carrying evaluation records again every record it still finds pending, so while the chain's coverage continues from inside `history_lookback_days`, its outstanding records' latest events are inside the lookback too, and the hourly read stays bounded there. When the chain's coverage did not continue from inside the lookback (it was not evaluated for longer, or it has none), the read of its PENDING events reaches back to `dq_key_event`'s retention (`CheckContext.key_events_since`, from `retention_months`). This is the same bounded-read-with-fallback as P1-02, so the read stays cheap when continuity holds.
+  - A PENDING event past that retention is gone by the approved retention policy (spec section 5). The chain's scope names the horizon, and the full sweep, which reads the layers rather than the store, still judges the record.
+  - EXPIRED evidence only names a key to judge again: the outcome comes from this evaluation's reading of the layers. An INVALID evaluation's PENDING events are not trusted and its coverage covers nothing, so the next evaluation judges that range again from the layers.
+
 
 The user's final consolidated review asked for four corrections, each with a reproducing test; the evidence is `docs/design/evidence/final-corrections.md` and the open items `docs/known-issues.md`. Choices made, for the reviewer:
 

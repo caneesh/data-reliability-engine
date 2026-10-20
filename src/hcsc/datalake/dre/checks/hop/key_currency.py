@@ -57,7 +57,8 @@ class KeyCurrency(Check):
         params = hop_params(ctx, event, up_id, up, "HOP_KEY_CURRENCY")
         if isinstance(params, CheckResult):
             return params
-        return replace(KeyCurrency._judge(ctx, up_id, up, params), coverage=params["coverage"])
+        return replace(KeyCurrency._judge(ctx, up_id, up, params), coverage=params["coverage"],
+                       qualifications=params["qualifications"])
 
     @staticmethod
     def _judge(ctx: CheckContext, up_id: str, up: Dataset | None, params: dict) -> CheckResult:

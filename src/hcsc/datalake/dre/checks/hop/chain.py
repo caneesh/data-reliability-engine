@@ -46,7 +46,7 @@ from hcsc.datalake.dre.checks.base import (
 )
 from hcsc.datalake.dre.checks.derived import base_datasets
 from hcsc.datalake.dre.checks.hop.common import HASH_FUNCTION, has_a_key, hop_label, register_key_hash
-from hcsc.datalake.dre.checks.hop.coverage import coverage_of, judged_range
+from hcsc.datalake.dre.checks.hop.coverage import GAP, coverage_of, judged
 from hcsc.datalake.dre.checks.keys import column_expr, key_string
 from hcsc.datalake.dre.checks.registry import register_check
 from hcsc.datalake.dre.config.models import Identifier, Model
@@ -309,7 +309,8 @@ class ChainCompleteness(Check):
         label = chain_label(source, terminal)
         groups = {"chain": label}
         total_sla = sum(e.sla_hours for e in edges)
-        start, end = judged_range(ctx, event, CHECK_ID, label, group="chain", sla_hours=total_sla)
+        span = judged(ctx, event, CHECK_ID, label, group="chain", sla_hours=total_sla)
+        start, end = span.start, span.end
         # the edges judged: up to the first the ledger does not judge (the first edge is always read: it
         # gives the source records, unobservable at once when it is not judged)
         stop = next((i for i, e in enumerate(edges) if not e.judged), None)
@@ -328,10 +329,15 @@ class ChainCompleteness(Check):
         # Records an earlier evaluation left pending at an edge after the first (recorded PENDING): judged
         # again now, whatever the range, since the range has moved past their chain deadline (P1-03).
         # NORMAL runs only, with key events: a recheck neither reads nor writes the chain's key state.
+        # Every carrying evaluation records a record it still finds pending again, so while the chain's
+        # coverage continues from inside the lookback its outstanding records' latest events are inside it
+        # too; otherwise (the chain was not evaluated for longer) the read reaches back to dq_key_event's
+        # retention, so a long-pending record is never forgotten (final conditional approval, CA-02).
         carrying = ctx.record_key_events and ctx.key_secret is not None and ctx.dq_database is not None
         recheck, carried_in = None, 0
+        carry_since = ctx.history_since if span.in_lookback else ctx.key_events_since
         if carrying and ctx.spark.catalog.tableExists(f"{ctx.dq_database}.v_committed_key_event"):
-            since = f" AND run_date >= DATE'{ctx.history_since.isoformat()}'" if ctx.history_since is not None else ""
+            since = f" AND run_date >= DATE'{carry_since.isoformat()}'" if carry_since is not None else ""
             materialise(
                 f"SELECT key_value AS k FROM (SELECT key_value, event, ROW_NUMBER() OVER (PARTITION BY key_hash "
                 f"ORDER BY observed_at DESC, run_id DESC) AS rn FROM {ctx.dq_database}.v_committed_key_event "
@@ -381,11 +387,16 @@ class ChainCompleteness(Check):
             for q in qualifications_of(edge.ctx, edge.hop, t["edge_level"].get(edge.label, "observed")):
                 if q not in qualifications:
                     qualifications.append(q)
+        qualifications.extend(span.qualifications)  # CA-01: a range that does not continue from trusted coverage
         used = [lv for (o, _, _, lv), n in t["lines"].items() if o in ("reached", "accounted") and n]
         level = max(used, key=LEVELS.index) if used else "observed"
         proven = [e.label for e in read if e.judged]
+        horizon = (f"; PENDING events are read back to {carry_since.isoformat()} ("
+                   + ("the lookback, inside which the chain's coverage continues" if span.in_lookback
+                      else "dq_key_event's retention") + "): a record pending only before that is judged by the "
+                   "full sweep") if carry_since is not None else ""
         spots = ["a record pending at an edge after the first is recorded PENDING and judged by the next "
-                 "evaluation, once due there" if carrying else
+                 "evaluation, once due there" + horizon if carrying else
                  "a record pending at an edge after the first is not carried to the next evaluation (no key events: "
                  "no hmac_secret_file, or a recheck): it is judged only by the full sweep"]
         unobservable = None
@@ -408,6 +419,7 @@ class ChainCompleteness(Check):
                            "record pending at any edge is pending for the chain"),
             "window": [event.window_start.isoformat(), event.window_end.isoformat()],
             "deadline_range": [start.isoformat(), end.isoformat()], "chain_sla_hours": total_sla,
+            "coverage_basis": span.basis,
             "cutoff": event.window_end.isoformat(), "full_sweep": ctx.full_sweep,
             "first_observed_gap": None if gap is None else {
                 "edge": gap, "lost": t["by_edge"][gap]["lost"],

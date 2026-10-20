@@ -25,6 +25,16 @@ the range restart at this window, and the result's basis says so: an unresolved 
 only by the weekly full sweep. INVALID results cover nothing (their judgement is not trusted), but
 still count as evaluations of the hop, so the range falls back to their start rather than to this
 window's.
+
+A range that does not continue from trusted committed coverage where coverage may have existed (only
+INVALID results retained; or nothing retained in a store older than dq_check_result's retention, which
+may have dropped it) is a coverage gap: the records due before it are judged only by the full sweep, so
+the result is qualified `coverage_gap` and never healthy (final conditional approval, CA-01). A hop with
+no result in a store that has lost none to retention is on its first evaluation: no history is missing,
+and its clean PASS is healthy, as before. A later
+window that continues from such a result's coverage carries the qualification, so a later PASS cannot
+hide the gap; a full sweep that covers the hop (it judges every record due before its range end)
+resolves it, and the windows after it continue from clean coverage.
 """
 
 from __future__ import annotations
@@ -41,29 +51,65 @@ if TYPE_CHECKING:
     from hcsc.datalake.dre.checks.events import Event
 
 
+GAP = "coverage_gap"  # the qualification of a range that does not continue from trusted coverage
+
+
 @dataclass(frozen=True)
 class Judged:
     start: datetime
     end: datetime
     basis: str  # where start comes from, for the scope
+    gap: bool = False  # records due before start are judged only by the full sweep: qualified, never healthy
+    in_lookback: bool = False  # continues from trusted coverage the hourly read (history_since) found
+
+    @property
+    def qualifications(self) -> tuple[str, ...]:
+        return (GAP,) if self.gap else ()
+
+
+@dataclass(frozen=True)
+class _Found:
+    covered: datetime | None  # the latest trusted coverage_to
+    gap: bool  # the result that covered it was qualified coverage_gap
+    on: date | None  # its run_date
+    first: datetime | None  # the first window_start, INVALID results included
 
 
 def _read(ctx: CheckContext, event: Event, check_id: str, up_id: str, group: str,
-          since: date | None, before: date | None) -> tuple[datetime | None, datetime | None, date | None]:
-    """(the latest trusted coverage_to, the first window_start, the run_date of that coverage) among
-    the hop's committed NORMAL results of earlier windows, with run_date in [since, before)."""
+          since: date | None, before: date | None) -> _Found:
+    """The latest trusted coverage among the hop's committed NORMAL results of earlier windows, with
+    run_date in [since, before): where it ended, whether it carried a coverage gap (on a tie, a result
+    that did wins), its run_date; and the first window_start of any of them."""
     bounds = (f" AND run_date >= DATE'{since.isoformat()}'" if since is not None else "") + (
         f" AND run_date < DATE'{before.isoformat()}'" if before is not None else "")
     row = ctx.spark.sql(
-        f"SELECT MAX(CASE WHEN evidence_state <> 'INVALID' THEN coverage_to END) AS covered_to, "
-        f"MAX_BY(run_date, CASE WHEN evidence_state <> 'INVALID' THEN coverage_to END) AS covered_on, "
-        f"MIN(window_start) AS first_start "
+        f"SELECT MAX(CASE WHEN evidence_state <> 'INVALID' AND coverage_to IS NOT NULL THEN named_struct("
+        f"'covered_to', coverage_to, 'gap', array_contains(split(coalesce(qualifications, ''), ','), '{GAP}'), "
+        f"'covered_on', run_date) END) AS latest, MIN(window_start) AS first_start "
         f"FROM {ctx.dq_database}.v_committed_result "
         f"WHERE dataset = '{ctx.dataset.dataset}' AND check_id = '{check_id}' AND group_values['{group}'] = '{up_id}' "
         f"AND execution_type = 'NORMAL' AND window_end <= {utc_literal(event.window_start)}{bounds}").collect()[0]
-    covered = as_utc(row.covered_to) if row.covered_to is not None else None
     first = as_utc(row.first_start) if row.first_start is not None else None
-    return covered, first, row.covered_on
+    if row.latest is None:
+        return _Found(None, False, None, first)
+    return _Found(as_utc(row.latest.covered_to), bool(row.latest.gap), row.latest.covered_on, first)
+
+
+def _continued(basis: str, carried: bool, full_sweep: bool) -> str:
+    return f"{basis}, continuing an unresolved coverage gap (judged by the next full sweep)" if carried and not full_sweep \
+        else basis
+
+
+def _may_have_dropped(ctx: CheckContext) -> bool:
+    """Whether retention may have dropped results of dq_check_result: the store holds a run_date
+    partition at or before coverage_since (it is older than the retention). Retention drops only
+    partitions before its cutoff, so a store whose first partition is after coverage_since has lost
+    none. Read from the metastore's partition list, and only when the hop has no result retained."""
+    from hcsc.datalake.dre.store.retention import partition_dates
+
+    if ctx.coverage_since is None:  # every run_date retained
+        return False
+    return any(d <= ctx.coverage_since for d in partition_dates(ctx.spark, ctx.dq_database, "dq_check_result"))
 
 
 def judged(ctx: CheckContext, event: Event, check_id: str, up_id: str, group: str = "upstream",
@@ -76,24 +122,31 @@ def judged(ctx: CheckContext, event: Event, check_id: str, up_id: str, group: st
     start, end = event.window_start - sla, event.window_end - sla
     if ctx.dq_database is None or not ctx.spark.catalog.tableExists(f"{ctx.dq_database}.dq_check_result"):
         return Judged(start, end, "no dq store")
-    covered, first, _ = _read(ctx, event, check_id, up_id, group, ctx.history_since, None)
-    if covered is not None:
-        return Judged(covered, end, "committed coverage")
+    sweep = ctx.full_sweep  # judges every record due before end: no gap survives it
+    found = _read(ctx, event, check_id, up_id, group, ctx.history_since, None)
+    first = found.first
+    if found.covered is not None:
+        return Judged(found.covered, end, _continued("committed coverage", found.gap, sweep),
+                      gap=found.gap and not sweep, in_lookback=True)
     if ctx.history_since is not None and (ctx.coverage_since is None or ctx.coverage_since < ctx.history_since):
-        older, older_first, on = _read(ctx, event, check_id, up_id, group, ctx.coverage_since, ctx.history_since)
-        if older is not None:  # trusted coverage before the lookback: continue from it (never later than an
-            # untrusted result's start inside the lookback, which may have judged nothing reliable)
-            begin = older if first is None else min(older, first - sla)
-            return Judged(begin, end, f"committed coverage before the lookback, from {on.isoformat()}")
-        first = first or older_first
-    if first is not None:
-        return Judged(min(first - sla, start), end, "the hop's first evaluated window")
-    if ctx.history_since is None:
+        older = _read(ctx, event, check_id, up_id, group, ctx.coverage_since, ctx.history_since)
+        if older.covered is not None:  # trusted coverage before the lookback: continue from it (never later
+            # than an untrusted result's start inside the lookback, which may have judged nothing reliable)
+            begin = older.covered if first is None else min(older.covered, first - sla)
+            basis = f"committed coverage before the lookback, from {older.on.isoformat()}"
+            return Judged(begin, end, _continued(basis, older.gap, sweep), gap=older.gap and not sweep)
+        first = first or older.first
+    if first is not None:  # only INVALID results retained: nothing trusted says what was judged before them
+        return Judged(min(first - sla, start), end, "the hop's first evaluated window (no trusted coverage "
+                      "retained: records due before it are judged only by the full sweep)", gap=not sweep)
+    if ctx.history_since is None:  # a context without a history bound (the runner always sets one)
         return Judged(start, end, "first evaluation")
+    if not _may_have_dropped(ctx):
+        return Judged(start, end, "first evaluation (the hop has no result, and the store has lost none to retention)")
     retained = ctx.coverage_since.isoformat() if ctx.coverage_since is not None else "the store began"
     return Judged(start, end, f"unresolved coverage gap: no committed coverage retained since {retained} "
                               "(a first evaluation, or coverage older than the retention); records before the "
-                              "range are judged only by the full sweep")
+                              "range are judged only by the full sweep", gap=not sweep)
 
 
 def judged_range(ctx: CheckContext, event: Event, check_id: str, up_id: str, group: str = "upstream",
