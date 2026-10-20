@@ -52,3 +52,5 @@ scan_mb_per_minute: null      # cluster throughput; set it to refuse checks whos
 run_budget_minutes: 40        # ADR-08: a NORMAL run's checks share this; one reached after it is DID_NOT_RUN / run_budget_exceeded
 kill_switch_file: null        # ADR-08: absolute path whose presence stops runs between checks (a deployment value, not yet named)
 backpressure_share: 0.8       # ADR-08: after a NORMAL run longer than this share of the run budget, the weekly full sweep is deferred
+max_concurrent_jobs: 1          # ADR-08's N (final review O6): units of DRE work issuing Spark jobs at once; a cancelled unit counts until it stops
+cancel_grace_seconds: 60        # how long a unit waits for a lingering cancelled one before it is refused (DID_NOT_RUN / concurrency_limit)

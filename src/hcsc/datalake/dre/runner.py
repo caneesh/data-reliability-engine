@@ -245,6 +245,14 @@ def history_since(config: Config, run_start: datetime) -> date:
     return (as_utc(run_start) - timedelta(days=config.defaults.history_lookback_days)).date()
 
 
+def coverage_since(config: Config, run_start: datetime) -> date:
+    """The first run_date dq_check_result still retains: how far back a hop's coverage is looked for
+    when history_lookback_days holds none (checks/hop/coverage.py, final review P1-02)."""
+    from hcsc.datalake.dre.store.commits import add_months
+
+    return add_months(as_utc(run_start).date(), -config.defaults.retention_months["dq_check_result"])
+
+
 def events_for(spark: SparkSession, config: Config, work: list[Planned], run_start: datetime,
                read_store: bool = True,
                gaps: dict[str, tuple[Event, tuple[str, ...]]] | None = None) -> dict[str, Event]:
@@ -390,6 +398,7 @@ def check_context(spark: SparkSession, config: Config, planned: Planned, event: 
         full_sweep=force_full_sweep or (not defer_sweep and is_full_sweep(config, ds.dataset, event)),
         budget_minutes=budget_minutes, scan_mb_per_minute=config.defaults.scan_mb_per_minute,
         record_key_events=record_key_events, history_since=history_since(config, event.window_end),
+        coverage_since=coverage_since(config, event.window_end),
         as_of=event.window_end if as_of else None,
         config=config,
     )
@@ -1149,6 +1158,8 @@ def run(spark: SparkSession, conf: str, feed_id: str | None = None, selection: S
     print(f"dre run: started {run_record.run_id} ({kind} run, {run_record.started_at:%Y-%m-%d %H:%M} UTC)")
     # ADR-08: the kill switch (read now and before each check) and, for NORMAL runs, the run budget.
     halt = operations.Halt(config, config.defaults.run_budget_minutes if normal else None)
+    from hcsc.datalake.dre.checks import budget as concurrency
+    concurrency.configure(config.defaults.max_concurrent_jobs, config.defaults.cancel_grace_seconds)
     if halt.switch() is not None:
         print(f"kill switch: on at the start of the run ({halt.switched}); every check is written DID_NOT_RUN / disabled")
     sweeps = operations.Sweeps()
@@ -1234,6 +1245,8 @@ def run(spark: SparkSession, conf: str, feed_id: str | None = None, selection: S
                 print(line)
             drop_judged_views(spark, evaluation)
         publisher.flush()  # the run's remaining commits, before anything reads this run's results
+        print(f"concurrency: at most {config.defaults.max_concurrent_jobs} unit(s) of Spark work at a time; "
+              f"peak {concurrency.GATE.peak}")
         for line in halt.lines():
             print(line)
         halted = halt.switch() is not None or halt.spent()

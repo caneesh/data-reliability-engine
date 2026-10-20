@@ -243,8 +243,9 @@ class EmailServer(Model):
     smtp_host: NonEmptyStr | None = None
     smtp_port: int = Field(default=25, ge=1, le=65535)
     sender: Email | None = None
-    # An owner's digest with nothing failing or not run ("all clear"): sent every run (spec
-    # default), only from the run starting in the hour from rule_run_at (daily), or never.
+    # An owner's digest whose every result is healthy ("all clear": nothing failing or not run, no
+    # unhealthy evidence, no qualified pass): sent every run (spec default), only from the run
+    # starting in the hour from rule_run_at (daily), or never. Any other digest is always sent.
     all_clear_digest: Literal["every_run", "daily", "never"] = "every_run"
 
 
@@ -331,6 +332,11 @@ class Defaults(SettingsOverride):
     run_budget_minutes: float = Field(default=40, gt=0)
     kill_switch_file: Annotated[str, AfterValidator(_absolute_path)] | None = None
     backpressure_share: float = Field(default=0.8, gt=0, le=1)
+    # ADR-08's N (final review O6; checks/budget.py): at most this many units of DRE work (a check, an
+    # investigation, an evidence write) issue Spark jobs at once, a unit cancelled by its budget counting
+    # until it stops; a unit not admitted within cancel_grace_seconds is DID_NOT_RUN / concurrency_limit.
+    max_concurrent_jobs: int = Field(default=1, ge=1)
+    cancel_grace_seconds: float = Field(default=60, gt=0)
 
     @model_validator(mode="after")
     def _check(self) -> Defaults:

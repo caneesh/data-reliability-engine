@@ -505,6 +505,15 @@ The traceability matrix comes before code (exit criterion 6).
    - **Backpressure:** at 80% of the budget the next run defers the full sweep.
    - **Load test:** on a representative cluster, which needs the platform team.
 
+## Final consolidated review: corrections P1-01 to P1-03 and O6 (2026-10-20)
+
+The user's final consolidated review asked for four corrections, each with a reproducing test; the evidence is `docs/design/evidence/final-corrections.md` and the open items `docs/known-issues.md`. Choices made, for the reviewer:
+
+- **P1-01.** A qualified pass keeps a digest from being all clear and is counted in its subject (`, <q> passed with qualifications`); a digest that is not all clear is always sent, whatever `all_clear_digest` says. Supersedes "a qualified pass does not change the digest's subject" (checkpoint 3 interpretations).
+- **P1-02.** A safe fallback rather than only a declared gap: when the lookback holds no trusted coverage, a second read, bounded by `dq_check_result`'s retention (`CheckContext.coverage_since`), finds the latest trusted coverage before the lookback, and the range continues from it (never later than an INVALID result's start inside the lookback). When nothing is retained, the range starts at the window and the ledger's scope states the gap (`coverage_basis`). Only HOP\_LEDGER's scope carries `coverage_basis`; the other hop checks have no scope JSON, but share the same range.
+- **P1-03.** Records pending at a later edge are carried by key events (PENDING, then RESOLVED, LOST, UNOBSERVABLE or PENDING again), not by holding the chain's range back: holding it back would judge again, and count twice, the records the range already judged. NORMAL runs with an HMAC secret only (a recheck neither reads nor writes key state); without, the scope keeps the blind spot. The carried keys are read within `history_lookback_days`.
+- **O6.** N is enforced on DRE's units of Spark work (a check, an investigation, an evidence write), each in its own job group: at most `max_concurrent_jobs` (default 1, the runner's sequential design) live at once, a cancelled unit counting until its thread stops, its job group cancelled again every 0.5 seconds while it lingers; a unit not admitted within `cancel_grace_seconds` (default 60) is DID\_NOT\_RUN / BUDGET / concurrency\_limit. Not enforced by DRE: more than one Spark job inside one action (a broadcast); the YARN queue's share bounds that. N and the grace are defaults to ratify.
+
 ## Phase 1 build step 8: run budget, kill switch, queue, backpressure (2026-10-20)
 
 Built under the master implementation prompt of 2026-10-20, not ratified. Defaults taken, for Gate B:
@@ -514,7 +523,7 @@ Built under the master implementation prompt of 2026-10-20, not ratified. Defaul
 - **O3, the kill switch** (`kill_switch_file`, null) applies to every execution type, read at the start and before each check; once seen it stays on for the run. An unreadable location counts as on (fail closed). Remaining checks are DID\_NOT\_RUN / PLATFORM / disabled, written and committed but not counted as written, so the run is PARTIAL and the watchdog alerts: a forgotten switch is never silent. The path is never printed. A halted run skips the retried investigations and the integrity sweep (the next run does them).
 - **O4, the queue** is read from `spark.yarn.queue`. `dre run` refuses to start when it is a `protected_queues` entry, or when `yarn_queue` is set and the application runs in another queue or names none. Local mode without a queue is not refused. Protected queue names are never printed.
 - **O5, backpressure:** the latest finished NORMAL run took more than `backpressure_share` (0.8) of the run budget, so this run defers the calendar's full sweep. A deferral is recorded in `dq_integrity` as SWEEP\_DEFERRED (a new record kind, operational, needs ratification; the alternative is a dedicated table through a migration), and the first run not under backpressure forces the owed sweep. Records unreadable: every dataset counts as owed (fail closed). Integrity's forced sweeps are never deferred.
-- **O6, concurrency (N):** not enforced and not measured. The runner evaluates one check at a time, but one SQL action can run several Spark jobs, and a check cancelled by its budget can keep a daemon thread starting jobs; the effective cap is the YARN queue's share, a platform setting.
+- **O6, concurrency (N): superseded by the final review correction O6 (below).** Was: not enforced and not measured. The runner evaluates one check at a time, but one SQL action can run several Spark jobs, and a check cancelled by its budget can keep a daemon thread starting jobs; the effective cap is the YARN queue's share, a platform setting.
 - **O7, measurements:** `scripts/measure_run.py` prints a run's elapsed time against the budget and per-check duration statistics, read-only, locally or on the cluster. The load test (acceptance criterion 7) still needs a representative cluster.
 
 ## Phase 1 build step 6: CHAIN_COMPLETENESS (2026-10-20)
@@ -522,7 +531,7 @@ Built under the master implementation prompt of 2026-10-20, not ratified. Defaul
 Built under the master implementation prompt of 2026-10-20, not ratified. Defaults taken, for Gate B:
 
 - **K1, unassessable is lost.** A record unassessable at an edge (no load time at an intermediate layer, a key that cannot be mapped forward) counts as lost: fail closed, as HOP\_LEDGER fails on unassessable records.
-- **K2, later edges.** A carried key is due at a later edge when its latest version's load time + that edge's `sla_hours` is at or before the cutoff, pending otherwise. A record pending at a later edge is not judged again before the full sweep, because the chain's range moves on by source load time; the scope lists this blind spot.
+- **K2, later edges.** A carried key is due at a later edge when its latest version's load time + that edge's `sla_hours` is at or before the cutoff, pending otherwise. **Corrected by the final review, P1-03 (below):** a record pending at a later edge is carried to the next evaluation. Was: not judged again before the full sweep.
 - **K3, unjudged edges** after the first are not read: records reaching one are unobservable. An unjudged first edge is read only for the due population.
 - **K4, edges come from `key_map` only** (the frozen interface): a contributor edge declared only in `contracts` is not on a path.
 - **K5, one record to several keys** at an edge is unobservable there.
@@ -587,7 +596,7 @@ What was built:
 Interpretations, for the reviewer to confirm or correct:
 
 - **Only HOP_LEDGER writes qualifications.** The release 1 hop checks claim key presence and value agreement, not contract-proven completeness, so their passes stay healthy as before; the contract-based claim, and its qualifications, are the ledger's.
-- **A qualified pass does not change the digest's subject.** "all clear" still means nothing failed, did not run or has unverified evidence; qualified passes are listed in the body and not counted as passing. Every ledger pass on today's synthetic configuration is qualified (an inferred contract, or a union whose attribution is unproven), so this keeps the subject meaningful until step 5.
+- **Superseded by the final review, P1-01 (2026-10-20):** a qualified pass keeps the digest from being all clear and is counted in its subject. **Was:** a qualified pass does not change the digest's subject. "all clear" still means nothing failed, did not run or has unverified evidence; qualified passes are listed in the body and not counted as passing. Every ledger pass on today's synthetic configuration is qualified (an inferred contract, or a union whose attribution is unproven), so this keeps the subject meaningful until step 5.
 - **The coverage read is bounded by `history_lookback_days`.** Coverage older than that is not seen; the range then falls back as above, and the weekly full sweep judges every record past its deadline.
 - **An unattributable reject affects only a record absent here.** A record present here is judged by what it shows, since a reject cannot be what explains it.
 

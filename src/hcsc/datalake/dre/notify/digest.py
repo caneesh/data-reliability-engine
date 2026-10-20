@@ -13,7 +13,10 @@ since per-load groups such as T1_VOLUME's slot change every run by design.
 
 A result is healthy only when it PASSED with VALID evidence (store/ddl.sql, v_latest_result):
 current results whose evidence is INVALID or UNKNOWN are listed apart and keep the digest from
-being all clear, and every digest says when the store's integrity was last verified.
+being all clear, and every digest says when the store's integrity was last verified. A PASS with
+qualifications is not healthy either: it is listed apart, counted in the subject, and keeps the
+digest from being all clear (final review, P1-01), so an all-clear digest means every result is
+healthy.
 
 Only counts, check ids, table and dataset names, and codes go in a digest (hard rule 6):
 key_hash samples only when the feed sets email_sample_keys, and never the key itself.
@@ -109,14 +112,15 @@ class Digest:
 
     @property
     def all_clear(self) -> bool:
-        return not (self.new_failures or self.did_not_run or self.still_failing or self.evidence)
+        return not (self.new_failures or self.did_not_run or self.still_failing or self.evidence or self.qualified)
 
     @property
     def subject(self) -> str:
         if self.all_clear:
             return f"DRE {self.environment}: all clear"
+        qualified = f", {len(self.qualified)} passed with qualifications" if self.qualified else ""
         return (f"DRE {self.environment}: {self.new_failures} new failures, "
-                f"{len(self.did_not_run)} checks did not run")
+                f"{len(self.did_not_run)} checks did not run{qualified}")
 
     def text(self) -> str:
         return _TEXT.get_template("digest.txt.j2").render(d=self)

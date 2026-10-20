@@ -47,7 +47,7 @@ from hcsc.datalake.dre.checks.base import (
 )
 from hcsc.datalake.dre.checks.derived import source_of
 from hcsc.datalake.dre.checks.hop.common import exclusion_terms, has_a_key, hop_label, per_hop
-from hcsc.datalake.dre.checks.hop.coverage import coverage_of, judged_range
+from hcsc.datalake.dre.checks.hop.coverage import coverage_of, judged
 from hcsc.datalake.dre.checks.keys import column_expr, key_string
 from hcsc.datalake.dre.checks.registry import register_check
 from hcsc.datalake.dre.checks.times import utc_expr
@@ -280,7 +280,8 @@ def ledger_params(ctx: CheckContext, event: Event, hop: Hop, up: Dataset) -> dic
         return winners
     mapping = ds.key_map[up_id]
     up_cols = [mapping[c] for c in ds.key]
-    start, end = judged_range(ctx, event, CHECK_ID, up_id)
+    span = judged(ctx, event, CHECK_ID, up_id)
+    start, end = span.start, span.end
     deletion = hop.contract.deletion
     rejects = hop.contract.rejects
     return {
@@ -303,6 +304,7 @@ def ledger_params(ctx: CheckContext, event: Event, hop: Hop, up: Dataset) -> dic
         "deadline_start": utc_literal(start), "deadline_end": utc_literal(end),
         "pending_from": utc_literal(max(start, end)), "coverage": coverage_of(start, end), "judged": (start, end),
         "full_sweep": ctx.full_sweep, "one_to_one": hop.contract.mapping == "identity",
+        "coverage_basis": span.basis,
         "as_of": utc_literal(ctx.as_of) if ctx.as_of is not None else None,
         "winners": winners,
     }
@@ -573,6 +575,7 @@ class HopLedger(Check):
         state, violations, parts, failures, reject_class = judge(hop, ledger)
         level = ceiling(ledger, reject_class)
         scope = scope_of(ctx, event, hop, up, level, judged=params["judged"], proof=proof)
+        scope["coverage_basis"] = params["coverage_basis"]  # where the range starts, gaps included (P1-02)
         if state == FAILED:
             scope["triage"] = triage(ledger, reject_class, failures)
         scope_json = json.dumps(scope, sort_keys=True)

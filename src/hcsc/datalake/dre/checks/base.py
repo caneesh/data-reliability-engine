@@ -53,6 +53,7 @@ REASONS: dict[str, str] = {
     "invalid_config": "CONFIGURATION",
     "unsupported_mapping": "CONFIGURATION",  # HOP_LEDGER: the hop's mapping kind is not judged (ADR-02)
     "budget_exceeded": "BUDGET",
+    "concurrency_limit": "BUDGET",  # max_concurrent_jobs units still live after cancel_grace_seconds (O6)
     "run_budget_exceeded": "BUDGET",  # reached after the run budget was spent: not run, the window is held (ADR-08)
     "upstream_check_failed": "DEPENDENCY",
     "premise_unconfirmed": "DEPENDENCY",
@@ -160,6 +161,9 @@ class CheckContext:
     judge_open_keys: bool | None = None
     # The first run_date the hop's open-key read looks at (defaults.history_lookback_days); None: all.
     history_since: date | None = None
+    # The first run_date still retained in dq_check_result (its retention_months): how far back a hop's
+    # coverage is looked for when the lookback holds none (checks/hop/coverage.py, P1-02); None: all.
+    coverage_since: date | None = None
     # The check's parameters (an instance of Check.params_model), resolved by resolve_params (called from
     # run_check) from the pattern's defaults, the feed's and the dataset's `check_params`; None without.
     params: Any = None
@@ -284,7 +288,7 @@ def estimated_scan(ctx: CheckContext, check: Check) -> int | None:
 def run_check(check: Check, ctx: CheckContext, event: Event) -> tuple[list[CheckResult], int]:
     """(results, duration_ms). Never raises: a failure is a DID_NOT_RUN result. The check runs
     within its dataset's compute_budget_minutes (checks/budget.py)."""
-    from hcsc.datalake.dre.checks.budget import BudgetExceeded, within_budget
+    from hcsc.datalake.dre.checks.budget import BudgetExceeded, ConcurrencyLimit, within_budget
 
     started = time.monotonic()
     budget = ctx.settings.compute_budget_minutes if ctx.budget_minutes is None else ctx.budget_minutes
@@ -326,6 +330,8 @@ def run_check(check: Check, ctx: CheckContext, event: Event) -> tuple[list[Check
 
     try:
         results = within_budget(ctx.spark, budget, work)
+    except ConcurrencyLimit as exc:
+        results = [did_not_run("concurrency_limit", detail=str(exc))]
     except BudgetExceeded as exc:
         size = estimated_scan(ctx, check)
         scan = f"; estimated scan {size} bytes" if size is not None else "; no table statistics for a scan estimate"

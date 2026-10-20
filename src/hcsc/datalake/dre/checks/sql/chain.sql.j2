@@ -16,8 +16,10 @@
    last rows that did (ending: reached at the terminal, or unobservable at an unjudged edge).
    mode summary: fate rows counted per (edge, outcome, disposition, label, class).
    mode population: the first edge's rows counted per line (due, pending, untimed).
-   mode events: key events for the exception keys only (lost, unobservable): key_hash, key_value, event,
-   state_detail, as dq_key_event takes them. #}
+   mode events: key events, as dq_key_event takes them (key_hash, key_value, event, state_detail): the
+   exception keys (LOST, UNOBSERVABLE); the records pending at an edge after the first (PENDING), which
+   the next evaluation judges again (recheck); and the carried-in records now judged reached or accounted
+   (RESOLVED), so they are carried no further (final review, P1-03). #}
 {% if mode == "edge" %}
 WITH a AS (
   SELECT line, k, disposition, label,
@@ -98,5 +100,12 @@ SELECT line, COUNT(*) AS n FROM {{ source }} GROUP BY line
 SELECT {{ hash_fn }}(src) AS key_hash, src AS key_value, upper(outcome) AS event,
        concat(coalesce(disposition, outcome), ' at ', edge) AS state_detail
 FROM {{ source }}
-WHERE outcome IN ('lost', 'unobservable') AND src IS NOT NULL
+WHERE src IS NOT NULL AND (outcome IN ('lost', 'unobservable') OR (outcome = 'pending' AND edge <> '{{ first }}'))
+{% if recheck %}
+UNION ALL
+SELECT {{ hash_fn }}(src) AS key_hash, src AS key_value, 'RESOLVED' AS event,
+       concat(coalesce(disposition, outcome), ' at ', edge) AS state_detail
+FROM {{ source }}
+WHERE src IS NOT NULL AND outcome IN ('reached', 'accounted') AND src IN (SELECT k FROM {{ recheck }})
+{% endif %}
 {% endif %}

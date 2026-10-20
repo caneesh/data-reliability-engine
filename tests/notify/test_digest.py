@@ -168,7 +168,8 @@ def test_subject_counts_new_failures_and_checks_that_did_not_run(digests) -> Non
     # New failures: KEY_DUPLICATES, ON_TIME (ZERO_ROWS shown with it), HOP_KEY_CURRENCY, HOP_LEDGER,
     # HOP_FILE_COMPLETENESS.
     assert digests["membership-gold"].subject == "DRE dev: 5 new failures, 2 checks did not run"
-    assert digests["provider-data"].subject == "DRE dev: all clear"
+    # provider-data's only failure-free result set includes a qualified HOP_LEDGER pass: not all clear (P1-01)
+    assert digests["provider-data"].subject == "DRE dev: 0 new failures, 0 checks did not run, 1 passed with qualifications"
     assert digests["membership-gold"].recipients == ["dre-alerts@example.com"]
 
 
@@ -236,3 +237,53 @@ def test_a_qualified_pass_is_listed_and_never_counted_as_healthy(digests) -> Non
     assert "Passed with qualifications (not counted as healthy)\n- provider_directory HOP_LEDGER " \
            "[upstream=provider_roster_raw]: inferred_contract" in text
     assert "blind spots: kind dedup is inferred from key_map" in text
+
+
+# --- final review P1-01: an all-clear digest means every result is healthy ---
+
+def digest_of(*, qualified: int = 0, failed: int = 0, passing: int = 1):
+    from hcsc.datalake.dre.notify.digest import Digest, Item
+
+    d = Digest("membership-gold", ["dre-alerts@example.com"], "dev", "run-1", datetime(2026, 1, 16, 12, 5, tzinfo=UTC), passing=passing)
+    d.qualified = [Item("gold_member_coverage", "HOP_LEDGER", f"upstream=up{n}", "PASSED",
+                        qualifications=["attribution_unverified"]) for n in range(qualified)]
+    d.changed = [Item("gold_member_coverage", "T1_ZERO_ROWS", f"slot={n}", "FAILED", prev_state="PASSED")
+                 for n in range(failed)]
+    return d
+
+
+@pytest.mark.parametrize("mode", ["every_run", "daily", "never"])
+def test_a_digest_whose_passes_are_all_qualified_is_never_all_clear(config, mode: str) -> None:
+    """P1-01, qualified only: nothing failed and nothing was skipped, but the only pass rests on an
+    unproven premise. The subject says so, and the digest is sent whatever all_clear_digest says,
+    because it is not all clear."""
+    from hcsc.datalake.dre.notify.digest import to_send
+
+    d = digest_of(qualified=1, passing=0)
+    assert not d.all_clear
+    assert d.subject == "DRE dev: 0 new failures, 0 checks did not run, 1 passed with qualifications"
+    assert "all clear" not in d.text()
+    defaults = config.defaults.model_copy(update={"email": config.defaults.email.model_copy(
+        update={"all_clear_digest": mode})})
+    assert to_send([d], defaults, datetime(2026, 1, 16, 12, 5, tzinfo=UTC)) == [d]
+
+
+def test_a_digest_with_failures_and_qualified_passes_counts_both() -> None:
+    """P1-01, mixed: failures and qualified passes are both in the subject; neither hides the other."""
+    d = digest_of(qualified=2, failed=1)
+    assert not d.all_clear
+    assert d.subject == "DRE dev: 1 new failures, 0 checks did not run, 2 passed with qualifications"
+
+
+@pytest.mark.parametrize("mode", ["every_run", "daily", "never"])
+def test_only_a_fully_healthy_digest_is_all_clear(config, mode: str) -> None:
+    """P1-01, fully healthy: no failure, nothing skipped, no unhealthy evidence, no qualified pass.
+    Only this digest is all clear, and only this one is subject to all_clear_digest."""
+    from hcsc.datalake.dre.notify.digest import to_send
+
+    d = digest_of(passing=3)
+    assert d.all_clear and d.subject == "DRE dev: all clear"
+    defaults = config.defaults.model_copy(update={"email": config.defaults.email.model_copy(
+        update={"all_clear_digest": mode})})
+    sent = to_send([d], defaults, datetime(2026, 1, 16, 3, 0, tzinfo=timezone.utc))  # not the daily hour
+    assert sent == ([d] if mode == "every_run" else [])

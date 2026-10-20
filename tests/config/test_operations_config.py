@@ -25,6 +25,11 @@ CASES = [
      "backpressure_share", "greater than", "> 0"),
     ("kill-switch-relative", "kill_switch_file: null", "kill_switch_file: run/stop_dre", "kill_switch_file",
      "kill_switch_file", "not an absolute path", "absolute path"),
+    # final review O6: the concurrency limit N and the grace a unit waits for a lingering cancelled one
+    ("concurrency-zero", "max_concurrent_jobs: 1", "max_concurrent_jobs: 0", "max_concurrent_jobs",
+     "max_concurrent_jobs", "greater than or equal", ">= 1"),
+    ("grace-zero", "cancel_grace_seconds: 60", "cancel_grace_seconds: 0", "cancel_grace_seconds",
+     "cancel_grace_seconds", "greater than", "> 0"),
 ]
 
 
@@ -72,3 +77,9 @@ def test_settings_left_out_take_the_adr_08_defaults(conf: Path) -> None:
     assert errors == []
     d = config.defaults
     assert (d.run_budget_minutes, d.kill_switch_file, d.backpressure_share) == (40, None, 0.8)
+
+
+def test_the_sample_takes_one_unit_at_a_time_and_a_minute_of_grace() -> None:
+    """O6: N defaults to 1 (the runner evaluates one unit at a time), the grace to 60 seconds."""
+    config, errors, _ = validate_conf(SAMPLE_CONF)
+    assert errors == [] and (config.defaults.max_concurrent_jobs, config.defaults.cancel_grace_seconds) == (1, 60)

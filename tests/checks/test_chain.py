@@ -9,6 +9,7 @@ Each outcome is shown able to FAIL, to PASS and to be DID_NOT_RUN.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -334,3 +335,93 @@ def test_the_chain_range_continues_from_the_chain_coverage(spark) -> None:
     r = chain_of(spark, datasets)
     assert (r.state, r.population) == ("PASSED", 1)
     assert r.coverage == (datetime(2026, 1, 15, 3, tzinfo=UTC), datetime(2026, 1, 16, tzinfo=UTC))
+
+
+# --- final review P1-03: a record pending at a later edge is judged once it is due ---
+
+NEXT = Event(RAW, datetime(2026, 1, 16, 12, tzinfo=UTC), datetime(2026, 1, 17, 12, tzinfo=UTC))
+AFTER = Event(RAW, datetime(2026, 1, 17, 12, tzinfo=UTC), datetime(2026, 1, 18, 12, tzinfo=UTC))
+CHAIN_DQ = "dq_chain_carry"
+
+
+def chain_at(spark, datasets: dict[str, Dataset], event: Event, secret: bytes | None = SECRET):
+    """The chain evaluated as a NORMAL run would, reading its own committed history in CHAIN_DQ."""
+    cfg = config(datasets)
+    cfg = dataclasses.replace(cfg, defaults=cfg.defaults.model_copy(update={"dq_database": CHAIN_DQ}))
+    ctx = CheckContext(spark, datasets[RAW], None, cfg.dataset_settings(RAW), "UTC", CHAIN_DQ,
+                       key_secret=secret, config=cfg)
+    [r], _ = run_check(ChainCompleteness(), ctx, event)
+    return r
+
+
+def publish(spark, result, run_id: str, event: Event) -> None:
+    """Commit the chain's result and its key events as the runner does (ADR-07)."""
+    from hcsc.datalake.dre.store.commits import Commit, append_commits
+    from hcsc.datalake.dre.store.key_events import append_key_events
+    from hcsc.datalake.dre.runner import covers
+    from tests.store.conftest import append_rows
+
+    ev, day = f"e-chain-{run_id}", event.window_end.date()
+    append_rows(spark, CHAIN_DQ, "dq_check_result", [{
+        "evaluation_id": ev, "run_id": run_id, "event_id": "x", "window_start": event.window_start,
+        "window_end": event.window_end, "execution_type": "NORMAL", "dataset": RAW, "check_id": "CHAIN_COMPLETENESS",
+        "state": result.state, "reason_code": result.reason_code, "group_values": {"chain": LABEL},
+        "evaluated_at": event.window_end, "coverage_from": result.coverage[0] if covers(result) else None,
+        "coverage_to": result.coverage[1] if covers(result) else None, "run_date": day}], commit=False)
+    n = 0 if result.key_events is None else append_key_events(
+        result.key_events, CHAIN_DQ, run_id, ev, RAW, "CHAIN_COMPLETENESS", LABEL, event.window_end, day)
+    append_commits(spark, CHAIN_DQ, [Commit(run_id, ev, RAW, "CHAIN_COMPLETENESS", 1, key_event_rows=n)],
+                   event.window_end, day)
+
+
+@pytest.fixture()
+def carry_store(spark):
+    spark.sql(f"DROP DATABASE IF EXISTS {CHAIN_DQ} CASCADE")
+    create_store(spark, CHAIN_DQ)
+
+
+def pending_window(spark, name: str, gold_holds_it: bool) -> dict[str, Dataset]:
+    """123402 reached curated late (01-16 05:00), so it is pending at curated -> gold in EVENT; its
+    raw load (01-15 06:00) puts its chain deadline inside EVENT's range only, never NEXT's."""
+    rows = [through("123401"), through("123402", cur_at=LATE_CURATED, gold_at=LATE_CURATED)]
+    return layers(spark, name, [r for r, _, _ in rows], [c for _, c, _ in rows],
+                  [g for _, _, g in rows] if gold_holds_it else [rows[0][2]])
+
+
+def test_a_record_pending_at_a_later_edge_is_judged_when_it_becomes_due(spark, carry_store) -> None:
+    """P1-03: in EVENT the record is pending at curated -> gold and recorded PENDING; NEXT's range has
+    moved past its chain deadline, yet NEXT judges it (it reached gold: reached) and records it
+    RESOLVED; a third window carries nothing. It is counted once: pending in EVENT, due in NEXT."""
+    first = chain_at(spark, pending_window(spark, "ch_carry", gold_holds_it=False), EVENT)
+    assert (first.state, first.population) == ("PASSED", 1) and scope(first)["outcomes"]["pending_at_edges"] == {EDGE2: 1}
+    assert [(e, d, v) for _, e, d, v in events_of(first)] == [("PENDING", f"pending at {EDGE2}", key_of("123402"))]
+    publish(spark, first, "r1", EVENT)
+
+    second = chain_at(spark, pending_window(spark, "ch_carry", gold_holds_it=True), NEXT)
+    assert (second.state, second.population, second.violations) == ("PASSED", 1, 0)
+    assert outcomes(second) == {"due": 1, "reached": 1, "accounted": 0, "lost": 0, "unobservable": 0, "pending": 0}
+    assert scope(second)["carried_in"] == 1
+    assert [(e, v) for _, e, _, v in events_of(second)] == [("RESOLVED", key_of("123402"))]
+    publish(spark, second, "r2", NEXT)
+
+    third = chain_at(spark, pending_window(spark, "ch_carry", gold_holds_it=True), AFTER)
+    assert third.reason_code == "empty_population" and scope(third)["carried_in"] == 0  # never judged twice
+
+
+def test_a_carried_record_that_never_arrives_is_lost_never_a_false_pass(spark, carry_store) -> None:
+    """P1-03: the carried record is due at curated -> gold in NEXT (loaded 01-16 05:00 + 8h, before
+    NEXT's cutoff) and gold still lacks it: lost, FAILED, first observed gap at that edge."""
+    first = chain_at(spark, pending_window(spark, "ch_carry_lost", gold_holds_it=False), EVENT)
+    publish(spark, first, "r1", EVENT)
+    second = chain_at(spark, pending_window(spark, "ch_carry_lost", gold_holds_it=False), NEXT)
+    assert (second.state, second.population, second.violations) == ("FAILED", 1, 1)
+    assert scope(second)["first_observed_gap"]["edge"] == EDGE2
+    assert [(e, v) for _, e, _, v in events_of(second)] == [("LOST", key_of("123402"))]
+
+
+def test_without_key_events_a_pending_record_is_not_carried_and_the_scope_says_so(spark, carry_store) -> None:
+    """P1-03, fail visible: with no HMAC secret nothing is recorded, so nothing can be carried; the
+    scope names the gap instead of passing over it."""
+    first = chain_at(spark, pending_window(spark, "ch_carry_nosecret", gold_holds_it=False), EVENT, secret=None)
+    assert first.key_events is None
+    assert any("not carried" in s for s in scope(first)["blind_spots"])

@@ -20,6 +20,8 @@
    The check materialises it once and reads mode summary from it (`source`).
    p.carried (optional, CHAIN_COMPLETENESS): a view of the distinct keys a chain carries to this edge;
    only those keys are candidates, and keyless rows are not reported (they cannot be carried).
+   p.recheck (optional, CHAIN_COMPLETENESS, the first edge): a view of keys (k) an earlier evaluation
+   left pending at a later edge; each is a candidate and due whatever the range, once past the range's end.
    mode summary: rows per (line, disposition, label) with how many rows and distinct keys, and the
    overlap pairs. #}
 {% if mode == "assessed" %}
@@ -56,7 +58,11 @@ up_cand AS (SELECT * FROM up_cut WHERE keyed),
 -- work, not the answer (a key's every version is still read to find its latest)
 up_cand AS (
   SELECT u.* FROM up_cut u
-  JOIN (SELECT DISTINCT k FROM up_cut WHERE keyed AND load_ts >= {{ p.deadline_start }}) c ON c.k = u.k
+  JOIN (SELECT DISTINCT k FROM up_cut WHERE keyed AND load_ts >= {{ p.deadline_start }}
+{% if p.get("recheck") %}
+        UNION SELECT k FROM {{ p.recheck }}
+{% endif %}
+       ) c ON c.k = u.k
   WHERE u.keyed
 ),
 {% endif %}
@@ -84,6 +90,11 @@ due_keys AS (
   WHERE up_load_ts < {{ p.deadline_end }} OR up_load_ts IS NULL
 {% else %}
   WHERE up_load_ts < {{ p.deadline_end }} AND up_load_ts >= {{ p.deadline_start }}
+{% if p.get("recheck") %}
+  -- CHAIN_COMPLETENESS: records an earlier evaluation left pending at a later edge, judged again now
+  -- whatever the range (final review, P1-03)
+     OR (up_load_ts < {{ p.deadline_end }} AND k IN (SELECT k FROM {{ p.recheck }}))
+{% endif %}
 {% endif %}
 ),
 dn_rows AS (

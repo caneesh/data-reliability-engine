@@ -1,4 +1,4 @@
-DRE dev: all clear
+DRE dev: 0 new failures, 0 checks did not run, 1 passed with qualifications
 Run 00000000-0000-0000-0000-000000000003, started 2026-01-16 12:05 UTC, for provider-data.
 
 Passed with qualifications (not counted as healthy)

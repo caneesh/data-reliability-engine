@@ -208,3 +208,78 @@ def replace_(result: CheckResult, span) -> CheckResult:
     from dataclasses import replace
 
     return replace(result, coverage=span)
+
+
+# --- final review P1-02: committed coverage older than history_lookback_days ---
+
+OLD = Event("gold", datetime(2025, 5, 31, 12, tzinfo=UTC), datetime(2025, 6, 1, 12, tzinfo=UTC))
+OLD_TO = datetime(2025, 6, 1, 4, tzinfo=UTC)   # where the hop's last covering result, long ago, ended
+IDLE = datetime(2025, 9, 1, 10, 0)            # loaded while the hop was not evaluated
+LOOKBACK = datetime(2025, 12, 1).date()        # history_since: the hourly reads look back to here
+W3 = Event("gold", datetime(2026, 1, 16, 12, tzinfo=UTC), datetime(2026, 1, 17, 12, tzinfo=UTC))
+
+
+def ctx_of(spark, ds, up, coverage_since=None) -> CheckContext:
+    return CheckContext(spark, ds, None, settings(8), "UTC", DQ, upstreams={up.dataset: up},
+                        history_since=LOOKBACK, coverage_since=coverage_since)
+
+
+def test_coverage_older_than_the_lookback_is_found_and_the_idle_span_is_judged(spark) -> None:
+    """P1-02, long inactivity: the hop last covered up to 2025-06-01 04:00, before the lookback. The
+    hourly read does not see it; the range must not restart at this window (a record loaded while the
+    hop was idle would be lost until the full sweep): a bounded read of the retained history finds it,
+    and the range continues from it."""
+    up, dn = tables(spark, "cov_idle", [curated_row(sub_id="1", updated=IDLE),
+                                        curated_row(sub_id="2", updated=AFTER_W1)], [])
+    covered(spark, dn, "HOP_LEDGER", OLD, UP, OLD_TO)
+    ctx = ctx_of(spark, dn, up)
+    assert judged_range(ctx, W2, "HOP_LEDGER", UP) == (OLD_TO, W2.window_end - timedelta(hours=8))
+    [r] = run_check(HopLedger(), ctx, W2)[0]
+    assert (r.state, r.population, r.violations) == ("FAILED", 2, 2)  # the idle span's key and W2's own
+    assert r.coverage == (OLD_TO, W2.window_end - timedelta(hours=8))
+    assert '"coverage_basis": "committed coverage before the lookback, from 2025-06-01"' in r.detail
+
+
+def test_invalid_coverage_inside_the_lookback_falls_back_to_trusted_coverage_before_it(spark) -> None:
+    """P1-02, invalid evidence: the only result inside the lookback was found INVALID, so it covers
+    nothing; the range starts where the last trusted coverage, before the lookback, ended."""
+    up, dn = tables(spark, "cov_idle_invalid", [curated_row(sub_id="1", updated=IDLE)], [])
+    covered(spark, dn, "HOP_LEDGER", OLD, UP, OLD_TO)
+    covered(spark, dn, "HOP_LEDGER", W1, UP, datetime(2026, 1, 15, 4, tzinfo=UTC), run_id="r-invalid")
+    append_rows(spark, DQ, "dq_integrity", [{
+        "run_id": "sweep", "record": "EVIDENCE_MISMATCH", "subject_run_id": "r-invalid",
+        "subject_run_date": W1.window_end.date(), "evaluation_id": f"e-{dn.dataset}-HOP_LEDGER-1512-r-invalid",
+        "commit_kind": "result", "recorded_at": W2.window_start, "run_date": W2.window_start.date()}])
+    ctx = ctx_of(spark, dn, up)
+    assert judged_range(ctx, W2, "HOP_LEDGER", UP)[0] == OLD_TO
+    [r] = run_check(HopLedger(), ctx, W2)[0]
+    assert r.population == 1  # the idle span's key is judged, not lost behind the invalid result
+
+
+def test_once_caught_up_the_range_continues_from_the_catch_up(spark) -> None:
+    """P1-02, catch-up: the window that judged the idle span commits its coverage; the next window
+    continues from it, inside the lookback, and judges nothing twice."""
+    up, dn = tables(spark, "cov_idle_caught_up", [curated_row(sub_id="1", updated=IDLE)], [])
+    covered(spark, dn, "HOP_LEDGER", OLD, UP, OLD_TO)
+    caught_up = W2.window_end - timedelta(hours=8)
+    covered(spark, dn, "HOP_LEDGER", W2, UP, caught_up, run_id="r-catch-up")
+    ctx = ctx_of(spark, dn, up)
+    assert judged_range(ctx, W3, "HOP_LEDGER", UP) == (caught_up, W3.window_end - timedelta(hours=8))
+    [r] = run_check(HopLedger(), ctx, W3)[0]
+    assert r.reason_code == "empty_population"  # the idle key was judged by the catch-up already
+    assert '"coverage_basis": "committed coverage"' in r.detail
+
+
+def test_coverage_not_retained_is_an_explicit_gap_never_a_silent_restart(spark) -> None:
+    """P1-02, beyond what the store retains (coverage_since, the retention of dq_check_result): the
+    range cannot continue, so it restarts at this window and the scope says the span before it is an
+    unresolved coverage gap, judged only by the full sweep."""
+    up, dn = tables(spark, "cov_idle_expired", [curated_row(sub_id="1", updated=IDLE)], [])
+    covered(spark, dn, "HOP_LEDGER", OLD, UP, OLD_TO)
+    ctx = ctx_of(spark, dn, up, coverage_since=datetime(2025, 7, 1).date())  # the old result is past retention
+    assert judged_range(ctx, W2, "HOP_LEDGER", UP)[0] == W2.window_start - timedelta(hours=8)
+    [r] = run_check(HopLedger(), ctx, W2)[0]
+    assert r.reason_code == "empty_population"
+    assert ('"coverage_basis": "unresolved coverage gap: no committed coverage retained since 2025-07-01 '
+            '(a first evaluation, or coverage older than the retention); records before the range are judged '
+            'only by the full sweep"') in r.detail

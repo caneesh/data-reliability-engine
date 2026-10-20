@@ -160,7 +160,7 @@ def resolve(ctx: CheckContext) -> list[Edge] | CheckResult:
 
 
 def edge_params(ctx: CheckContext, event: Event, edge: Edge, first: bool, judged: tuple[Any, Any],
-                carried: str | None) -> dict[str, Any] | CheckResult:
+                carried: str | None, recheck: str | None = None) -> dict[str, Any] | CheckResult:
     """HOP_LEDGER's parameters for one edge, bounded for the chain: the first edge judges the source
     records whose chain deadline falls in the chain's range; a later edge judges only the carried keys,
     due when their latest version's load time + the edge's sla_hours is at or before the cutoff."""
@@ -179,7 +179,7 @@ def edge_params(ctx: CheckContext, event: Event, edge: Edge, first: bool, judged
     if first:
         start, end = judged
         bounds = {"deadline_start": utc_literal(start), "deadline_end": utc_literal(end),
-                  "pending_from": utc_literal(max(start, end)), "full_sweep": ctx.full_sweep}
+                  "pending_from": utc_literal(max(start, end)), "full_sweep": ctx.full_sweep, "recheck": recheck}
     else:
         bound = utc_literal(event.window_end - timedelta(hours=edge.sla_hours))
         bounds = {"deadline_start": bound, "deadline_end": bound, "pending_from": bound, "full_sweep": True}
@@ -325,6 +325,20 @@ class ChainCompleteness(Check):
             frame.createOrReplaceTempView(view)
             views.append(view)
 
+        # Records an earlier evaluation left pending at an edge after the first (recorded PENDING): judged
+        # again now, whatever the range, since the range has moved past their chain deadline (P1-03).
+        # NORMAL runs only, with key events: a recheck neither reads nor writes the chain's key state.
+        carrying = ctx.record_key_events and ctx.key_secret is not None and ctx.dq_database is not None
+        recheck, carried_in = None, 0
+        if carrying and ctx.spark.catalog.tableExists(f"{ctx.dq_database}.v_committed_key_event"):
+            since = f" AND run_date >= DATE'{ctx.history_since.isoformat()}'" if ctx.history_since is not None else ""
+            materialise(
+                f"SELECT key_value AS k FROM (SELECT key_value, event, ROW_NUMBER() OVER (PARTITION BY key_hash "
+                f"ORDER BY observed_at DESC, run_id DESC) AS rn FROM {ctx.dq_database}.v_committed_key_event "
+                f"WHERE dataset = '{source}' AND check_id = '{CHECK_ID}' AND hop = '{label}'{since}) x "
+                f"WHERE rn = 1 AND event = 'PENDING' AND key_value IS NOT NULL", name("recheck", 0))
+            recheck = name("recheck", 0)
+            carried_in = ctx.spark.table(recheck).count()
         state_views: list[str] = []
         for i, edge in enumerate(read):
             carried = None
@@ -333,7 +347,7 @@ class ChainCompleteness(Check):
                                        f=forward_params(read[i - 1], edge, state_views[-1])), name("forward", i))
                 materialise(render_sql("chain.sql.j2", mode="keys", source=name("forward", i)), name("keys", i))
                 carried = name("keys", i)
-            params = edge_params(ctx, event, edge, i == 0, (start, end), carried)
+            params = edge_params(ctx, event, edge, i == 0, (start, end), carried, recheck if i == 0 else None)
             if isinstance(params, CheckResult):
                 return replace(params, detail=f"edge {edge.label}: {params.detail}", group_values=groups)
             materialise(render_sql("hop_ledger.sql.j2", p=params, mode="assessed", source=None), name("assessed", i))
@@ -370,8 +384,10 @@ class ChainCompleteness(Check):
         used = [lv for (o, _, _, lv), n in t["lines"].items() if o in ("reached", "accounted") and n]
         level = max(used, key=LEVELS.index) if used else "observed"
         proven = [e.label for e in read if e.judged]
-        spots = ["a record pending at an edge after the first is not judged again before the full sweep "
-                 "(its chain deadline has passed)"]
+        spots = ["a record pending at an edge after the first is recorded PENDING and judged by the next "
+                 "evaluation, once due there" if carrying else
+                 "a record pending at an edge after the first is not carried to the next evaluation (no key events: "
+                 "no hmac_secret_file, or a recheck): it is judged only by the full sweep"]
         unobservable = None
         if stop is not None:
             unobservable = {"edge": edges[stop].label, "why": unjudged_note(edges[stop]),
@@ -403,6 +419,7 @@ class ChainCompleteness(Check):
             "by_edge": t["dispositions"], "evidence_level": level, "blind_spots": spots,
             "key_events": ("exception keys recorded (lost, unobservable)" if secret
                            else "not recorded: hmac_secret_file is not set") if exceptions else None,
+            "carried_in": carried_in,
         }
         state = FAILED if totals["lost"] else PASSED
         if state == FAILED:
@@ -419,14 +436,15 @@ class ChainCompleteness(Check):
                 "observed": observed}
         if not balanced:
             return replace(did_not_run("ledger_unbalanced", detail=scope_json, group_values=groups), **held)
-        if not due:
-            return replace(did_not_run("empty_population", detail=scope_json, group_values=groups), **held)
         events = None
-        if secret and exceptions:
+        if carrying and (exceptions or sum(pending_edges.values()) or carried_in):
             register_key_hash(ctx.spark, ctx.key_secret)
             events = ctx.spark.sql(render_sql("chain.sql.j2", mode="events", source=name("fate", 0),
-                                              hash_fn=HASH_FUNCTION)).localCheckpoint()
+                                              hash_fn=HASH_FUNCTION, first=first_label,
+                                              recheck=recheck)).localCheckpoint()
         carry = {"key_events": events, "checkpoints": (events,) if events is not None else ()}
+        if not due:  # a window whose only records are pending at an edge still records them, to carry
+            return replace(did_not_run("empty_population", detail=scope_json, group_values=groups), **held, **carry)
         if state == PASSED and totals["unobservable"]:
             return replace(did_not_run("partial_chain", detail=scope_json, group_values=groups), **held, **carry)
         return replace(CheckResult(state, population=due, violations=totals["lost"], group_values=groups,
