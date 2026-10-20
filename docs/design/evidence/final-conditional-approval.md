@@ -243,7 +243,7 @@ The areas the conditional approval asked to keep correct are all covered by this
 - digest and watchdog (`tests/notify`, `tests/replay/test_r12_watchdog.py`);
 - concurrency and cancellation (`tests/test_concurrency.py`, `tests/test_evidence_integrity.py`).
 
-**Commit and CI:** the commit carrying this change and its CI run are recorded in `docs/handoff.md`.
+**Commit and CI:** `bf7c014`, CI run #102 green (`test`, `e2e` and `package` jobs).
 
 ## D. Residual limitations
 

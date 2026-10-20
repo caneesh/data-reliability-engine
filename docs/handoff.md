@@ -88,8 +88,9 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
 | Fix for #97: the late-write tests escape O6's re-cancellation explicitly | `0c4fabd` | #98 (green) |
 | CI records #94 to #98 | `3f4a5a2` | #99 (green, docs only) |
 | Handoff and resume prompt for the next session | `411a07b` | #100 (green, docs only) |
-| CI records #99 and #100 | `81b9736` | (docs only) |
-| Final conditional approval: CA-01 (coverage gap qualified, carried to the full sweep) and CA-02 (chain carry beyond the lookback) | (this commit) | |
+| CI records #99 and #100 | `81b9736` | #101 (green, docs only) |
+| Final conditional approval: CA-01 (coverage gap qualified, carried to the full sweep) and CA-02 (chain carry beyond the lookback) | `bf7c014` | #102 (green) |
+| CI record #102 | (this commit) | (docs only) |
 
 Each row has a section in `docs/decisions.md` saying what was decided and why.
 
