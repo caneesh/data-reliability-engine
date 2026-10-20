@@ -36,6 +36,7 @@ REASONS: dict[str, str] = {
     "landing_unreadable": "DATA_UNAVAILABLE",
     "empty_population": "DATA_UNAVAILABLE",
     "window_gap": "DATA_UNAVAILABLE",  # a held span given up after max_window_hours: never checked
+    "no_as_of_evidence": "DATA_UNAVAILABLE",  # AS_OF_REPLAY: the data as it stood at the cutoff cannot be read (ADR-05)
     "metastore_unavailable": "PLATFORM",
     "hdfs_unavailable": "PLATFORM",
     "query_failed": "PLATFORM",
@@ -154,6 +155,11 @@ class CheckContext:
     # The check's parameters (an instance of Check.params_model), resolved by resolve_params (called from
     # run_check) from the pattern's defaults, the feed's and the dataset's `check_params`; None without.
     params: Any = None
+    # AS_OF_REPLAY (ADR-05): the evidence cutoff C, the window end; the check reads every dataset as it
+    # stood at C (rows loaded at or before C). None: the tables as they are now (NORMAL, CURRENT_RECHECK).
+    as_of: datetime | None = None
+    # What the as-of reading rests on, set by the AS_OF_REPLAY gate (checks/modes.py) for the scope.
+    as_of_proof: str | None = None
 
 
 class Check(ABC):
@@ -164,6 +170,9 @@ class Check(ABC):
     # A parametrised check names its params model; it runs only where `check_params` configures it
     # (spec section 3), and gets the validated instance in ctx.params.
     params_model: type[Model] | None = None
+    # Whether the check can read its datasets as they stood at a cutoff (ctx.as_of): every read bounded
+    # by load time at or before it. Any other check is DID_NOT_RUN / no_as_of_evidence in AS_OF_REPLAY.
+    as_of_capable: bool = False
 
     def applies_to(self, dataset: Dataset, pattern: str | None) -> bool:
         return True
@@ -295,6 +304,13 @@ def run_check(check: Check, ctx: CheckContext, event: Event) -> tuple[list[Check
         failed = preconditions(ctx.spark, ctx.dataset, columns)
         if failed is not None:
             return [failed]
+        if ctx.as_of is not None:
+            from hcsc.datalake.dre.checks.modes import as_of_refusal
+
+            refused, proof = as_of_refusal(ctx, check)
+            if refused is not None:
+                return [refused]
+            ctx = replace(ctx, as_of_proof=proof)
         return check.evaluate(ctx, event) or [did_not_run("empty_population")]
 
     try:

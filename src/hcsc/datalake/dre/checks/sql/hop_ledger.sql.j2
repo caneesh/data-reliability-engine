@@ -91,6 +91,10 @@ dn_rows AS (
 {% if p.dn_filter %}
   WHERE {{ p.dn_filter }}
 {% endif %}
+{% if p.as_of %}
+  -- AS_OF_REPLAY (ADR-05): only rows loaded before the cutoff, as this append-only table stood then
+  {% if p.dn_filter %}AND{% else %}WHERE{% endif %} {{ p.dn_load }} < {{ p.as_of }}
+{% endif %}
 ),
 dn_cand AS (
   SELECT d.* FROM dn_rows d JOIN due_keys u ON u.k = d.k WHERE d.keyed

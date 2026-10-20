@@ -69,10 +69,14 @@ class Item:
     qualifications: list[str] = field(default_factory=list)  # what a PASS rests on unproven: never healthy
     blind_spots: list[str] = field(default_factory=list)     # what a reconciliation result cannot see
     triage: list[str] = field(default_factory=list)          # what to look at, for a FAILED ledger
+    mode: str | None = None              # evaluation_mode (ADR-05): a recheck is labelled, never a historical result
 
     @property
     def label(self) -> str:
-        return f"{self.dataset} {self.check_id}" + (f" [{self.groups}]" if self.groups else "")
+        labels = {"CURRENT_RECHECK": " (current recheck: the window as the data stands now)",
+                  "AS_OF_REPLAY": " (as-of replay: the window as the data stood at its end)"}
+        return (f"{self.dataset} {self.check_id}" + (f" [{self.groups}]" if self.groups else "")
+                + labels.get(self.mode or "", ""))
 
     @property
     def change(self) -> str:
@@ -122,6 +126,14 @@ class Digest:
 
 GROUPS_SQL = ("array_join(array_sort(transform(map_keys(coalesce(group_values, map())), "
               "k -> concat(k, '=', coalesce(group_values[k], '')))), ',')")
+
+
+def mode_of_row(row: dict[str, Any]) -> str:
+    """A stored result's evaluation mode; a row stored before the column existed takes it from its
+    execution type (store/ddl.sql, v_latest_result)."""
+    from hcsc.datalake.dre.checks.modes import mode_of
+
+    return row.get("evaluation_mode") or mode_of(row.get("execution_type") or "NORMAL")
 
 
 def _groups(values: dict[str, str | None] | None) -> str:
@@ -319,6 +331,7 @@ def build_digests(config: Config, run: Run, data: dict[str, Any]) -> list[Digest
             qualifications=[q for q in (row.get("qualifications") or "").split(",") if q],
             blind_spots=list((scope_of(row.get("detail")) or {}).get("blind_spots") or []),
             triage=list((scope_of(row.get("detail")) or {}).get("triage") or []),
+            mode=mode_of_row(row),
         )
         if is_rule and rule.status == "proposed":
             digest.report_only.append(item)
@@ -367,7 +380,7 @@ def build_digests(config: Config, run: Run, data: dict[str, Any]) -> list[Digest
         digest = digest_for(row)
         if digest is not None and (row["dataset"], row["check_id"], row["groups"]) not in listed:
             digest.evidence.append(Item(row["dataset"], row["check_id"], row["groups"], row["state"],
-                                        reason=row["evidence_state"]))
+                                        reason=row["evidence_state"], mode=mode_of_row(row)))
     for digest in digests.values():
         digest.integrity = data.get("integrity", "")
     return [digests[o] for o in sorted(digests)]

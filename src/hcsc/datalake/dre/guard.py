@@ -11,6 +11,8 @@ What it enforces, in words (the statement forms themselves are in the patterns b
   `dre install`). Creating a database is allowed only for dq and only in store/local_setup.py.
   Dropping tables, views or databases and every other ALTER are banned.
 - Dropping a partition of a dq table is allowed only in store/retention.py.
+- Adding columns to a dq table is allowed only in store/migrations.py (additive, versioned
+  migrations applied by `dre install`; build step 4). Nothing else may alter a table.
 - The DataFrame write APIs are allowed only in store/writer.py; writeTo with overwrite, create
   or replace is banned.
 - DataFrame path writes, Hadoop FileSystem delete, rename and mkdirs, os/shutil file removal
@@ -33,6 +35,7 @@ DQ_DATABASE = "dq"
 DQ_PLACEHOLDERS = ("{{dq_database}}", "{dq_database}")
 # Modules with a path-based allowance (see the rules above).
 RETENTION_MODULE = "hcsc/datalake/dre/store/retention.py"
+MIGRATIONS_MODULE = "hcsc/datalake/dre/store/migrations.py"
 WRITER_MODULE = "hcsc/datalake/dre/store/writer.py"
 LOCAL_SETUP_MODULE = "hcsc/datalake/dre/store/local_setup.py"
 DDL_FILE = "hcsc/datalake/dre/store/ddl.sql"
@@ -89,6 +92,7 @@ _CREATE_DATABASE = re.compile(rf"\bCREATE\s+(?:DATABASE|SCHEMA)\s+(?:IF\s+NOT\s+
 _WRITE_API = re.compile(r"(?P<target>\.(?:write|writeTo|writeStream|insertInto)\b)")
 _ALTER_TABLE = re.compile(rf"\bALTER\s+TABLE\s+{_TARGET}", _I)
 _DROP_PARTITION_TAIL = re.compile(r"\s+DROP\s+(?:IF\s+EXISTS\s+)?PARTITION\b", _I)
+_ADD_COLUMNS_TAIL = re.compile(r"\s+ADD\s+COLUMNS\b", _I)
 
 _SCANNED_SUFFIXES = {".py", ".sql", ".j2", ".yaml", ".yml", ".sh", ".txt", ".cfg", ".toml", ".json"}
 
@@ -165,8 +169,14 @@ def scan_text(text: str, path: str = "<text>", allowances: bool = True) -> list[
                 add(m.start(), "DROP PARTITION", target, "allowed only on the dq store")
             elif not in_retention:
                 add(m.start(), "DROP PARTITION", target, f"allowed only in {RETENTION_MODULE}")
+        elif _ADD_COLUMNS_TAIL.match(text, m.end()):
+            if not _is_dq(target, False):
+                add(m.start(), "ADD COLUMNS", target, "allowed only on the dq store")
+            elif not allowed(MIGRATIONS_MODULE):
+                add(m.start(), "ADD COLUMNS", target, f"allowed only in {MIGRATIONS_MODULE}")
         else:
-            add(m.start(), "ALTER", target, "banned everywhere; only retention may DROP PARTITION")
+            add(m.start(), "ALTER", target, "banned everywhere; only retention may DROP PARTITION and only "
+                                            "migrations may ADD COLUMNS")
 
     return sorted(found, key=lambda v: (v.path, v.line))
 

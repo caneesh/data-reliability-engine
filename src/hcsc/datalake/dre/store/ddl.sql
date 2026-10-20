@@ -2,14 +2,16 @@
 -- Rendered by store/schema.py with a validated dq_database; statements are
 -- separated by semicolons. Tables are CREATE ... IF NOT EXISTS and views CREATE OR REPLACE,
 -- so applying it again changes nothing, and applying it after an upgrade replaces the views
--- (they hold no data). Tables are append-only; views derive current state.
+-- (they hold no data). Tables are append-only; views derive current state. A column added to a
+-- table after checkpoint 3 goes last among its data columns, with a migration that adds it to an
+-- existing store (store/migrations.py).
 
 CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_run (
   run_id STRING, started_at TIMESTAMP, ended_at TIMESTAMP,
   engine_version STRING, config_commit STRING, status STRING,  -- STARTED | COMPLETED | PARTIAL | FAILED
   checks_expected INT, checks_written INT,
   investigations_expected INT, investigations_done INT,  -- cause investigations of FAILED results
-  execution_type STRING                 -- NORMAL | RERUN | REPLAY
+  execution_type STRING                 -- NORMAL | RERUN | REPLAY | AS_OF_REPLAY
 ) PARTITIONED BY (run_date DATE) STORED AS ORC;
 
 CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_check_result (
@@ -22,7 +24,8 @@ CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_check_result (
   population BIGINT, violations BIGINT, observed STRING, expected STRING,
   group_values MAP<STRING,STRING>,
   severity STRING, evaluated_at TIMESTAMP, duration_ms BIGINT, detail STRING,
-  qualifications STRING, coverage_from TIMESTAMP, coverage_to TIMESTAMP
+  qualifications STRING, coverage_from TIMESTAMP, coverage_to TIMESTAMP,
+  evaluation_mode STRING  -- NORMAL | CURRENT_RECHECK | AS_OF_REPLAY (ADR-05, migration 1)
 ) PARTITIONED BY (run_date DATE) STORED AS ORC;
 
 CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_cause_result (
@@ -269,13 +272,17 @@ WHERE (c.kind = 'result' AND (coalesce(r.n, 0) <> c.result_rows
 -- qualifications (a claim that rests on an unproven premise: an inferred contract, an unverified
 -- attribution, orphans not checked, reported evidence; checkpoint 3). Latest = the latest window, then
 -- the latest evaluation of it, so a RERUN or REPLAY of an older window never becomes the
--- current state, while a RERUN of the current window replaces it.
+-- current state, while a RERUN of the current window replaces it. evaluation_mode says how the
+-- result read its evidence (ADR-05): a row stored before the column existed is NORMAL when its run
+-- was, and a CURRENT_RECHECK otherwise (RERUN and REPLAY read the tables as they are now).
 CREATE OR REPLACE VIEW {{ dq_database }}.v_latest_result AS
 SELECT evaluation_id, run_id, event_id, window_start, window_end, execution_type, feed, dataset, check_id,
        expectation_version, state, reason_category, reason_code, population,
        violations, observed, expected, group_values, severity, evaluated_at,
        duration_ms, detail, qualifications, coverage_from, coverage_to, run_date, evidence_state,
-       state = 'PASSED' AND evidence_state = 'VALID' AND qualifications IS NULL AS healthy
+       state = 'PASSED' AND evidence_state = 'VALID' AND qualifications IS NULL AS healthy,
+       coalesce(evaluation_mode,
+                CASE WHEN execution_type = 'NORMAL' THEN 'NORMAL' ELSE 'CURRENT_RECHECK' END) AS evaluation_mode
 FROM (
   SELECT r.*,
          DENSE_RANK() OVER (

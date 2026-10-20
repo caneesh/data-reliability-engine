@@ -10,7 +10,11 @@ Execution types (spec section 4):
 - RERUN: one named historical window [start, end) for every dataset planned.
 - REPLAY: every window of a historical range [start, end): the recorded NORMAL windows in it,
   exactly, and each span none of them covers.
-RERUN and REPLAY are idempotent: a result identical to the stored result of the same evaluation
+- AS_OF_REPLAY: one historical window [start, end), read as the data stood at its end (the
+  cutoff), where that can be proven (checks/modes.py); every other check is DID_NOT_RUN /
+  no_as_of_evidence.
+RERUN and REPLAY are current rechecks (evaluation_mode CURRENT_RECHECK, ADR-05): they read the
+tables as they are now, and say so. RERUN, REPLAY and AS_OF_REPLAY are idempotent: a result identical to the stored result of the same evaluation
 is not written again, and they neither read nor change the open-key state (no key events) or
 the dq_file registry. They evaluate the windowed checks only (gold rules, T1_SCHEMA_DRIFT and
 T1_PARTITION_DRIFT read the table as it is now, not a window), never move or hold a NORMAL window, and send no email.
@@ -42,6 +46,7 @@ from hcsc.datalake.dre.checks.events import (
 from hcsc.datalake.dre.checks.hop.common import hop_label
 from hcsc.datalake.dre.checks.hop.key_currency import judged_view
 from hcsc.datalake.dre.checks.hop.ledger import ledger_view
+from hcsc.datalake.dre.checks.modes import AS_OF_REPLAY, CURRENT_RECHECK, mode_of
 from hcsc.datalake.dre.checks.patterns import checks_for
 from hcsc.datalake.dre.checks.rules.rule_check import RuleCheck
 from hcsc.datalake.dre.checks.rules.schedule import due_moment, is_due, last_completed
@@ -72,7 +77,7 @@ log = logging.getLogger(__name__)
 SCHEMA_DRIFT = "T1_SCHEMA_DRIFT"  # runs once per physical table (spec section 6)
 PARTITION_DRIFT = "T1_PARTITION_DRIFT"  # likewise; both read the table as it is now, never a window
 TABLE_CHECKS = (SCHEMA_DRIFT, PARTITION_DRIFT)
-EXECUTION_TYPES = ("NORMAL", "RERUN", "REPLAY")
+EXECUTION_TYPES = ("NORMAL", "RERUN", "REPLAY", AS_OF_REPLAY)
 _HEX = re.compile(r"^[0-9a-f]{64}$")
 # The columns that make two results of one evaluation the same outcome (idempotent reruns).
 OUTCOME = ("state", "reason_category", "reason_code", "population", "violations", "observed", "expected",
@@ -83,8 +88,8 @@ EXIT_COMPLETED, EXIT_PARTIAL, EXIT_CANNOT_START = 0, 2, 3
 
 @dataclass(frozen=True)
 class Selection:
-    """What a run evaluates: NORMAL, the next eligible windows; RERUN, the historical window
-    [start, end); REPLAY, every window of the historical range [start, end)."""
+    """What a run evaluates: NORMAL, the next eligible windows; RERUN and AS_OF_REPLAY, the
+    historical window [start, end); REPLAY, every window of the historical range [start, end)."""
 
     execution_type: str = "NORMAL"
     start: datetime | None = None
@@ -99,7 +104,7 @@ class Selection:
             if self.start is not None or self.end is not None:
                 return "a NORMAL run takes no window: it evaluates each dataset's next eligible window"
             return None
-        flags = "--window-start and --window-end" if kind == "RERUN" else "--from and --to"
+        flags = "--from and --to" if kind == "REPLAY" else "--window-start and --window-end"
         if self.start is None or self.end is None:
             return f"a {kind} run needs {flags} (UTC)"
         if self.start >= self.end:
@@ -274,6 +279,7 @@ def gap_row(planned: Planned, gap: Event, held_by: tuple[str, ...], run: runs.Ru
         "evaluation_id": evaluation_id(gap.event_id, GAP_CHECK_ID, planned.expectation_version, run.engine_version),
         "run_id": run.run_id, "event_id": gap.event_id,
         "window_start": gap.window_start, "window_end": gap.window_end, "execution_type": execution_type,
+        "evaluation_mode": mode_of(execution_type),
         "feed": planned.feed.feed if planned.feed else None, "dataset": planned.dataset.dataset,
         "check_id": GAP_CHECK_ID, "expectation_version": planned.expectation_version,
         "state": "DID_NOT_RUN", "reason_category": "DATA_UNAVAILABLE", "reason_code": "window_gap",
@@ -367,7 +373,7 @@ def upstreams_of(config: Config, ds: Dataset) -> dict[str, Dataset]:
 def check_context(spark: SparkSession, config: Config, planned: Planned, event: Event,
                   landing_problems: dict[str, CheckResult] | None = None, key_secret: bytes | None = None,
                   budget_minutes: float | None = None, record_key_events: bool = True,
-                  force_full_sweep: bool = False) -> CheckContext:
+                  force_full_sweep: bool = False, as_of: bool = False) -> CheckContext:
     ds = planned.dataset
     landing_problem = (landing_problems or {}).get(planned.feed.feed) if planned.feed else None
     return CheckContext(
@@ -378,15 +384,16 @@ def check_context(spark: SparkSession, config: Config, planned: Planned, event: 
         full_sweep=force_full_sweep or is_full_sweep(config, ds.dataset, event),
         budget_minutes=budget_minutes, scan_mb_per_minute=config.defaults.scan_mb_per_minute,
         record_key_events=record_key_events, history_since=history_since(config, event.window_end),
+        as_of=event.window_end if as_of else None,
     )
 
 
 def evaluate(spark: SparkSession, config: Config, planned: Planned, event: Event,
              landing_problems: dict[str, CheckResult] | None = None, key_secret: bytes | None = None,
              budget_minutes: float | None = None, record_key_events: bool = True,
-             force_full_sweep: bool = False) -> Evaluation:
+             force_full_sweep: bool = False, as_of: bool = False) -> Evaluation:
     ctx = check_context(spark, config, planned, event, landing_problems, key_secret, budget_minutes,
-                        record_key_events, force_full_sweep)
+                        record_key_events, force_full_sweep, as_of)
     results, duration_ms = run_check(planned.check, ctx, event)
     return Evaluation(planned, event, results, datetime.now(timezone.utc), duration_ms, ctx)
 
@@ -407,7 +414,8 @@ def result_rows(evaluation: Evaluation, run: runs.Run, execution_type: str) -> l
                                            run.engine_version, r.group_values),
             "run_id": run.run_id, "event_id": event.event_id,
             "window_start": event.window_start, "window_end": event.window_end,
-            "execution_type": execution_type, "feed": p.feed.feed if p.feed else None,
+            "execution_type": execution_type, "evaluation_mode": mode_of(execution_type),
+            "feed": p.feed.feed if p.feed else None,
             "dataset": p.dataset.dataset,
             "check_id": p.check.check_id, "expectation_version": p.expectation_version,
             "state": r.state, "reason_category": r.reason_category, "reason_code": r.reason_code,
@@ -821,7 +829,12 @@ def describe(evaluation: Evaluation) -> list[str]:
         groups = ",".join(f"{k}={v}" if k in CONFIG_GROUPS else f"{k} #{n}" for k, v in sorted(r.group_values.items()))
         what = (f"{r.reason_category}/{r.reason_code}" if r.reason_code
                 else f"population {r.population}, violations {r.violations}")
-        lines.append(f"{p.dataset.dataset} {p.check.check_id}{' [' + groups + ']' if groups else ''}: "
+        mode = ""
+        if evaluation.ctx is not None and evaluation.ctx.as_of is not None:
+            mode = " [as-of replay]"
+        elif evaluation.ctx is not None and not evaluation.ctx.record_key_events:
+            mode = " [current recheck]"
+        lines.append(f"{p.dataset.dataset} {p.check.check_id}{' [' + groups + ']' if groups else ''}{mode}: "
                      f"{r.state} ({what})")
     return lines
 
@@ -860,14 +873,14 @@ def normal_jobs(spark: SparkSession, config: Config, planned_all: list[Planned],
 
 def historical_jobs(spark: SparkSession, config: Config, planned_all: list[Planned], selection: Selection,
                     feed_id: str | None, now: datetime) -> tuple[list[Job], dict[str, CheckResult]]:
-    """RERUN and REPLAY: the windowed checks over the named window, or every window of the range,
-    per dataset; a feed is evaluated in a window only if something was due in it (or --feed)."""
+    """RERUN, AS_OF_REPLAY and REPLAY: the windowed checks over the named window, or every window of
+    the range, per dataset; a feed is evaluated in a window only if something was due in it (or --feed)."""
     # Gold rules and the per-table checks read the table as it is now, not a window: nothing to re-evaluate.
     checks = [p for p in planned_all if not is_rule(p) and p.check.check_id not in TABLE_CHECKS]
     landing = refresh_landing(spark, config, checks, None, now, why_not=selection.execution_type)
     tz = config.defaults.timezone
     datasets = {p.dataset.dataset: p.dataset for p in checks}
-    if selection.execution_type == "RERUN":
+    if selection.execution_type != "REPLAY":  # RERUN, AS_OF_REPLAY: the one named window
         windows = {d: [fixed_window(ds, selection.start, selection.end, tz)] for d, ds in datasets.items()}
     else:
         recorded = recorded_windows(spark, config.defaults.dq_database, list(datasets), selection.start, selection.end)
@@ -969,11 +982,13 @@ def integrity_sweep(spark: SparkSession, config: Config, run: runs.Run) -> list[
             f"{outcome.mismatches} new evidence mismatch(es), {outcome.conflicts} new commit conflict(s)"]
 
 
-def stored_outcomes(spark: SparkSession, db: str, jobs: list[Job]) -> dict[str, tuple[Any, ...]]:
+def stored_outcomes(spark: SparkSession, db: str, jobs: list[Job], as_of: bool = False) -> dict[str, tuple[Any, ...]]:
     """evaluation_id -> the OUTCOME of its latest stored result row, for the jobs' events. Read by
     dataset and the span the events cover (one predicate however many events), then kept for the
     jobs' event ids in Python. A latest row whose evidence is INVALID is not "stored": a RERUN of its
-    window writes and publishes the evaluation again, which is how such a result is repaired."""
+    window writes and publishes the evaluation again, which is how such a result is repaired. An
+    AS_OF_REPLAY result and one read from the tables as they are (NORMAL or a current recheck) are
+    different claims (ADR-05), so neither stands for the other: `as_of` picks which are read."""
     if not jobs:
         return {}
     ids = {event.event_id for _, event in jobs}
@@ -983,10 +998,11 @@ def stored_outcomes(spark: SparkSession, db: str, jobs: list[Job]) -> dict[str, 
     lo = utc_literal(min(event.window_start for _, event in jobs))
     hi = utc_literal(max(event.window_end for _, event in jobs))
     columns = ", ".join(OUTCOME)
+    reading = f"coalesce(evaluation_mode = '{AS_OF_REPLAY}', FALSE) = {str(as_of).upper()}"
     rows = spark.sql(
         f"SELECT evaluation_id, event_id, {columns} FROM (SELECT r.*, ROW_NUMBER() OVER (PARTITION BY evaluation_id "
         f"ORDER BY evaluated_at DESC, run_id DESC) AS rn FROM {db}.v_committed_result r "
-        f"WHERE dataset IN ({datasets}) AND window_start >= {lo} AND window_end <= {hi}) latest "
+        f"WHERE dataset IN ({datasets}) AND window_start >= {lo} AND window_end <= {hi} AND {reading}) latest "
         f"WHERE rn = 1 AND evidence_state <> 'INVALID'").collect()
     return {r.evaluation_id: tuple(r[c] for c in OUTCOME) for r in rows if r.event_id in ids}
 
@@ -1014,7 +1030,7 @@ def _preflight(spark: SparkSession, conf: str, feed_id: str | None,
     db = config.defaults.dq_database
     missing = missing_objects(spark, db)
     if missing:
-        print(f"dre run: the dq store is not installed in {db} (missing: {', '.join(missing)}). "
+        print(f"dre run: the dq store in {db} is not installed or not up to date (missing: {', '.join(missing)}). "
               "Run dre install --apply once the platform team has created the database.")
         return EXIT_CANNOT_START
     if selection.execution_type == "NORMAL":
@@ -1090,7 +1106,7 @@ def investigation_budget(config: Config, dataset_id: str, spent_minutes: float) 
 
 def run(spark: SparkSession, conf: str, feed_id: str | None = None, selection: Selection | None = None) -> int:
     """One run. NORMAL (scheduled hourly): only feeds with something due are evaluated; --feed
-    forces one. RERUN and REPLAY: historical windows (module docstring)."""
+    forces one. RERUN, REPLAY and AS_OF_REPLAY: historical windows (module docstring)."""
 
     selection = selection or Selection()
     ready = _preflight(spark, conf, feed_id, selection)
@@ -1121,10 +1137,16 @@ def run(spark: SparkSession, conf: str, feed_id: str | None = None, selection: S
             jobs, landing, gap_rows = normal_jobs(spark, config, planned_all, run_record, feed_id)
             stored: dict[str, tuple[Any, ...]] = {}
         else:
-            print(f"note: a {kind} reads the tables as they are now, not as they were in the window; rows "
-                  "changed or purged since are not seen (a best-effort re-evaluation, not a snapshot)")
+            if mode_of(kind) == CURRENT_RECHECK:
+                print(f"note: a {kind} is a current recheck: it reads the tables as they are now, not as they were "
+                      "in the window; rows changed or purged since are not seen. Its results are labelled "
+                      "CURRENT_RECHECK and never stand for a historical PASS")
+            else:
+                print(f"note: an {kind} reads each dataset as it stood at the window end, only where every dataset "
+                      "read is append_only and T1_PARTITION_DRIFT shows it unchanged since; any other check is "
+                      "DID_NOT_RUN (no_as_of_evidence)")
             jobs, landing = historical_jobs(spark, config, planned_all, selection, feed_id, run_record.started_at)
-            stored = stored_outcomes(spark, db, jobs)
+            stored = stored_outcomes(spark, db, jobs, as_of=kind == AS_OF_REPLAY)
         expected = len(jobs) + len(gap_rows)
         for planned, gap, held_by in gap_rows:
             gap_rows_stored = [gap_row(planned, gap, held_by, run_record, kind, datetime.now(timezone.utc))]
@@ -1141,13 +1163,14 @@ def run(spark: SparkSession, conf: str, feed_id: str | None = None, selection: S
             tainted = compromised.of(ds_id, check_id)
             evaluation = evaluate(spark, config, planned, event, landing, key_secret, budget,
                                   record_key_events=normal,
-                                  force_full_sweep=tainted is not None and check_id == "HOP_KEY_CURRENCY")
+                                  force_full_sweep=tainted is not None and check_id == "HOP_KEY_CURRENCY",
+                                  as_of=kind == AS_OF_REPLAY)
             if tainted is not None and check_id == "T1_PARTITION_DRIFT":
                 evaluation = without_pass(evaluation)
             spent[(ds_id, event.event_id)] = spent.get((ds_id, event.event_id), 0.0) + evaluation.duration_ms / 60000
             remaining = investigation_budget(config, ds_id, spent.get((ds_id, event.event_id), 0.0))
             rows = result_rows(evaluation, run_record, kind)
-            if unchanged(rows, stored):  # RERUN, REPLAY: the same outcome is stored already
+            if unchanged(rows, stored):  # RERUN, REPLAY, AS_OF_REPLAY: the same outcome is stored already
                 written += 1
                 print(f"{ds_id} {planned.check.check_id}: unchanged since its stored result; not written again")
                 drop_judged_views(spark, evaluation)
