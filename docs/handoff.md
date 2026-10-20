@@ -80,8 +80,9 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
 | CI records for Gate A and Gate B | `2cf8def` | #96 (green) |
 | Final review corrections P1-01, P1-02, P1-03, O6; known-issues register | `8eebd31` | #97 (red: 2 F01 late-write tests, `test` job) |
 | Fix for #97: the late-write tests escape O6's re-cancellation explicitly | `0c4fabd` | #98 (green) |
-| CI records #94 to #98 | `3f4a5a2` | (docs only) |
-| Handoff and resume prompt for the next session | (this commit) | (docs only) |
+| CI records #94 to #98 | `3f4a5a2` | #99 (green, docs only) |
+| Handoff and resume prompt for the next session | `411a07b` | #100 (green, docs only) |
+| CI records #99 and #100 | (this commit) | (docs only) |
 
 Each row has a section in `docs/decisions.md` saying what was decided and why.
 
