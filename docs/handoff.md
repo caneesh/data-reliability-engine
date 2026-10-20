@@ -18,8 +18,9 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
   - **Step 2** (commit rows and committed-only views, ADR-07) is built (`d8db1ad`, CI #79). **The user reviewed checkpoint 2 on 2026-10-17: changes required before step 3** (CP2-01 to CP2-04; E3 not approved; E1 and E2 approved with conditions; E4 to E6 approved). On the user's "Yes" to the proposed changes, **the revision is built**: cause commits naming the result they explain (no timestamps), stored rows counted before every commit (a unit withheld whole when they differ), a failed commit write read back and completed, single-file commit batches, the REPLAY list from committed results, `commit_batch`, the observation tables documented, CI keeping the per-test report. **The revised checkpoint 2 awaits the user's review** (`docs/design/checkpoints.md`, "Checkpoint 2, revised"; `docs/decisions.md`, "Checkpoint 2 reviewed" and "Checkpoint 2 revision").
   - **Second review, 2026-10-17: corrections R1 to R3**, then the user's ratification "approved for implementation, subject to acceptance testing". **Built:** the consistency model (spec section 5, item 6); evidence states VALID, INVALID, EXPIRED, UNKNOWN (`v_commit_state`; `v_latest_result.healthy` = PASSED and VALID, the one definition); evidence lifetimes on commits (13 months partition states, 84 results) honoured by retention, with investigation holds; the integrity sweep (daily 35 days, weekly full) and `dq_integrity`; compromised baselines (hop full sweep, drift cannot pass, REBASELINED); confirmed repair (readback, CONFIRMED only, conflicts recorded); `result_run_date` on cause commits; freshness in the digest and watchdog; the late-thread fix. **Signed off on 2026-10-18 for controlled development, not production certification; step 3 authorised** (`docs/decisions.md`, "Checkpoint 2 signed off").
   - **Step 3** (HOP_LEDGER and `dq_reconciliation`) is built (`docs/decisions.md`, "Phase 1 build step 3", with deviations L1 to L15 to ratify; `docs/design/implementation.md`, "Step 3"). Checkpoint 3 was reviewed on 2026-10-19: **changes required** (C3-01 to C3-04, conditions on L1, L4, L5, L6, L13, L14, L15; L3, L11, L12 revised). The user ratified the correction plan; **the corrections are built** (coverage continuity for every hop check, reject lineage and rules, union attribution states, persisted qualifications and claim-aware `healthy`, verified and unverified columns, triage, identity uniqueness, LEDGER_UNBALANCED incidents, insufficient_evidence holding the window). **The revised checkpoint 3 awaits independent review and ratification** (`docs/design/checkpoints.md`, "Checkpoint 3, revised"; `docs/decisions.md`, "Checkpoint 3 reviewed"); step 4 is blocked until then.
+  - **Steps 4 to 8, built in parallel (2026-10-20)** under the user's master implementation prompt (parallel development of checkpoints 3 to 8, reviewed at Gate A and Gate B): inventory and frozen interfaces in `docs/design/workstreams-c4-c8.md`; each workstream on a local feature branch in its own worktree (four by parallel agents), merged in order. Step 4 (evaluation modes, AS_OF_REPLAY, versioned migrations), step 5 (T1_SOURCE_ATTRIBUTION, HOP_CONTRIBUTION, survivorship), step 6 (CHAIN_COMPLETENESS), step 7 (replays R14 to R17, R19, R20, R23) and step 8 (run budget, kill switch, queue check, backpressure, `scripts/measure_run.py`). Evidence: `docs/design/evidence/gate-a.md` (C3 to C5, gate run on `4da17be`: 901 passed, e2e green) and `gate-b.md` (C6 to C8, gate run on `1b800ca`: 955 passed, e2e green). **None of it is ratified**; the revised checkpoint 3 still awaits its review. Defaults to ratify: `docs/decisions.md` M1 to M9, S1 to S6, K1 to K9, O1 to O7 (M2 widens a guard: ADD COLUMNS in `store/migrations.py` only).
 - **Context from 2026-10-15 and 16.** The user's team is building a temporary in-pipeline audit (control table, rejects table, filter rule ids, audit log lines) that modifies the jobs; DRE stays outside the jobs. `docs/evidence-contract.md` fixes what that audit writes so DRE's probes read it by configuration (also a Claude Doc, "DRE Evidence Contract"). A feature catalogue of the engine is a Claude Doc, "DRE: Feature Catalogue" (https://claude.ai/code/artifact/4831d1d5-a7fd-427e-9a49-e67b4dc62e39). The real flow: a scheduled process loads HDFS files up to a hand-off layer (merge or gcf), a continuous process moves them into gold temp, and gold main merges on its own schedule; whether the hand-off table is written by insert-overwrite per batch partition is still unknown (it decides where partition drift matters first).
-- **Tests:** 849 (`pytest --collect-only -q | tail -1` gives the exact count). A full local run takes about 45 minutes (each test run now does its first integrity sweep); CI about 25. Replay scenarios R01 to R13 all pass, plus a three-layer acceptance test. Proof scenarios R14 to R23 are planned (traceability matrix, section 4); PS8 is already covered by `tests/test_commit_protocol.py`.
+- **Tests:** 955 (`pytest --collect-only -q | tail -1` gives the exact count). A full local run takes about 56 to 67 minutes on this machine; CI about 30. Replay scenarios R01 to R13, R14 to R17, R19, R20 and R23 pass, plus a three-layer acceptance test; PS8's replay is `tests/test_commit_protocol.py`; R18 is not added (nothing to run it on) and R22 is blocked on release 4 step 2.
 
 ## History, in order (each step green in CI)
 
@@ -70,6 +71,10 @@ Read this first when resuming. Then read `CLAUDE.md` (working rules), `docs/spec
 | Phase 1 build step 3: HOP_LEDGER, `dq_reconciliation`, `rejects` on contracts, the scope line; checkpoint 3 | `1f30227` | #88 |
 | Checkpoint 3 CI line | `a5e8190` | #89 |
 | Checkpoint 3 corrections: coverage continuity, reject lineage, qualifications and health, union attribution, triage, identity, LEDGER_UNBALANCED, window hold; revised checkpoint 3 | `6387989` | #90 |
+| Revised checkpoint 3 CI line | `486792a` | #91 |
+| Workstreams C4 to C8: inventory, frozen interfaces, ownership | `ab36f21` | #92 |
+| Steps 4 and 5 (Gate A): evaluation modes, AS_OF_REPLAY, migrations; source attribution, contribution, survivorship | `4da17be` | #93 (running when written) |
+| Steps 6 to 8 (Gate B): CHAIN_COMPLETENESS, replays, run budget and kill switch | `1b800ca` | (running when written) |
 
 Each row has a section in `docs/decisions.md` saying what was decided and why.
 
@@ -78,15 +83,10 @@ Each row has a section in `docs/decisions.md` saying what was decided and why.
 **Next action**, in this order unless the user says otherwise:
 
 0. ~~Confirm CI for the corrections commit.~~ Run #90 on `6387989`, green, with the `test-report` and `e2e-logs` artifacts kept.
-1. **Wait for the independent review and ratification of the revised checkpoint 3.** Record the verdict in `docs/decisions.md` before starting step 4. A change asked for is built the controlled way (failing test first, spec, code, docs, full suite, e2e).
-2. **Step 4, evaluation modes and AS_OF_REPLAY**, on the user's word. Start by stating the plan.
-3. **Later steps** (`docs/design/target-architecture.md`, section 7):
-   4. evaluation modes and AS_OF_REPLAY;
-   5. T1_SOURCE_ATTRIBUTION, HOP_CONTRIBUTION and survivorship;
-   6. CHAIN_COMPLETENESS;
-   7. replay tests R14 to R23;
-   8. run budget, kill switch, load test.
-4. **Pending values**, none blocking step 3:
+1. **Confirm CI** for `4da17be` (Gate A) and `1b800ca` (Gate B) and record the run numbers here and in the evidence packages.
+2. **Wait for the reviews:** the revised checkpoint 3, then Gate A (`docs/design/evidence/gate-a.md`), then Gate B (`gate-b.md`). Record each verdict in `docs/decisions.md`; a change asked for is built the controlled way (failing test first).
+3. **Still open in the build order:** R18 (no aggregate configured to replay), R22 (needs release 4 step 2), the concurrency cap N (decisions O6), the load test (a representative cluster).
+4. **Pending values**:
    - DRE's YARN queue: the user will provide it. It is never the cluster's high-priority queue, whose name stays out of the repo; deployed config lists it in `protected_queues`.
    - The kill switch's path and owner.
    - Whether curated is append-only (`grain.history`).

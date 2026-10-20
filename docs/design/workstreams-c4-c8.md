@@ -1,5 +1,7 @@
 # Workstreams for build steps 4 to 8: inventory, frozen interfaces, ownership (2026-10-20)
 
+**Outcome (2026-10-20).** All five workstreams were built and merged in order (C4, C5, C6, C7, C8); the gate runs and the evidence are in `docs/design/checkpoints.md`, "Gate A and Gate B". Where a build departed from the interfaces frozen below, `docs/decisions.md` says so (M1, K8 and the C8 additions in O1 to O7). The inventory in section 1 is the state before the work.
+
 This file records Phase 1 (inventory) and Phase 2 (interface freeze) of the parallel development of
 checkpoints 3 to 8. It is a working document: anything below marked **default taken** is a choice
 the spec and the ADRs leave open, recorded in `docs/decisions.md` for ratification at Gate A or Gate B.

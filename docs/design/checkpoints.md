@@ -446,3 +446,24 @@ In `docs/decisions.md` ("Interpretations, for the reviewer to confirm or correct
 
 1. ~~CI green on the corrections commit, with the test report kept.~~ Run #90, green, both artifacts kept.
 2. Independent review of the corrections; the user ratifies the revised checkpoint 3.
+
+## Gate A and Gate B: checkpoints 4 to 8, built in parallel (2026-10-20)
+
+Built under the user's master implementation prompt of 2026-10-20, which asked for checkpoints 3 to 8 to be developed in parallel and reviewed at two gates. The revised checkpoint 3 had not been independently reviewed when work began; steps 4 to 8 rest on it and are not ratified. The inventory, the frozen interfaces and the ownership are in `docs/design/workstreams-c4-c8.md`; the defaults each step took are in `docs/decisions.md` (M1 to M9, S1 to S6, K1 to K9, O1 to O7).
+
+| Gate | Checkpoints | Evidence | Gate run |
+| --- | --- | --- | --- |
+| A | C3 (revised, unchanged), C4, C5 | `docs/design/evidence/gate-a.md` | `4da17be`: 901 passed; e2e build, install, run, verify all exit 0 |
+| B | C6, C7, C8 | `docs/design/evidence/gate-b.md` | `1b800ca`: 955 passed; e2e build, install, run, verify all exit 0 |
+
+### Not done, and why
+
+- **R18** (aggregation through `dre run`): no aggregate is configured for the member pipeline and the sample has none; proven at check level only.
+- **R22** (the file record count of proof scenario 9): release 4 step 2, not built.
+- **The concurrency cap N** (ADR-08): not enforced; decisions O6.
+- **The load test** (acceptance criterion 7): needs a representative cluster from the platform team.
+
+### Gates
+
+1. CI green on each gate's head, run numbers recorded in `docs/handoff.md`.
+2. The user's review of the revised checkpoint 3, then of Gate A, then of Gate B, each verdict recorded in `docs/decisions.md`.
