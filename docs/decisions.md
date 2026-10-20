@@ -505,6 +505,20 @@ The traceability matrix comes before code (exit criterion 6).
    - **Backpressure:** at 80% of the budget the next run defers the full sweep.
    - **Load test:** on a representative cluster, which needs the platform team.
 
+## Phase 1 build step 6: CHAIN_COMPLETENESS (2026-10-20)
+
+Built under the master implementation prompt of 2026-10-20, not ratified. Defaults taken, for Gate B:
+
+- **K1, unassessable is lost.** A record unassessable at an edge (no load time at an intermediate layer, a key that cannot be mapped forward) counts as lost: fail closed, as HOP\_LEDGER fails on unassessable records.
+- **K2, later edges.** A carried key is due at a later edge when its latest version's load time + that edge's `sla_hours` is at or before the cutoff, pending otherwise. A record pending at a later edge is not judged again before the full sweep, because the chain's range moves on by source load time; the scope lists this blind spot.
+- **K3, unjudged edges** after the first are not read: records reaching one are unobservable. An unjudged first edge is read only for the due population.
+- **K4, edges come from `key_map` only** (the frozen interface): a contributor edge declared only in `contracts` is not on a path.
+- **K5, one record to several keys** at an edge is unobservable there.
+- **K6, guards and orphans** stay with each edge's HOP\_LEDGER.
+- **K7, coverage.** partial\_chain covers its range (`runner.covers`): otherwise a chain with a permanently unobservable edge would widen its range on every run.
+- **K8, evidence shape** (differs from the frozen text): `label` is the edge where a record ended and `class` its disposition's class; key events are LOST or UNOBSERVABLE (not FLAGGED), so they never enter `v_open_keys`, which nothing would clear; `key_value` is the first edge's canonical key.
+- **K9, configuration context.** `CheckContext.config` carries the loaded configuration, so the chain can read datasets and settings beyond `ctx.upstreams`. `dre validate` does not yet check the terminal or the path's uniqueness: found at run time (invalid\_config).
+
 ## Phase 1 build step 5: source attribution, contribution, survivorship (2026-10-20)
 
 Built under the master implementation prompt of 2026-10-20, not ratified. Defaults taken, for Gate A:

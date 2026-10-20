@@ -51,8 +51,8 @@ def gold(table: str, **extra: Any) -> Dataset:
 # --- the registries themselves ---
 
 def test_the_built_ins_are_discovered_without_a_central_list() -> None:
-    assert CHECKS.ids() == ("HOP_CONTRIBUTION", "HOP_FILE_COMPLETENESS", "HOP_KEY_CURRENCY", "HOP_LEDGER",
-                            "HOP_VALUE_AGREEMENT", "T1_COLUMN_RANGE", "T1_FILES_NOT_LOADED", "T1_FRESHNESS",
+    assert CHECKS.ids() == ("CHAIN_COMPLETENESS", "HOP_CONTRIBUTION", "HOP_FILE_COMPLETENESS", "HOP_KEY_CURRENCY",
+                            "HOP_LEDGER", "HOP_VALUE_AGREEMENT", "T1_COLUMN_RANGE", "T1_FILES_NOT_LOADED", "T1_FRESHNESS",
                             "T1_KEY_DUPLICATES", "T1_KEY_NULLS", "T1_ON_TIME", "T1_PARTITION_DRIFT", "T1_SCHEMA_DRIFT",
                             "T1_SOURCE_ATTRIBUTION", "T1_VOLUME", "T1_ZERO_ROWS")
     assert patterns() == ("FILE_CYCLIC", "FILE_PERIODIC", "TABLE_MERGE")

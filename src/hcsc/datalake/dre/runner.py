@@ -389,6 +389,7 @@ def check_context(spark: SparkSession, config: Config, planned: Planned, event: 
         budget_minutes=budget_minutes, scan_mb_per_minute=config.defaults.scan_mb_per_minute,
         record_key_events=record_key_events, history_since=history_since(config, event.window_end),
         as_of=event.window_end if as_of else None,
+        config=config,
     )
 
 
@@ -405,8 +406,9 @@ def evaluate(spark: SparkSession, config: Config, planned: Planned, event: Event
 def covers(result: CheckResult) -> bool:
     """Whether a result judged its range (checks/hop/coverage.py): PASSED, FAILED, or nothing due.
     Any other outcome (an error, missing or insufficient evidence, a budget cut) covers nothing,
-    so the next window judges the range again."""
-    return result.state in ("PASSED", "FAILED") or result.reason_code == "empty_population"
+    so the next window judges the range again. A partial chain (CHAIN_COMPLETENESS) judged every
+    observable edge of its range; waiting does not make the other edges observable, so it covers too."""
+    return result.state in ("PASSED", "FAILED") or result.reason_code in ("empty_population", "partial_chain")
 
 
 def result_rows(evaluation: Evaluation, run: runs.Run, execution_type: str) -> list[dict[str, Any]]:
@@ -469,7 +471,8 @@ def write_key_events(spark: SparkSession, db: str, evaluation: Evaluation, rows:
     for result, row in zip(evaluation.results, rows):
         events = states = ledger = 0
         if result.key_events is not None:
-            hop = hop_label(result.group_values.get("upstream") or "", row["dataset"])
+            # a hop check's events are per hop; CHAIN_COMPLETENESS's per chain (`<source>-><terminal>`)
+            hop = result.group_values.get("chain") or hop_label(result.group_values.get("upstream") or "", row["dataset"])
             events = append_key_events(result.key_events, db, run.run_id, row["evaluation_id"], row["dataset"],
                                        row["check_id"], hop, row["evaluated_at"], run.run_date)
         if result.partition_state:

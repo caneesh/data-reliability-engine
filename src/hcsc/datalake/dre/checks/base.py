@@ -35,6 +35,9 @@ REASONS: dict[str, str] = {
     "partition_missing": "DATA_UNAVAILABLE",
     "landing_unreadable": "DATA_UNAVAILABLE",
     "empty_population": "DATA_UNAVAILABLE",
+    # CHAIN_COMPLETENESS: no record lost, but some crossed an edge the ledger cannot judge (default taken:
+    # never holds a window; the unobservable edge does not become observable by waiting)
+    "partial_chain": "DATA_UNAVAILABLE",
     "window_gap": "DATA_UNAVAILABLE",  # a held span given up after max_window_hours: never checked
     "no_as_of_evidence": "DATA_UNAVAILABLE",  # AS_OF_REPLAY: the data as it stood at the cutoff cannot be read (ADR-05)
     "metastore_unavailable": "PLATFORM",
@@ -163,6 +166,9 @@ class CheckContext:
     as_of: datetime | None = None
     # What the as-of reading rests on, set by the AS_OF_REPLAY gate (checks/modes.py) for the scope.
     as_of_proof: str | None = None
+    # The loaded configuration (config/loader.Config), for a check that reads beyond the dataset's own
+    # upstreams (CHAIN_COMPLETENESS follows a key_map path to its terminal); None when built by hand.
+    config: Any = None
 
 
 class Check(ABC):
