@@ -100,16 +100,16 @@ def _continued(basis: str, carried: bool, full_sweep: bool) -> str:
         else basis
 
 
-def _may_have_dropped(ctx: CheckContext) -> bool:
-    """Whether retention may have dropped results of dq_check_result: the store holds a run_date
-    partition at or before coverage_since (it is older than the retention). Retention drops only
-    partitions before its cutoff, so a store whose first partition is after coverage_since has lost
-    none. Read from the metastore's partition list, and only when the hop has no result retained."""
+def may_have_dropped(ctx: CheckContext, table: str, since: date | None) -> bool:
+    """Whether retention may have dropped rows of `table` before `since`, the first run_date it still
+    retains: the store holds a run_date partition at or before it (it is older than the retention).
+    Retention drops only partitions before its cutoff, so a store whose first partition is after
+    `since` has lost none. Read from the metastore's partition list, only where it matters."""
     from hcsc.datalake.dre.store.retention import partition_dates
 
-    if ctx.coverage_since is None:  # every run_date retained
+    if since is None:  # every run_date retained
         return False
-    return any(d <= ctx.coverage_since for d in partition_dates(ctx.spark, ctx.dq_database, "dq_check_result"))
+    return any(d <= since for d in partition_dates(ctx.spark, ctx.dq_database, table))
 
 
 def judged(ctx: CheckContext, event: Event, check_id: str, up_id: str, group: str = "upstream",
@@ -141,7 +141,7 @@ def judged(ctx: CheckContext, event: Event, check_id: str, up_id: str, group: st
                       "retained: records due before it are judged only by the full sweep)", gap=not sweep)
     if ctx.history_since is None:  # a context without a history bound (the runner always sets one)
         return Judged(start, end, "first evaluation")
-    if not _may_have_dropped(ctx):
+    if not may_have_dropped(ctx, "dq_check_result", ctx.coverage_since):
         return Judged(start, end, "first evaluation (the hop has no result, and the store has lost none to retention)")
     retained = ctx.coverage_since.isoformat() if ctx.coverage_since is not None else "the store began"
     return Judged(start, end, f"unresolved coverage gap: no committed coverage retained since {retained} "

@@ -82,6 +82,7 @@ def hop_params(ctx: CheckContext, event: Event, up_id: str, up: Dataset | None,
             return did_not_run("table_missing", detail=f"table {up.table} not found", group_values={"upstream": up_id})
     span = judged(ctx, event, check_id, up_id)
     start, end = span.start, span.end
+    open_since = ctx.history_since if span.in_lookback else ctx.key_events_since
     owned = [{"up": column_expr(up, u), "dn": column_expr(ds, d)} for u, d in ds.owned_columns.items()]
     exclusion = exclusion_condition(ds, up_id, up, tz)
     filters = [f"({up.feed_filter})" if up.feed_filter else None,
@@ -112,8 +113,12 @@ def hop_params(ctx: CheckContext, event: Event, up_id: str, up: Dataset | None,
         "use_open": ctx.key_secret is not None and (ctx.record_key_events if ctx.judge_open_keys is None
                                                     else ctx.judge_open_keys),
         "dq_database": ctx.dq_database, "dataset": ds.dataset, "hop": hop_label(up_id, ds.dataset),
-        # open keys are read from dq_key_event's run_date partitions on or after this (None: all of them)
-        "events_since": ctx.history_since.isoformat() if ctx.history_since is not None else None,
+        # open keys are read from dq_key_event's run_date partitions on or after this (None: all of them).
+        # Every evaluation records each open key it reads again, so while the hop's coverage continues
+        # from inside the lookback its open keys' latest events are inside it; otherwise (the hop was
+        # not evaluated for longer) back to dq_key_event's retention (KI-19, as the chain's carry, CA-02)
+        "events_since": open_since.isoformat() if open_since is not None else None,
+        "events_from_retention": not span.in_lookback and ctx.key_events_since is not None,
     }
 
 

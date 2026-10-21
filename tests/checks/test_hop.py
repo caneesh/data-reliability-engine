@@ -470,11 +470,24 @@ def test_the_hop_s_checkpoints_are_released_with_its_views(spark) -> None:
 
 def test_open_keys_are_read_from_recent_partitions_only(spark, monkeypatch) -> None:
     """The hop reads its open keys from dq_key_event's run_date partitions on or after the history
-    lookback (an open key is re-emitted on every evaluation, so its latest event is recent); the
-    plan prunes on run_date, and the result says how many judged keys were open from earlier runs."""
+    lookback while its coverage continues from inside it (an open key is re-emitted on every
+    evaluation, so its latest event is recent; KI-19: without that continuity the read reaches back
+    to dq_key_event's retention, tests/checks/test_open_keys_idle.py); the plan prunes on run_date,
+    and the result says how many judged keys were open from earlier runs."""
+    from tests.store.conftest import append_rows
+
     expected_hash = key_hash(SECRET, KEY)
     long_ago = datetime(2026, 1, 10, 9, 0)  # loaded days before the judged range: only an open key gets it judged
     up, dn = tables(spark, "kc_lookback", [curated_row(updated=long_ago)], [])
+    # the hop's coverage continues from inside the lookback: a committed covering result of the previous
+    # window, ending where this window's range starts (so the range is unchanged)
+    append_rows(spark, DQ, "dq_check_result", [{
+        "evaluation_id": "eval-kc-lookback-prev", "run_id": "run-prev", "event_id": "x",
+        "window_start": datetime(2026, 1, 14, 12, tzinfo=UTC), "window_end": EVENT.window_start,
+        "execution_type": "NORMAL", "dataset": dn.dataset, "check_id": "HOP_KEY_CURRENCY", "state": "PASSED",
+        "group_values": {"upstream": up.dataset}, "evaluated_at": EVENT.window_start,
+        "coverage_from": datetime(2026, 1, 14, 4, tzinfo=UTC), "coverage_to": datetime(2026, 1, 15, 4, tzinfo=UTC),
+        "run_date": EVENT.window_start.date()}])
     old_day = datetime(2025, 6, 1, 12, tzinfo=UTC)
     append_key_events(spark.createDataFrame([(expected_hash, KEY, "FLAGGED", "MISSING")],
                                             "key_hash STRING, key_value STRING, event STRING, state_detail STRING"),

@@ -25,6 +25,7 @@ from hcsc.datalake.dre.checks.base import Check, CheckContext, CheckResult, from
 from hcsc.datalake.dre.checks.hop.common import (
     exclusion_label, hop_params, not_judged, per_hop, register_key_hash, upstream_pairs,
 )
+from hcsc.datalake.dre.checks.hop.coverage import may_have_dropped
 from hcsc.datalake.dre.checks.registry import register_check
 
 if TYPE_CHECKING:
@@ -73,6 +74,11 @@ class KeyCurrency(Check):
         if row.open_keys:  # how much of the judgement is open keys from earlier runs: growth shows here
             still_open = f"{row.open_keys} key{'s' if row.open_keys != 1 else ''} open from earlier runs"
             left_out = f"{still_open}, {left_out}" if left_out else still_open
+        if params["use_open"] and params["events_from_retention"] and may_have_dropped(
+                ctx, "dq_key_event", ctx.key_events_since):  # KI-19: what the hop can no longer see
+            horizon = (f"open keys are read back to {params['events_since']}, dq_key_event's retention: a key "
+                       "opened before then is judged again only by the full sweep")
+            left_out = f"{left_out}; {horizon}" if left_out else horizon
         observed = (f"{row.missing or 0} missing, {row.stale or 0} stale and {row.unassessable} unassessable "
                     f"(no record time) of {row.population} keys" if row.unassessable else
                     f"{row.missing or 0} missing and {row.stale or 0} stale of {row.population} keys")

@@ -287,3 +287,16 @@ def test_only_a_fully_healthy_digest_is_all_clear(config, mode: str) -> None:
         update={"all_clear_digest": mode})})
     sent = to_send([d], defaults, datetime(2026, 1, 16, 3, 0, tzinfo=timezone.utc))  # not the daily hour
     assert sent == ([d] if mode == "every_run" else [])
+
+
+def test_a_coverage_gap_is_reported_in_the_digest_and_is_never_all_clear() -> None:
+    """KI-18 (ratified) and CA-01: a PASS qualified coverage_gap, the only result of the run, is listed
+    under "Passed with qualifications" by name and counted in the subject; the digest is not all clear."""
+    from hcsc.datalake.dre.notify.digest import Item
+
+    d = digest_of(passing=0)
+    d.qualified = [Item("gold_member_coverage", "HOP_LEDGER", "upstream=up0", "PASSED", qualifications=["coverage_gap"])]
+    assert not d.all_clear
+    assert d.subject == "DRE dev: 0 new failures, 0 checks did not run, 1 passed with qualifications"
+    assert ("Passed with qualifications (not counted as healthy)\n- gold_member_coverage HOP_LEDGER "
+            "[upstream=up0]: coverage_gap") in d.text()

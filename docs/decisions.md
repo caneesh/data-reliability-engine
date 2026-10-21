@@ -505,6 +505,18 @@ The traceability matrix comes before code (exit criterion 6).
    - **Backpressure:** at 80% of the budget the next run defers the full sweep.
    - **Load test:** on a representative cluster, which needs the platform team.
 
+## Final engineering acceptance: KI-18 ratified, KI-19 corrected (2026-10-21)
+
+- **KI-18, ratified by the user (2026-10-21).** In a store older than its evidence retention, where a hop's first evaluation cannot be told from coverage that retention dropped, the result is qualified `coverage_gap` until a covering full sweep establishes coverage. A store younger than the retention evaluates a hop's first window without the qualification. No change; verified by `tests/checks/test_coverage_gap.py` and `tests/notify/test_digest.py::test_a_coverage_gap_is_reported_in_the_digest_and_is_never_all_clear`.
+- **KI-19, the open-key read follows the hop's continuity.** HOP\_KEY\_CURRENCY reads its open keys within `history_lookback_days` while the hop's own coverage continues from inside the lookback. Otherwise it reads them back to `dq_key_event`'s retention (`key_events_since`, the CA-02 fallback).
+  - CA-02's semantics carry over:
+    - every NORMAL evaluation with a secret re-emits each open key it reads (STILL\_FLAGGED, or CLEARED once CURRENT), so continuity keeps open keys' latest events inside the lookback;
+    - CLEARED ends a key's open state, so a terminal outcome is recorded once;
+    - only committed, non-INVALID events are read (`v_committed_key_event`).
+  - The disclosure differs from the chain's. HOP\_KEY\_CURRENCY has no scope JSON, so the horizon goes into `observed` (or `detail`, when nothing was judged). It is stated only when the store holds a `dq_key_event` partition at or before the horizon, so retention may have dropped events.
+  - `coverage.may_have_dropped` now serves both CA-01 and KI-19.
+  - The existing test `test_hop.py::test_open_keys_are_read_from_recent_partitions_only` encoded the old rule (open keys from the lookback only, without continuity). Its setup gains a committed covering result inside the lookback, ending where the range starts; its assertions are unchanged.
+
 ## Final conditional approval: conditions CA-01 and CA-02 (2026-10-20)
 
 The user's conditional approval named two correctness conditions. Both were reproduced as defects on the current code (`docs/design/evidence/final-conditional-approval.md`). The smallest corrections, to ratify:
