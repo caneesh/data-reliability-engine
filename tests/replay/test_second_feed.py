@@ -155,8 +155,8 @@ def test_r09_renamed_key_column(spark, tmp_path) -> None:
     renamed = [("provider_key" if n == "provider_id" else n, t) for n, t in PROVIDER_GOLD_COLUMNS]
     create_table(spark, replay.provider_gold, renamed, [])
     spark.createDataFrame([("P001", "Provider P001", "general", merged.replace(tzinfo=None) - timedelta(days=2),
-                            merged.replace(tzinfo=None))], ", ".join(f"{n} {t}" for n, t in renamed)
-                          ).write.insertInto(replay.provider_gold)
+                            merged.replace(tzinfo=None), merged.strftime("%Y-%m-%d"))],
+                          ", ".join(f"{n} {t}" for n, t in renamed)).write.insertInto(replay.provider_gold)
 
     assert run_feed(replay, GOLD_FEED) == 0
     results = latest(spark, replay)

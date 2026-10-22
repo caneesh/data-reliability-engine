@@ -72,3 +72,20 @@ def test_registry_appends_new_and_changed_files_only(spark, tmp_path) -> None:
     assert status["rt_0003.seq"][0] == t3
     assert spark.table("dq_landing.dq_file").count() == 4
     assert known_files(spark, "dq_landing", "other_feed") == {}
+
+
+def test_a_root_with_more_files_than_max_files_is_landing_unreadable(spark, tmp_path) -> None:
+    """landing.max_files bounds the hourly walk of a root that keeps its archive: past it the
+    listing is DID_NOT_RUN / landing_unreadable with the limit named, never a partial list."""
+    import pytest
+
+    from hcsc.datalake.dre.sources.hdfs import LandingError, list_landing
+
+    root = tmp_path / "landing"
+    root.mkdir()
+    for n in range(5):
+        (root / f"rt_{n:04d}.seq").write_bytes(b"x")
+    assert len(list_landing(spark, [str(root)], "*.seq", max_files=5)) == 5
+    with pytest.raises(LandingError) as caught:
+        list_landing(spark, [str(root)], "*.seq", max_files=4)
+    assert caught.value.code == "landing_unreadable" and "more than 4 files" in caught.value.detail

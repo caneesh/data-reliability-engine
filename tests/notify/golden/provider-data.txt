@@ -1,4 +1,10 @@
-DRE dev: all clear
+DRE dev: 0 new failures, 0 checks did not run, 1 passed with qualifications
 Run 00000000-0000-0000-0000-000000000003, started 2026-01-16 12:05 UTC, for provider-data.
 
+Passed with qualifications (not counted as healthy)
+- provider_directory HOP_LEDGER [upstream=provider_roster_raw]: inferred_contract
+    scope: provider_roster_raw->provider_directory dedup (inferred from key_map); claim inferred contract; evidence observed; values verified for 1 of 1 columns; cutoff 2026-01-16T12:05:00+00:00
+    blind spots: kind dedup is inferred from key_map, not declared: its results can never claim contract-proven completeness
+
 Passing checks: 1
+store integrity: not verified yet (no completed integrity sweep)

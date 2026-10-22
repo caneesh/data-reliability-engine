@@ -9,11 +9,11 @@ next run tries again. Rules always read the whole table after feed_filter.
 
 from __future__ import annotations
 
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
-from hcsc.datalake.dre.checks.events import BLOCKING_CATEGORIES
+from hcsc.datalake.dre.checks.events import blocking_sql
 from hcsc.datalake.dre.checks.times import as_utc
 from hcsc.datalake.dre.store.names import validate_dq_database
 
@@ -39,17 +39,25 @@ def due_moment(frequency: str, run_start: datetime, run_at: str, timezone: str, 
     return as_utc(moment)
 
 
-def last_completed(spark: SparkSession, dq_database: str) -> dict[tuple[str, str], datetime]:
-    """(dataset, check_id) -> latest evaluated_at of a NORMAL result not held by PLATFORM or BUDGET."""
+def last_completed_sql(dq_database: str, since: date | None = None) -> str:
+    """The query behind last_completed: rule results only (the rows with a severity), from the
+    run_date partitions on or after `since`."""
     validate_dq_database(dq_database)
+    lookback = f" AND run_date >= DATE'{since.isoformat()}'" if since is not None else ""
+    return (
+        f"SELECT dataset, check_id, MAX(evaluated_at) AS evaluated_at FROM {dq_database}.v_committed_result "
+        f"WHERE execution_type = 'NORMAL' AND severity IS NOT NULL{lookback} "
+        f"AND NOT {blocking_sql()} "
+        f"GROUP BY dataset, check_id"
+    )
+
+
+def last_completed(spark: SparkSession, dq_database: str, since: date | None = None) -> dict[tuple[str, str], datetime]:
+    """(dataset, rule id) -> latest evaluated_at of a NORMAL rule result not held by PLATFORM or
+    BUDGET, within the history lookback (since; None: all of them)."""
     if not spark.catalog.tableExists(f"{dq_database}.dq_check_result"):
         return {}
-    blocking = ", ".join(f"'{c}'" for c in BLOCKING_CATEGORIES)
-    rows = spark.sql(
-        f"SELECT dataset, check_id, MAX(evaluated_at) AS evaluated_at FROM {dq_database}.dq_check_result "
-        f"WHERE execution_type = 'NORMAL' AND NOT (state = 'DID_NOT_RUN' AND reason_category IN ({blocking})) "
-        f"GROUP BY dataset, check_id"
-    ).collect()
+    rows = spark.sql(last_completed_sql(dq_database, since)).collect()
     return {(r.dataset, r.check_id): as_utc(r.evaluated_at) for r in rows if r.evaluated_at is not None}
 
 

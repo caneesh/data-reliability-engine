@@ -1,30 +1,30 @@
 """Load configuration YAML, keeping line numbers, and resolve settings.
 
-Layout of a conf directory (spec section 3): `defaults.yaml`, then one object
-per file in `feeds/`, `datasets/` and `rules/`. Every problem found while
-loading becomes a ConfigError naming the file, line and field, with a fix.
+Layout of a conf directory (spec section 3): `defaults.yaml` (with `extensions:` and `notify:`),
+then one object per file in `feeds/`, `datasets/` and `rules/`, and optionally `patterns/`,
+`templates/` and `calendars/`, which the registries take in place of the packaged ones. The
+order in `load` matters: extensions first (their capabilities validate the rest), then patterns,
+templates and calendars, then feeds, datasets and rules, which name them. Every problem found
+while loading becomes a ConfigError naming the file, line and field, with a fix.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 from pydantic import BaseModel, ValidationError
 
-from hcsc.datalake.dre.config.models import (
-    SETTING_FIELDS,
-    Dataset,
-    Defaults,
-    Feed,
-    Rule,
-    Settings,
-    SettingsOverride,
-)
+from hcsc.datalake.dre.checks.calendars import calendar_from, CalendarFile, CALENDARS
+from hcsc.datalake.dre.checks.patterns import use_conf_patterns
+from hcsc.datalake.dre.checks.rules.conf_template import check_template_file, spec_from, TemplateFile
+from hcsc.datalake.dre.checks.rules.template import TEMPLATES
+from hcsc.datalake.dre.config.models import Dataset, Defaults, Feed, Rule, SETTING_FIELDS, Settings, SettingsOverride
+from hcsc.datalake.dre.extensions import sync_extensions
 
-KINDS: dict[str, tuple[str, type[BaseModel]]] = {
+OBJECT_DIRS: dict[str, tuple[str, type[BaseModel]]] = {
     # directory: (id field, model)
     "feeds": ("feed", Feed),
     "datasets": ("dataset", Dataset),
@@ -63,6 +63,8 @@ class Config:
     feeds: dict[str, Feed] = field(default_factory=dict)
     datasets: dict[str, Dataset] = field(default_factory=dict)
     rules: dict[str, Rule] = field(default_factory=dict)
+    templates: dict[str, Any] = field(default_factory=dict)  # conf/templates: TemplateFile by name (release 3)
+    calendars: dict[str, Any] = field(default_factory=dict)  # conf/calendars: CalendarFile by name (release 3)
     sources: dict[tuple[str, str], Source] = field(default_factory=dict)  # (kind, id) -> Source
 
     def feed_of(self, dataset_id: str) -> Feed | None:
@@ -217,6 +219,8 @@ def read_yaml(path: Path, display: str) -> tuple[Any, yaml.Node | None, list[Con
         mark = exc.problem_mark or exc.context_mark
         line = mark.line + 1 if mark else 1
         return None, None, [ConfigError(display, line, "", f"YAML syntax error: {exc.problem}", "fix the YAML syntax at this line")]
+    except ValueError as exc:  # PyYAML builds dates and times itself: 2026-13-01 raises here, not a YAMLError
+        return None, None, [ConfigError(display, 1, "", f"YAML value error: {exc}", "fix the date or time literal, or quote it")]
     except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
         return None, None, [ConfigError(display, 1, "", f"cannot read file: {exc}", "check the file is readable UTF-8 YAML")]
     if node is None or not isinstance(data, dict):
@@ -225,11 +229,88 @@ def read_yaml(path: Path, display: str) -> tuple[Any, yaml.Node | None, list[Con
     return (None if dupes else data), node, dupes
 
 
+def _load_extensions(data: Any, display: str, node: yaml.Node | None) -> list[ConfigError]:
+    """`extensions:` in defaults.yaml, read from the raw mapping so the extensions load before the
+    defaults validate (their sinks are validated against the sink registry). The list is the whole
+    truth: extensions not in it are unloaded. Each problem is a config error on the `extensions` line."""
+
+    names = data.get("extensions") if isinstance(data, dict) else None
+    if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+        names = []  # Defaults.model_validate reports a malformed list
+    _, problems = sync_extensions(names)
+    return [ConfigError(display, line_of(node, ("extensions",)), "extensions", problem,
+                        "install the extension, or remove it from the list") for problem in problems]
+
+
+def _load_conf_registry(config: Config, folder: str, id_field: str, model: type[BaseModel], registry: Any,
+                        build: Callable[[Any], Any], check: Callable[[Any], Any] | None = None) -> list[ConfigError]:
+    """conf/<folder>/*.yaml: each file one capability (a rule template, a calendar) that the registry
+    takes in place of the previous conf set. `check` may return a located problem for a file; a name
+    code already holds (packaged, or from an extension) is refused."""
+    errors: list[ConfigError] = []
+    target: dict[str, Any] = getattr(config, folder)
+    root = config.conf_dir / folder
+    for path in sorted([*root.glob("*.yaml"), *root.glob("*.yml")]):
+        display = str(path)
+        data, node, errs = read_yaml(path, display)
+        errors.extend(errs)
+        if data is None:
+            continue
+        try:
+            obj = model.model_validate(data)
+        except ValidationError as exc:
+            errors.extend(errors_from_validation(exc, display, node))
+            continue
+        problem = check(obj) if check else None
+        if problem is not None:
+            errors.append(ConfigError(display, line_of(node, problem.loc) + problem.line, format_loc(problem.loc),
+                                      problem.problem, problem.fix))
+            continue
+        obj_id = getattr(obj, id_field)
+        if obj_id in target:
+            errors.append(ConfigError(display, line_of(node, (id_field,)), id_field,
+                                      f"duplicate {id_field} {obj_id!r}", f"give each {id_field} a unique name"))
+            continue
+        target[obj_id] = obj
+        config.sources[(id_field, obj_id)] = Source(display, node)
+    for refused in registry.replace_conf({obj_id: build(obj) for obj_id, obj in target.items()}):
+        source = config.sources[(id_field, refused)]
+        errors.append(ConfigError(source.file, line_of(source.node, (id_field,)), id_field,
+                                  f"{refused!r} is already a {id_field} ({_origin(registry, refused)})",
+                                  f"pick another name; {id_field}s from code stay as they are"))
+        del target[refused]
+    return errors
+
+
+def _origin(registry: Any, item_id: str) -> str:
+    return getattr(registry[item_id], "origin", "packaged, or from an extension")
+
+
+def _load_templates(config: Config) -> list[ConfigError]:
+    return _load_conf_registry(config, "templates", "template", TemplateFile, TEMPLATES, spec_from, check_template_file)
+
+
+def _load_calendars(config: Config) -> list[ConfigError]:
+    return _load_conf_registry(config, "calendars", "calendar", CalendarFile, CALENDARS, calendar_from)
+
+
+def reset_conf_state() -> None:
+    """Forget everything a loaded configuration put into the registries: conf patterns, templates,
+    calendars and extensions (tests, and a process that switches configuration)."""
+
+    use_conf_patterns(None)
+    TEMPLATES.replace_conf({})
+    CALENDARS.replace_conf({})
+    sync_extensions([])
+
+
 def load(conf_dir: Path | str) -> tuple[Config, list[ConfigError]]:
     """Load and validate each file on its own. Cross-file checks are in validate.py."""
+
     conf_dir = Path(conf_dir)
     config = Config(conf_dir=conf_dir)
     errors: list[ConfigError] = []
+    use_conf_patterns(conf_dir)  # patterns/*.yaml in the conf directory add to or replace the packaged ones
 
     defaults_path = conf_dir / "defaults.yaml"
     display = str(defaults_path)
@@ -239,36 +320,44 @@ def load(conf_dir: Path | str) -> tuple[Config, list[ConfigError]]:
         data, node, errs = read_yaml(defaults_path, display)
         errors.extend(errs)
         if data is not None:
+            errors.extend(_load_extensions(data, display, node))  # before anything validates against the registries
             try:
                 config.defaults = Defaults.model_validate(data)
                 config.sources[("defaults", "defaults")] = Source(display, node)
             except ValidationError as exc:
                 errors.extend(errors_from_validation(exc, display, node))
+    errors.extend(_load_templates(config))  # before the rules, which name them
+    errors.extend(_load_calendars(config))  # before the feeds, whose cadences name them
 
-    for directory, (id_field, model) in KINDS.items():
-        kind = id_field
-        target: dict[str, Any] = getattr(config, directory)
-        paths = sorted([*(conf_dir / directory).glob("*.yaml"), *(conf_dir / directory).glob("*.yml")])
-        for path in paths:
-            display = str(path)
-            data, node, errs = read_yaml(path, display)
-            errors.extend(errs)
-            if data is None:
-                continue
-            try:
-                obj = model.model_validate(data)
-            except ValidationError as exc:
-                errors.extend(errors_from_validation(exc, display, node))
-                continue
-            obj_id = getattr(obj, id_field)
-            if obj_id in target:
-                first = config.sources[(kind, obj_id)].file
-                errors.append(
-                    ConfigError(display, line_of(node, (id_field,)), id_field,
-                                f"duplicate {kind} id {obj_id!r} (first defined in {first})",
-                                f"give each {kind} a unique id")
-                )
-                continue
-            target[obj_id] = obj
-            config.sources[(kind, obj_id)] = Source(display, node)
+    for directory, (id_field, model) in OBJECT_DIRS.items():
+        errors.extend(_load_objects(config, directory, id_field, model))
     return config, errors
+
+
+def _load_objects(config: Config, directory: str, id_field: str, model: type[BaseModel]) -> list[ConfigError]:
+    """conf/<directory>/*.yaml: one object per file, validated by `model`, keyed by `id_field`,
+    recorded with its source for later error locating."""
+    errors: list[ConfigError] = []
+    target: dict[str, Any] = getattr(config, directory)
+    root = config.conf_dir / directory
+    for path in sorted([*root.glob("*.yaml"), *root.glob("*.yml")]):
+        display = str(path)
+        data, node, errs = read_yaml(path, display)
+        errors.extend(errs)
+        if data is None:
+            continue
+        try:
+            obj = model.model_validate(data)
+        except ValidationError as exc:
+            errors.extend(errors_from_validation(exc, display, node))
+            continue
+        obj_id = getattr(obj, id_field)
+        if obj_id in target:
+            first = config.sources[(id_field, obj_id)].file
+            errors.append(ConfigError(display, line_of(node, (id_field,)), id_field,
+                                      f"duplicate {id_field} id {obj_id!r} (first defined in {first})",
+                                      f"give each {id_field} a unique id"))
+            continue
+        target[obj_id] = obj
+        config.sources[(id_field, obj_id)] = Source(display, node)
+    return errors

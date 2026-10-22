@@ -6,7 +6,8 @@ from datetime import datetime, timezone
 
 from hcsc.datalake.dre.checks.base import CheckContext, run_check
 from hcsc.datalake.dre.checks.events import Event
-from hcsc.datalake.dre.checks.registry import CHECKS, checks_for, pattern_check_ids
+from hcsc.datalake.dre.checks.registry import CHECKS
+from hcsc.datalake.dre.checks.patterns import checks_for, pattern_check_ids
 from hcsc.datalake.dre.checks.tier1.key_duplicates import KeyDuplicates
 from hcsc.datalake.dre.config.models import Dataset
 from tests.fixtures.settings import SETTINGS

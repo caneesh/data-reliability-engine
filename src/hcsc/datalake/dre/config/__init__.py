@@ -1,1 +1,1 @@
-"""Configuration models, loader and validation (build step 2)."""
+"""Configuration: models, loader, static validation, probe and SQL checks."""

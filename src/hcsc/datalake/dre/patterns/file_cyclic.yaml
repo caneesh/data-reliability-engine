@@ -1,16 +1,24 @@
 # Checks for pattern FILE_CYCLIC, in run order (spec sections 6 and 7).
 pattern: FILE_CYCLIC
+kind: file            # file: data lands as files (the feed needs `landing`); table: it arrives in a table
 checks:
   - T1_ON_TIME
   - T1_ZERO_ROWS
   - T1_VOLUME
   - T1_FILES_NOT_LOADED
   - T1_SCHEMA_DRIFT
+  - T1_PARTITION_DRIFT  # parametrised (release 4): runs where check_params configures it; once per table
   - T1_KEY_NULLS
   - T1_KEY_DUPLICATES
+  - T1_FRESHNESS      # parametrised: runs where check_params configures it (spec section 3)
+  - T1_COLUMN_RANGE   # parametrised, as above; a pattern may give defaults: {check: T1_FRESHNESS, params: {...}}
   - HOP_FILE_COMPLETENESS
   - HOP_KEY_CURRENCY
   - HOP_VALUE_AGREEMENT
+  - HOP_LEDGER        # build step 3: one result per hop of kind identity, dedup, merge, union_partition or survivorship
+  - HOP_CONTRIBUTION  # build step 5: one result per join_contribution (contributor) hop
+  - T1_SOURCE_ATTRIBUTION  # build step 5: a union_partition target's rows each owned by one source; once per table
+  - CHAIN_COMPLETENESS  # build step 6, parametrised: runs on a chain's source where check_params names its terminal
 
 # Cause checks per failure type, in order (spec section 7). The first CONFIRMED is the
 # cause; the fallback names an unproven failure. `probe` is a generic probe type and

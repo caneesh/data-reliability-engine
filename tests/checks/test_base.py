@@ -8,9 +8,7 @@ import pytest
 from jinja2 import UndefinedError
 
 from hcsc.datalake.dre.checks import base
-from hcsc.datalake.dre.checks.base import (
-    REASONS, Check, CheckContext, did_not_run, from_counts, from_exception, render_sql, run_check,
-)
+from hcsc.datalake.dre.checks.base import REASONS, Check, CheckContext, did_not_run, from_counts, from_exception, render_sql, run_check
 from hcsc.datalake.dre.checks.events import Event, evaluation_id
 from hcsc.datalake.dre.checks.keys import key_exprs
 from hcsc.datalake.dre.config.models import Dataset

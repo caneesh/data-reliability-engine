@@ -66,5 +66,5 @@ def test_render_rejects_non_identifier() -> None:
 
 def test_rendered_ddl_targets_only_the_dq_database() -> None:
     for statement in render_ddl("dq_custom"):
-        target = re.search(r"(?:TABLE|VIEW) IF NOT EXISTS (\S+)", statement).group(1)
+        target = re.search(r"(?:TABLE IF NOT EXISTS|OR REPLACE VIEW) (\S+)", statement).group(1)
         assert target.startswith("dq_custom."), statement

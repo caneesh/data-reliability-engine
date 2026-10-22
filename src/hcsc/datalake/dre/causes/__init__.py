@@ -1,1 +1,1 @@
-"""Cause engine and cause checks (build step 8)."""
+"""The cause engine: generic probes, builtin cause checks, failing things, resolution."""

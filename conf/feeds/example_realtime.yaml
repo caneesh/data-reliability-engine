@@ -16,7 +16,8 @@ cadence:
 sla_hours: 8
 datasets: [example_curated_enrollment, gold_member_coverage]
 probes:                       # cause-check inputs (spec section 7); not yet confirmed (spec section 11),
-                              # so the causes that use them return NOT_READY
+                              # so the causes that use them return NOT_READY. load_log, filter_rules and
+                              # rejects take the shape in docs/evidence-contract.md once the pipeline audit writes it
   load_hold_marker: { path: null }                      # file_exists
   partition_cursor: { path: null, extract_regex: null, format: null, compare_to: partition }  # file_value_compare
   load_log: { path_glob: null, pattern: null }          # log_contains

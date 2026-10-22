@@ -21,6 +21,7 @@ COMMANDS: dict[str, str] = {
     "trace": "Trace one key along the upstream chain",
     "watchdog": "Check the last expected run exists and is complete",
     "retention": "List (or with --apply drop) dq store partitions older than retention_months",
+    "guard": "Scan a source tree (an extension package) for writes the engine's rules forbid",
 }
 CONF_HELP = "configuration directory (default: conf)"
 
@@ -40,23 +41,31 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
     for name, help_text in COMMANDS.items():
         cmd = sub.add_parser(name, help=help_text)
-        cmd.add_argument("--conf", default="conf", help=CONF_HELP)
+        if name != "guard":
+            cmd.add_argument("--conf", default="conf", help=CONF_HELP)
         if name == "dry-run":
             cmd.add_argument("--feed", required=True, help="the feed to check")
         if name == "trace":
             cmd.add_argument("--dataset", required=True, help="the dataset to start from")
-            cmd.add_argument("--key", required=True, help='the key values in the dataset\'s key order, "k1,k2,..."')
+            cmd.add_argument("--key", help='the key values in the dataset\'s key order, "k1,k2,..." (visible to ps '
+                                           'and in the shell history: prefer --key-file)')
+            cmd.add_argument("--key-file", help="a file whose first line is the key (- reads it from stdin)")
         if name == "run":
             cmd.add_argument("--feed", help="run one feed only (default: all feeds)")
-            cmd.add_argument("--execution-type", default="NORMAL", choices=("NORMAL", "RERUN", "REPLAY"),
-                             help="NORMAL: the next eligible windows (scheduled); RERUN: one historical window; "
-                                  "REPLAY: every window of a historical range")
-            cmd.add_argument("--window-start", type=utc_time, help="RERUN: the window's start (ISO 8601, UTC)")
-            cmd.add_argument("--window-end", type=utc_time, help="RERUN: the window's end, excluded")
+            cmd.add_argument("--execution-type", default="NORMAL", choices=("NORMAL", "RERUN", "REPLAY", "AS_OF_REPLAY"),
+                             help="NORMAL: the next eligible windows (scheduled); RERUN: one historical window, "
+                                  "and REPLAY: every window of a historical range, both current rechecks (the "
+                                  "tables as they are now, never a historical result); AS_OF_REPLAY: one "
+                                  "historical window as the data stood at its end, where that can be proven")
+            cmd.add_argument("--window-start", type=utc_time,
+                             help="RERUN, AS_OF_REPLAY: the window's start (ISO 8601, UTC)")
+            cmd.add_argument("--window-end", type=utc_time, help="RERUN, AS_OF_REPLAY: the window's end, excluded")
             cmd.add_argument("--from", dest="range_from", type=utc_time, help="REPLAY: the range's start")
             cmd.add_argument("--to", dest="range_to", type=utc_time, help="REPLAY: the range's end, excluded")
         if name == "retention":
             cmd.add_argument("--apply", action="store_true", help="drop the expired partitions (default: list them)")
+        if name == "guard":
+            cmd.add_argument("path", help="the directory (or file) to scan")
         if name == "install":
             mode = cmd.add_mutually_exclusive_group(required=True)
             mode.add_argument("--print", dest="mode", action="store_const", const="print",
@@ -77,10 +86,23 @@ def validate(conf: str) -> int:
     if errors:
         print(f"dre validate: {len(errors)} error(s), {len(warnings)} warning(s) in {conf}")
         return 1
+    from hcsc.datalake.dre.checks.patterns import pattern_origin, patterns
+
     print(
         f"dre validate: {conf} is valid, {len(warnings)} warning(s) "
         f"({len(config.feeds)} feeds, {len(config.datasets)} datasets, {len(config.rules)} rules)"
     )
+    by_origin = {o: [p for p in patterns() if pattern_origin(p) == o] for o in ("packaged", "conf")}
+    print(f"patterns: packaged {by_origin['packaged']}" + (f", from {conf}/patterns {by_origin['conf']}"
+                                                            if by_origin["conf"] else ""))
+    from hcsc.datalake.dre.extensions import loaded
+
+    for record in loaded():
+        print(f"extensions: {record.summary()}")
+    from hcsc.datalake.dre.config.contracts import contract_report
+
+    for line in contract_report(config):
+        print(line)
     return 0
 
 
@@ -117,10 +139,21 @@ def retention(conf: str, apply: bool) -> int:
         return 3
     d = config.defaults
     return retention_command(get_spark(), d.dq_database, d.retention_months, apply,
-                             datetime.now(timezone.utc).date())
+                             datetime.now(timezone.utc).date(), d.retention_holds)
+
+
+def configure_logging() -> None:
+    """The engine's log lines (errors and warnings) to stderr with a time and a level, once per
+    process, unless the host configured logging already."""
+    import logging
+
+    if not logging.getLogger().handlers:
+        logging.basicConfig(level=logging.WARNING, stream=sys.stderr,
+                            format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 
 def main(argv: list[str] | None = None) -> int:
+    configure_logging()
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command is None:
@@ -138,10 +171,10 @@ def main(argv: list[str] | None = None) -> int:
             start, end = (args.range_from, args.range_to) if args.execution_type == "REPLAY" else (
                 args.window_start, args.window_end)
             if args.execution_type != "REPLAY" and (args.range_from or args.range_to):
-                print("dre run: --from and --to are for REPLAY; RERUN takes --window-start and --window-end")
+                print("dre run: --from and --to are for REPLAY; RERUN and AS_OF_REPLAY take --window-start and --window-end")
                 return runner.EXIT_CANNOT_START
             if args.execution_type == "REPLAY" and (args.window_start or args.window_end):
-                print("dre run: REPLAY takes --from and --to; --window-start and --window-end are for RERUN")
+                print("dre run: REPLAY takes --from and --to; --window-start and --window-end are for RERUN and AS_OF_REPLAY")
                 return runner.EXIT_CANNOT_START
             selection = runner.Selection(args.execution_type, start, end)
             return runner.run(get_spark(), args.conf, args.feed, selection)
@@ -150,7 +183,7 @@ def main(argv: list[str] | None = None) -> int:
         from hcsc.datalake.dre.session import get_spark
         from hcsc.datalake.dre.trace import run_trace
 
-        return run_trace(get_spark(), args.conf, args.dataset, args.key)
+        return run_trace(get_spark(), args.conf, args.dataset, args.key, args.key_file)
     if args.command == "watchdog":
         from hcsc.datalake.dre.session import get_spark
         from hcsc.datalake.dre.watchdog import watch
@@ -158,6 +191,10 @@ def main(argv: list[str] | None = None) -> int:
         return watch(get_spark("dre-watchdog"), args.conf)
     if args.command == "retention":
         return retention(args.conf, args.apply)
+    if args.command == "guard":
+        from hcsc.datalake.dre.guard import guard_command
+
+        return guard_command(Path(args.path))
     parser.error(f"unknown command {args.command}")  # argparse rejects these first
     return 2
 

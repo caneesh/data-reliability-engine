@@ -17,11 +17,10 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
-from hcsc.datalake.dre.checks.base import (
-    DID_NOT_RUN, FAILED, PASSED, REASONS, Check, CheckContext, CheckResult, did_not_run, double,
-    needs_load_time, render_sql, utc_literal,
-)
+from hcsc.datalake.dre.checks.partitions import partition_filter
+from hcsc.datalake.dre.checks.base import DID_NOT_RUN, FAILED, PASSED, REASONS, Check, CheckContext, CheckResult, did_not_run, double, needs_load_time, render_sql, utc_literal
 from hcsc.datalake.dre.checks.cadence import UnsupportedCalendar, previous_slot, slot_label, slots
+from hcsc.datalake.dre.checks.registry import register_check
 from hcsc.datalake.dre.checks.times import utc_expr
 
 if TYPE_CHECKING:
@@ -64,9 +63,12 @@ class Volume(Check):
             return [did_not_run("empty_population", detail="no slot period ends in the window")]
         ds = ctx.dataset
         tolerance = ctx.settings.volume_tolerance_pct / 100
+        judged = [(s, e) for s, e in zip(around, around[1:]) if event.window_start < e <= event.window_end]
         rows = ctx.spark.sql(render_sql(
             "t1_volume.sql.j2", periods=periods, load_expr=utc_expr(ds.load_time, ctx.default_timezone),
             table=ds.table, feed_filter=ds.feed_filter, dq_database=ctx.dq_database, dataset=ds.dataset,
+            partition_filter=partition_filter(ds, judged[0][0], judged[-1][1], ctx.default_timezone),
+            range_start=utc_literal(judged[0][0]), range_end=utc_literal(judged[-1][1]),
             before=utc_literal(event.window_start), limit=HISTORY_EVENTS, min_history=MIN_HISTORY,
             low_factor=double(1 - tolerance), high_factor=double(1 + tolerance),
         )).collect()
@@ -85,3 +87,6 @@ class Volume(Check):
                            observed=observed, group_values=groups,
                            expected=f"{row.low:g} to {row.high:g} rows (median {row.median_rows:g} "
                                     f"of the last {row.loads} loads)")
+
+
+register_check(Volume())

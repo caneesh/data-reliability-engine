@@ -18,14 +18,14 @@ from hcsc.datalake.dre.causes import landing, merge
 from hcsc.datalake.dre.causes.base import CauseContext, Failure
 from hcsc.datalake.dre.causes.engine import CauseLine, explain, failure_type, resolve, run_entry
 from hcsc.datalake.dre.causes.probes import (
-    file_exists, file_value_compare, log_contains, size_changed, table_contains,
+    FileExists, FileValueCompare, LogContains, SizeChanged, TableContains, file_exists, file_value_compare,
+    log_contains, size_changed, table_contains,
 )
 from hcsc.datalake.dre.checks.base import CheckContext, CheckResult
 from hcsc.datalake.dre.checks.events import Event
 from hcsc.datalake.dre.checks.hop.common import key_hash
-from hcsc.datalake.dre.checks.registry import CauseEntry
+from hcsc.datalake.dre.checks.patterns import CauseEntry
 from hcsc.datalake.dre.config.models import Cadence, Dataset, Feed, Landing, TimeColumn
-from hcsc.datalake.dre.config.probes import FileExists, FileValueCompare, LogContains, SizeChanged, TableContains
 from hcsc.datalake.dre.store.local_setup import create_store
 from tests.checks.test_hop import curated, gold
 from tests.fixtures.landing import land_sequence_files
@@ -149,6 +149,34 @@ def test_table_contains_by_file_and_by_key(spark) -> None:
     assert table_contains(cx, params, hit).evidence == {"table": "causes.tc_rejects", "id": "rejects"}
     assert table_contains(cx, params, hit).state == "CONFIRMED"
     assert table_contains(cx, params, miss).state == "RULED_OUT"
+
+
+def test_table_contains_reads_only_the_failing_refs(spark, monkeypatch) -> None:
+    """The rows collected are bounded by the evaluation's failing refs (at most 100), not by the
+    table: the rendered SQL names them, and the cached set holds nothing else."""
+    up = Dataset(dataset="example_curated_enrollment", table="causes.tc_curated", layer="CURATED",
+                 key=["subscriberidnumber", "membernumber", "effectivedate", "qualifiedhealthplanid"],
+                 file_name_column="src_file_nm")
+    create_table(spark, "causes.tc_many", [*CURATED_COLUMNS, ("src_file_nm", "STRING"), ("reason", "STRING")], [
+        {**curated_row(sub_id=f"{n:04d}"), "src_file_nm": f"rt_{n:04d}.seq", "reason": "bad plan"} for n in range(1, 41)])
+    params = TableContains(table="causes.tc_many", condition="reason IS NOT NULL", id="rejects")
+    seen: list[str] = []
+    real_sql = spark.sql
+    monkeypatch.setattr(spark, "sql", lambda text: seen.append(text) or real_sql(text))
+    cx = context(spark, gold("causes.unused"), "HOP_FILE_COMPLETENESS", upstream=up)
+    cx.cache["failure_refs"] = ["rt_0003.seq", "rt_0007.seq"]  # what the cause engine listed
+    assert table_contains(cx, params, Failure("rt_0003.seq", file_name="rt_0003.seq")).state == "CONFIRMED"
+    assert table_contains(cx, params, Failure("rt_0007.seq", file_name="rt_0007.seq")).state == "CONFIRMED"
+    [found] = [v for k, v in cx.cache.items() if k.startswith("table_contains:")]
+    assert found == {"rt_0003.seq", "rt_0007.seq"} and "IN ('rt_0003.seq', 'rt_0007.seq')" in seen[-1]
+    assert len([s for s in seen if "causes.tc_many" in s]) == 1  # one query for the evaluation
+    # By key: the hashes of the failing keys, validated, and nothing else collected.
+    cx = context(spark, gold("causes.unused"), "HOP_KEY_CURRENCY", upstream=up, secret=SECRET)
+    failing = key_hash(SECRET, "0005|01|2026-01-01|AGR-A")
+    cx.cache["failure_refs"] = [failing]
+    assert table_contains(cx, params, Failure(failing, key={"key_state": "MISSING"})).state == "CONFIRMED"
+    [found] = [v for k, v in cx.cache.items() if k.startswith("table_contains:")]
+    assert found == {failing}
 
 
 def test_size_changed(spark) -> None:
@@ -477,3 +505,51 @@ def test_file_value_compare_can_confirm_on_any_different_partition(spark, tmp_pa
     assert file_value_compare(cx, params("20260930", "later"), failing).state == "RULED_OUT"
     assert file_value_compare(cx, params("20260930", "different"), failing).state == "CONFIRMED"
     assert file_value_compare(cx, params("20261001", "different"), failing).state == "RULED_OUT"
+
+
+def test_log_contains_collects_only_lines_naming_a_failing_file(spark, tmp_path, monkeypatch) -> None:
+    """The log probe reads the lines that match the pattern and name one of the evaluation's
+    failing files, bounded in Spark; a log of many matching lines costs the driver only those."""
+    from pyspark.sql import DataFrame
+
+    log = tmp_path / "load.log"
+    log.write_text("\n".join([f"ERROR line {n} something else" for n in range(2000)]
+                             + ["ERROR failed to load rt_0001.seq", "INFO rt_0001.seq ok"]), encoding="utf-8")
+    collected: list[int] = []
+    real_collect = DataFrame.collect
+
+    def counting_collect(frame):
+        rows = real_collect(frame)
+        collected.append(len(rows))
+        return rows
+    monkeypatch.setattr(DataFrame, "collect", counting_collect)
+    cx = context(spark, gold("causes.unused"), "T1_FILES_NOT_LOADED", feed())
+    cx.cache["failure_files"] = ["rt_0001.seq"]
+    params = LogContains(path_glob=str(tmp_path / "*.log"), pattern="ERROR")
+    out = log_contains(cx, params, Failure("rt_0001.seq", files=(f"{tmp_path}/landing/rt_0001.seq",)))
+    assert out.state == "CONFIRMED" and list(out.evidence["logs"].values()) == [1]
+    assert [k.endswith("load.log") for k in out.evidence["logs"]] == [True]
+    assert max(collected) == 1  # not the 2000 other ERROR lines
+
+
+def test_landing_files_are_read_from_the_earliest_failure_on(spark) -> None:
+    """The landing causes look at files first seen with or after their failure, so the read is
+    bounded to files first seen since the evaluation's earliest failure (the cause engine records
+    it): an old file is neither collected nor counted, and the raw count covers those files only."""
+    from hcsc.datalake.dre.causes.landing import landing_files, landing_since
+
+    # the bound sits after every dq_file row the module's other tests register (January 15th)
+    old, recent = datetime(2025, 6, 1, 12, tzinfo=UTC), datetime(2026, 1, 16, 10, tzinfo=UTC)
+    append_rows(spark, DQ, "dq_file", [
+        {"path": "file:/landing/old_0001.seq", "feed": "example_realtime", "first_seen_at": old, "size_bytes": 10,
+         "run_id": "r0", "run_date": old.date()},
+        {"path": "file:/landing/rt_0009.seq", "feed": "example_realtime", "first_seen_at": recent, "size_bytes": 10,
+         "run_id": "r9", "run_date": recent.date()}])
+    cx = context(spark, gold("causes.unused"), "T1_ON_TIME", feed())
+    failures = [Failure("2026-01-16T09:00:00+00:00", slot=datetime(2026, 1, 16, 9, tzinfo=UTC)),
+                Failure("file:/landing/rt_0009.seq", files=("file:/landing/rt_0009.seq",))]
+    since = landing_since(cx, failures)
+    assert since == datetime(2026, 1, 16, 9, tzinfo=UTC)  # the slot comes first
+    cx.cache["landing_since"] = since
+    assert set(landing_files(cx)) == {"file:/landing/rt_0009.seq"}
+    assert landing_since(cx, [Failure("x", files=("file:/landing/unknown.seq",))]) is None  # unknown file: no bound

@@ -1,24 +1,30 @@
 """`dre install`: print or apply the dq store DDL, or check a store against it.
 
 The platform team creates the empty dq database and grants access; `dre
-install --apply` creates the tables and views in it. Only this module, and the
-local setup used by tests, may apply the DDL; `dre run` only checks the store
-exists.
+install --apply` creates the tables and views in it, and brings a store installed by an
+earlier release up to date: the tables first, then the pending migrations (store/migrations.py,
+additive only), then the views, which may read the migrated columns. Only this module, and the
+local setup used by tests, may apply the DDL; `dre run` only checks the store exists and has no
+pending migration.
 """
 
 from __future__ import annotations
 
+from hcsc.datalake.dre.checks.base import error_detail
+
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from hcsc.datalake.dre.store import migrations
 from hcsc.datalake.dre.store.names import validate_dq_database
 from hcsc.datalake.dre.store.schema import TableDef, expected_objects, render_ddl
 
 if TYPE_CHECKING:
     from pyspark.sql import SparkSession
 
-OK, MISSING, DIFFERS = "OK", "MISSING", "DIFFERS"
+OK, MISSING, DIFFERS, PENDING = "OK", "MISSING", "DIFFERS", "PENDING"
 
 
 @dataclass(frozen=True)
@@ -31,10 +37,23 @@ class Finding:
         return f"{self.status:8} {self.name}" + (f": {self.detail}" if self.detail else "")
 
 
+def _steps(spark: SparkSession, dq_database: str) -> list[tuple[str, Callable[[], object]]]:
+    """(what, action) in the order they apply: create the tables, apply the pending migrations,
+    replace the views."""
+    statements = render_ddl(dq_database)
+    tables = [s for s in statements if not s.upper().startswith("CREATE OR REPLACE VIEW")]
+    views = [s for s in statements if s.upper().startswith("CREATE OR REPLACE VIEW")]
+    steps: list[tuple[str, Callable[[], object]]] = [(s.splitlines()[0], lambda s=s: spark.sql(s)) for s in tables]
+    steps.append(("pending migrations", lambda: migrations.apply_pending(spark, dq_database)))
+    steps += [(s.splitlines()[0], lambda s=s: spark.sql(s)) for s in views]
+    return steps
+
+
 def apply_ddl(spark: SparkSession, dq_database: str) -> None:
-    """Create the dq tables and views that do not exist yet. Safe to repeat."""
-    for statement in render_ddl(dq_database):
-        spark.sql(statement)
+    """Create the dq tables that do not exist yet, apply the pending migrations, replace the views.
+    Safe to repeat."""
+    for _, action in _steps(spark, dq_database):
+        action()
 
 
 def check_store(spark: SparkSession, dq_database: str) -> list[Finding]:
@@ -43,7 +62,9 @@ def check_store(spark: SparkSession, dq_database: str) -> list[Finding]:
     if not spark.catalog.databaseExists(dq_database):
         return [Finding(dq_database, MISSING, "database does not exist; the platform team creates it")]
     tables, views = expected_objects(dq_database)
-    findings = [_check_table(spark, dq_database, t) for t in tables.values()]
+    waiting = {m.table: m for m in reversed(migrations.pending(spark, dq_database))}
+    findings = [Finding(f"{dq_database}.{t.name}", PENDING, f"{waiting[t.name]}; run dre install --apply")
+                if t.name in waiting else _check_table(spark, dq_database, t) for t in tables.values()]
     findings += [_check_view(spark, dq_database, v.name, v.query) for v in views.values()]
     return findings
 
@@ -60,14 +81,16 @@ def install_command(spark: SparkSession | None, dq_database: str, mode: str) -> 
               "database and grants access; then run dre install --apply.")
         return 3
     if mode == "apply":
-        for statement in render_ddl(dq_database):
+        waiting = migrations.pending(spark, dq_database)
+        for what, action in _steps(spark, dq_database):
             try:
-                spark.sql(statement)
+                action()
             except Exception as exc:  # report and stop: the store needs a person to look
-                first_line = statement.splitlines()[0]
-                print(f"dre install: failed at `{first_line}`: {str(exc).splitlines()[0]}. "
+                print(f"dre install: failed at `{what}`: {error_detail(exc)}. "
                       "Run dre install --check to see what differs.")
                 return 1
+        for m in waiting:
+            print(f"dre install: applied {m}")
         print(f"dre install: dq store tables and views are in place in {dq_database}")
         return 0
     findings = check_store(spark, dq_database)
@@ -80,8 +103,10 @@ def install_command(spark: SparkSession | None, dq_database: str, mode: str) -> 
 
 
 def missing_objects(spark: SparkSession, dq_database: str) -> list[str]:
-    """Names of the database, tables or views that do not exist."""
-    return [f.name for f in check_store(spark, dq_database) if f.status == MISSING]
+    """Names of the database, tables or views that do not exist, and of the tables a migration
+    has not reached yet (`dre run` cannot write to them)."""
+    return [f.name + (" (migration pending)" if f.status == PENDING else "")
+            for f in check_store(spark, dq_database) if f.status in (MISSING, PENDING)]
 
 
 def _check_table(spark: SparkSession, db: str, table: TableDef) -> Finding:

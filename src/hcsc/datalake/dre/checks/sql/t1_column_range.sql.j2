@@ -1,0 +1,35 @@
+{# T1_COLUMN_RANGE: values of a column loaded in the window within numeric bounds, or in an allowed
+   set of strings (one or the other). population = rows with a non-null value (every row when
+   nulls_fail); violations = out of range, not numeric when bounds are set, not allowed, or null when
+   nulls_fail. Bounds compare CAST(column AS DOUBLE), so a value that is not a number is a violation,
+   never a silent pass; `allowed` compares the value's string form. #}
+SELECT {% for g in group_by %}{{ g }} AS g_{{ loop.index }}, {% endfor %}
+       COUNT(*) AS population,
+       SUM(CASE WHEN {{ column }} IS NULL THEN {% if nulls_fail %}1{% else %}0{% endif %}
+{% if allowed is not none %}
+                WHEN CAST({{ column }} AS STRING) NOT IN ({{ allowed | join(', ') }}) THEN 1
+{% else %}
+                WHEN CAST({{ column }} AS DOUBLE) IS NULL THEN 1
+{% if min is not none %}
+                WHEN CAST({{ column }} AS DOUBLE) < {{ min }} THEN 1
+{% endif %}
+{% if max is not none %}
+                WHEN CAST({{ column }} AS DOUBLE) > {{ max }} THEN 1
+{% endif %}
+{% endif %}
+                ELSE 0 END) AS violations
+FROM {{ table }}
+WHERE {{ load_expr }} >= {{ window_start }}
+  AND {{ load_expr }} < {{ window_end }}
+{% if partition_filter %}
+  AND {{ partition_filter }}
+{% endif %}
+{% if not nulls_fail %}
+  AND {{ column }} IS NOT NULL
+{% endif %}
+{% if feed_filter %}
+  AND ({{ feed_filter }})
+{% endif %}
+{% if group_by %}
+GROUP BY {% for g in group_by %}{{ g }}{% if not loop.last %}, {% endif %}{% endfor %}
+{% endif %}

@@ -96,6 +96,25 @@ def test_blocked_events_do_not_move_the_window(spark) -> None:
     assert previous_window_end(spark, "dq_windows", "other") is None
 
 
+def test_insufficient_evidence_holds_the_window(spark) -> None:
+    """Checkpoint 3, L15: a hop whose required evidence (its rejects table) cannot be read is
+    DID_NOT_RUN / DEPENDENCY / insufficient_evidence. Unlike the other DEPENDENCY codes it holds the
+    window, so the records due in it are judged once the evidence is back (or the held span is
+    recorded as a WINDOW_GAP after max_window_hours), never silently passed over."""
+    create_store(spark, "dq_windows_l15")
+    rows = [
+        _result("f1", 1),
+        _result("f2", 2), _result("f2", 2, "DID_NOT_RUN", "DEPENDENCY", check_id="HOP_LEDGER",
+                                  code="premise_unconfirmed"),                 # other DEPENDENCY codes: counts
+        _result("f3", 3), _result("f3", 3, "DID_NOT_RUN", "DEPENDENCY", check_id="HOP_LEDGER",
+                                  code="insufficient_evidence"),               # held
+    ]
+    append_rows(spark, "dq_windows_l15", "dq_check_result", rows)
+    history = window_history(spark, "dq_windows_l15", "gold")
+    assert history.previous_end == datetime(2026, 1, 15, 2, tzinfo=UTC)
+    assert history.held_start == datetime(2026, 1, 15, 2, tzinfo=UTC) and history.held_by == ("insufficient_evidence",)
+
+
 def test_rule_results_neither_move_nor_hold_a_window(spark) -> None:
     """Rule results (the only rows with a severity) are left out by the row itself, so a rule
     since renamed or deleted from config cannot move the window either."""
@@ -122,6 +141,20 @@ def test_window_histories_read_every_dataset_in_one_query(spark) -> None:
     assert found["other"].previous_end == datetime(2026, 1, 15, 3, tzinfo=UTC)
     assert found["other"].held_by == ("query_failed",)
     assert found["never_run"] == WindowHistory()
+
+
+def test_window_histories_read_only_the_lookback(spark) -> None:
+    """since bounds the read by run_date: an older NORMAL result neither moves nor holds the window,
+    so the dataset windows as on a first run."""
+    create_store(spark, "dq_windows_lookback")
+    old = {**_result("e0", 1), "run_date": date(2026, 1, 1)}  # an older partition
+    held_old = {**_result("e0b", 2, "DID_NOT_RUN", "PLATFORM", code="query_failed"), "run_date": date(2026, 1, 1)}
+    append_rows(spark, "dq_windows_lookback", "dq_check_result", [old, held_old, _result("e1", 5)])
+    assert window_history(spark, "dq_windows_lookback", "gold") == WindowHistory(
+        previous_end=datetime(2026, 1, 15, 5, tzinfo=UTC))
+    assert window_histories(spark, "dq_windows_lookback", ["gold"], since=date(2026, 1, 10))["gold"] == WindowHistory(
+        previous_end=datetime(2026, 1, 15, 5, tzinfo=UTC))
+    assert window_histories(spark, "dq_windows_lookback", ["gold"], since=date(2026, 1, 16))["gold"] == WindowHistory()
 
 
 HELD = WindowHistory(previous_end=datetime(2026, 1, 15, 3, tzinfo=UTC), held_start=datetime(2026, 1, 15, 3, tzinfo=UTC),

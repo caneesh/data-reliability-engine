@@ -49,7 +49,9 @@ def test_watchdog_is_healthy_when_the_expected_run_completed(spark, tmp_path, ca
 
 def test_watchdog_alerts_on_a_run_left_started_or_incomplete(spark, tmp_path, capsys) -> None:
     replay = replay_conf(spark, tmp_path, "r12_bad")
-    stuck = runs.start_run(spark, replay.dq, now=hour_now() + timedelta(minutes=1))
+    # Started on the hour: the watchdog judges this hour only once the grace (30 minutes) has
+    # passed since the hour began, so the run is always past its grace, whatever the clock says.
+    stuck = runs.start_run(spark, replay.dq, now=hour_now())
     partial = runs.start_run(spark, replay.dq, now=hour_now() + timedelta(minutes=3))
     runs.finish_run(spark, replay.dq, partial, 36, 30, now=partial.started_at + timedelta(minutes=4))
     code, out = watchdog(replay, capsys)
@@ -79,13 +81,17 @@ def test_a_run_still_within_its_grace_is_not_an_alert() -> None:
 
 
 def test_the_watchdog_does_not_depend_on_the_main_run_s_code() -> None:
-    """Spec section 8: no dependency beyond the store schema (and config and mail)."""
+    """Spec section 8: no dependency beyond the store schema (and config and the notification sinks)."""
     tree = ast.parse(Path(PACKAGE_ROOT / "watchdog.py").read_text(encoding="utf-8"))
     imported = {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
     imported |= {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}
     engine = {m for m in imported if m and m.startswith("hcsc.datalake.dre")}
     assert engine == {"hcsc.datalake.dre.store.names", "hcsc.datalake.dre.config.loader",
-                      "hcsc.datalake.dre.notify.email"}
+                      "hcsc.datalake.dre.notify.sinks"}
+    sinks = ast.parse(Path(PACKAGE_ROOT / "notify" / "sinks.py").read_text(encoding="utf-8"))
+    deps = {n.module for n in ast.walk(sinks) if isinstance(n, ast.ImportFrom) and n.module
+            and n.module.startswith("hcsc.datalake.dre") and n.module != "hcsc.datalake.dre.notify.email"}
+    assert deps <= {"hcsc.datalake.dre.config.models", "hcsc.datalake.dre.registry", "hcsc.datalake.dre.notify.digest"}
 
 
 def test_watchdog_owner_gets_the_alerts(spark, tmp_path, capsys) -> None:
@@ -122,3 +128,24 @@ def test_incomplete_cause_investigations_are_reported_apart_from_the_checks() ->
         "run r3 (started 12:01 UTC): 2 of 3 cause investigations incomplete (the next run retries them)"]
     done = [rows[0], RunRow("r3", started, "COMPLETED", 5, 5, started + timedelta(minutes=2), 3, 3)]
     assert problems(done, now, 30) == []
+
+
+def test_the_watchdog_s_own_failures_have_their_own_exit_code(spark, tmp_path, capsys, monkeypatch) -> None:
+    """0 healthy, 1 alert, 3 the watchdog could not run: a scheduler keyed on exit codes can tell
+    an alert from a broken watchdog. Its store read is bounded by run_date."""
+    from hcsc.datalake.dre import watchdog as wd
+
+    replay = replay_conf(spark, tmp_path, "r12_exit")
+    (replay.conf / "defaults.yaml").write_text("dq_database: [not a name\n", encoding="utf-8")
+    code, out = watchdog(replay, capsys)
+    assert code == 3 and "cannot read" in out
+    replay = replay_conf(spark, tmp_path / "again", "r12_exit_exc")
+    monkeypatch.setattr(wd, "_utc", lambda value: 1 / 0)  # before the store read, whose errors are an alert
+    code, out = watchdog(replay, capsys)
+    assert code == 3 and "dre watchdog: cannot run (ZeroDivisionError)" in out
+    monkeypatch.undo()
+    seen: list[str] = []
+    real_sql = spark.sql
+    monkeypatch.setattr(spark, "sql", lambda text: seen.append(text) or real_sql(text))
+    wd.read_runs(spark, replay.dq, datetime(2026, 1, 15, 11, tzinfo=UTC))
+    assert "run_date >= DATE'2026-01-15'" in seen[-1]

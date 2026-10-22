@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from hcsc.datalake.dre.checks.base import Check, CheckContext, CheckResult
+from hcsc.datalake.dre.checks.registry import register_check
 from hcsc.datalake.dre.checks.tier1.due_loads import judge_due_slots
 
 if TYPE_CHECKING:
@@ -31,3 +32,6 @@ class ZeroRows(Check):
             observed="{violations} of {population} due loads wrote fewer rows than the minimum",
             expected=f"at least {minimum} rows per load",
         )
+
+
+register_check(ZeroRows())

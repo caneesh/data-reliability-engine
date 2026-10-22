@@ -33,7 +33,7 @@ def test_pyfiles_zip_holds_the_package_and_imports_from_the_zip_alone(tmp_path) 
         "import sys; sys.path[:0] = [sys.argv[1], sys.argv[2]];"
         "from hcsc.datalake.dre.checks.base import render_sql;"
         "from hcsc.datalake.dre.store.schema import render_ddl;"
-        "from hcsc.datalake.dre.checks.registry import pattern_causes;"
+        "from hcsc.datalake.dre.checks.patterns import pattern_causes;"
         "import hcsc.datalake.dre.checks.base as b; assert b.__file__.startswith(sys.argv[1]), b.__file__;"
         "assert 'MAX' in render_sql('cause_max_load.sql.j2', table='t', feed_filter=None, load_expr='x');"
         "assert render_ddl('dq') and pattern_causes('FILE_CYCLIC'); print('ok')"

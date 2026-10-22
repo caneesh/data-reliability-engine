@@ -10,13 +10,15 @@ from jinja2 import Environment, StrictUndefined
 
 from hcsc.datalake.dre.store.names import validate_dq_database
 
-VIEWS = ("v_latest_run", "v_latest_result", "v_open_keys", "v_file_status")
+VIEWS = ("v_latest_run", "v_commit_state", "v_committed_result", "v_committed_key_event",
+         "v_committed_partition_state", "v_committed_reconciliation", "v_committed_cause", "v_commit_integrity",
+         "v_latest_result", "v_open_keys", "v_key_lineage", "v_file_status", "v_latest_partition_state")
 
 _TABLE = re.compile(
     r"CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+\S+\.(\w+)\s+\((.*)\)\s+PARTITIONED\s+BY\s+\((.*?)\)\s+STORED\s+AS\s+ORC",
     re.S,
 )
-_VIEW = re.compile(r"CREATE\s+VIEW\s+IF\s+NOT\s+EXISTS\s+\S+\.(\w+)\s+AS\s+(.*)", re.S)
+_VIEW = re.compile(r"CREATE\s+OR\s+REPLACE\s+VIEW\s+\S+\.(\w+)\s+AS\s+(.*)", re.S)
 _COLUMN = re.compile(r"(\w+)\s+([A-Za-z]+(?:<[^>]*>)?)")
 
 

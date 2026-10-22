@@ -12,8 +12,6 @@ from tests.replay.conftest import causes, latest, replay_conf
 
 FEED = "feeds/example_realtime.yaml"
 
-CURATED = "datasets/example_curated_enrollment.yaml"
-CURATED_LOAD_TIME = ("load_time: null ", "load_time: { column: sourcelastupdatets, granularity: minute } ")
 
 
 def test_r02_no_loads_for_longer_than_the_sla_is_on_time_failed(spark, tmp_path) -> None:
@@ -63,7 +61,7 @@ def test_r02_with_the_load_hold_marker_present_is_raw_load_held(spark, tmp_path)
 
 
 def test_r03_gold_wrote_zero_rows_while_upstream_had_rows_is_zero_rows_failed(spark, tmp_path) -> None:
-    replay = replay_conf(spark, tmp_path, "r03", {CURATED: [CURATED_LOAD_TIME]})
+    replay = replay_conf(spark, tmp_path, "r03")
     create_table(spark, replay.gold, GOLD_COLUMNS, [gold_row(loaded=gold_load_time(72))])  # nothing recent
     # Upstream loaded every hour through the window, so every load due upstream wrote rows.
     create_table(spark, replay.curated, CURATED_COLUMNS,
@@ -92,7 +90,7 @@ def test_r03_rows_went_to_the_cursor_s_later_partition_is_wrong_partition(spark,
     # The handoff file names tomorrow's partition, so today's loads went there.
     tomorrow = (datetime.now(timezone.utc).astimezone(ZoneInfo("America/Chicago")) + timedelta(days=1))
     cursor.write_text(f"partition={tomorrow:%Y%m%d}\n", encoding="utf-8")
-    replay = replay_conf(spark, tmp_path, "r03_cursor", {CURATED: [CURATED_LOAD_TIME], FEED: [(
+    replay = replay_conf(spark, tmp_path, "r03_cursor", {FEED: [(
         "partition_cursor: { path: null, extract_regex: null, format: null, compare_to: partition }",
         f"partition_cursor: {{ path: {cursor}, extract_regex: '(\\d{{8}})', format: yyyyMMdd, compare_to: partition }}",
     )]})

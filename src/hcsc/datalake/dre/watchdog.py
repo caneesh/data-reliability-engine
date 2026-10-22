@@ -10,7 +10,10 @@ The expected run is the hour H = (now - watchdog_grace_minutes) floored to the h
 - a run started then whose latest row is still STARTED more than the grace after it started;
 - a run started then that ended FAILED, or wrote fewer checks than it expected;
 - a run started then whose cause investigations did not all finish (tracked apart from its
-  checks, so the checks keep their states; the next run retries the investigations).
+  checks, so the checks keep their states; the next run retries the investigations);
+- the store's integrity is not verified: no integrity sweep completed in the last 26 hours, once
+  the store is older than that (checkpoint 2 corrections, R1: integrity-check freshness);
+- integrity incidents (an evidence mismatch or a commit conflict) recorded in that hour.
 Alerts go to watchdog_owner's recipients, or every address in recipients when it is not set.
 Exit 0 healthy, 1 alert raised (sent, or printed when no mail relay is configured).
 """
@@ -28,6 +31,7 @@ if TYPE_CHECKING:
 
 STARTED = "STARTED"
 HOUR = timedelta(hours=1)
+STALE_AFTER = timedelta(hours=26)  # the integrity sweep runs daily
 
 
 @dataclass(frozen=True)
@@ -83,23 +87,64 @@ def problems(rows: list[RunRow], now: datetime, grace_minutes: int) -> list[str]
     return found
 
 
+EXIT_HEALTHY, EXIT_ALERT, EXIT_CANNOT_RUN = 0, 1, 3
+
+
 def read_runs(spark: SparkSession, dq_database: str, since: datetime) -> list[RunRow]:
     dq_database = validate_dq_database(dq_database)
     stamp = _utc(since).strftime("%Y-%m-%d %H:%M:%S")
+    day = _utc(since).date().isoformat()
     return [RunRow(r.run_id, _utc(r.started_at), r.status, r.checks_expected, r.checks_written,
                    _utc(r.ended_at) if r.ended_at else None, r.investigations_expected, r.investigations_done)
             for r in spark.sql(
                 f"SELECT run_id, started_at, ended_at, status, checks_expected, checks_written, "
                 f"investigations_expected, investigations_done "
-                f"FROM {dq_database}.dq_run WHERE started_at >= TIMESTAMP '{stamp}' "
+                f"FROM {dq_database}.dq_run WHERE run_date >= DATE'{day}' AND started_at >= TIMESTAMP '{stamp}' "
                 f"AND coalesce(execution_type, 'NORMAL') = 'NORMAL'").collect()]
 
 
+def integrity_problems(spark: SparkSession, dq_database: str, now: datetime, grace_minutes: int) -> list[str]:
+    """Integrity-check freshness and the expected hour's integrity incidents (dq_integrity)."""
+    dq_database = validate_dq_database(dq_database)
+    now = _utc(now)
+    hour = expected_hour(now, grace_minutes)
+    stamp = lambda t: _utc(t).strftime("%Y-%m-%d %H:%M:%S")  # noqa: E731
+    row = spark.sql(
+        f"SELECT MAX(CASE WHEN record = 'SWEEP' AND status = 'COMPLETED' THEN recorded_at END) AS verified, "
+        f"SUM(CASE WHEN record IN ('EVIDENCE_MISMATCH', 'COMMIT_CONFLICT', 'LEDGER_UNBALANCED') "
+        f"AND run_date >= DATE'{hour.date().isoformat()}' "
+        f"  AND recorded_at >= TIMESTAMP '{stamp(hour)}' AND recorded_at < TIMESTAMP '{stamp(hour + HOUR)}' "
+        f"  THEN 1 ELSE 0 END) AS incidents FROM {dq_database}.dq_integrity").collect()[0]
+    found = []
+    oldest = spark.sql(f"SELECT MIN(started_at) AS t FROM {dq_database}.dq_run").collect()[0].t
+    if oldest is not None and now - _utc(oldest) > STALE_AFTER:
+        if row.verified is None:
+            found.append("store integrity not verified: no integrity sweep has completed")
+        elif now - _utc(row.verified) > STALE_AFTER:
+            found.append(f"store integrity verification is stale: the last integrity sweep completed "
+                         f"{_utc(row.verified):%Y-%m-%d %H:%M} UTC")
+    if row.incidents:
+        found.append(f"{int(row.incidents)} integrity incident(s) recorded in {hour:%Y-%m-%d %H:%M}-"
+                     f"{hour + HOUR:%H:%M} UTC (dq_integrity: evidence changed or lost after publication, "
+                     "or a conflicting commit)")
+    return found
+
+
 def watch(spark: SparkSession, conf: str, now: datetime | None = None) -> int:
+    """0 healthy, 1 alert sent (or printed), 3 the watchdog itself could not run (configuration
+    unreadable, or an error outside the store read), so a scheduler can tell the two apart."""
+    try:
+        return _watch(spark, conf, now)
+    except Exception as exc:
+        print(f"dre watchdog: cannot run ({type(exc).__name__})")
+        return EXIT_CANNOT_RUN
+
+
+def _watch(spark: SparkSession, conf: str, now: datetime | None) -> int:
     from pathlib import Path
 
     from hcsc.datalake.dre.config.loader import load
-    from hcsc.datalake.dre.notify.email import send_text
+    from hcsc.datalake.dre.notify.sinks import Message, deliver
 
     config, errors = load(Path(conf))
     defaults = config.defaults
@@ -107,16 +152,20 @@ def watch(spark: SparkSession, conf: str, now: datetime | None = None) -> int:
         for error in errors:
             print(error)
         print(f"dre watchdog: cannot read {conf}/defaults.yaml")
-        return 1
+        return EXIT_CANNOT_RUN
     now = _utc(now or datetime.now(timezone.utc))
     grace = defaults.watchdog_grace_minutes
     try:
         found = problems(read_runs(spark, defaults.dq_database, expected_hour(now, grace) - HOUR), now, grace)
     except Exception as exc:
         found = [f"cannot read {defaults.dq_database}.dq_run ({type(exc).__name__})"]
+    try:
+        found += integrity_problems(spark, defaults.dq_database, now, grace)
+    except Exception as exc:
+        found.append(f"cannot read {defaults.dq_database}.dq_integrity ({type(exc).__name__})")
     if not found:
         print(f"dre watchdog: healthy (the run for {expected_hour(now, grace):%Y-%m-%d %H:00} UTC completed)")
-        return 0
+        return EXIT_HEALTHY
     subject = f"DRE {defaults.environment} watchdog: {len(found)} problem(s)"
     body = "\n".join([subject, "", *[f"- {p}" for p in found], ""])
     for line in found:
@@ -125,5 +174,6 @@ def watch(spark: SparkSession, conf: str, now: datetime | None = None) -> int:
         recipients = list(defaults.recipients.get(defaults.watchdog_owner, []))
     else:
         recipients = sorted({address for addresses in defaults.recipients.values() for address in addresses})
-    print(send_text("watchdog", subject, body, recipients, defaults.email))
-    return 1
+    for line in deliver([Message("watchdog", subject, body, recipients)], defaults):
+        print(line)
+    return EXIT_ALERT

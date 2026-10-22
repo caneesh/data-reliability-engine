@@ -2,6 +2,8 @@
 
 This page answers the architecture concerns of the October 2026 code review. For each one it gives what the engine guarantees, how it does so, and what is still open. The build rules are in `docs/spec.md`, and the decisions and their reasons are in `docs/decisions.md`.
 
+**Scope of these guarantees (2026-10-16).** Every guarantee below is per hop: one dataset against one upstream, for the keys due in a window, read as the data stands at the run. None of them is an end-to-end claim that every business record reached gold, and the "Met" rows in the acceptance table are met at hop scope. The Phase 1 architecture assessment set out what a chain-level claim needs; `docs/design/target-architecture.md` (ADR-01 to ADR-08) and `docs/design/reconciliation-model.md` are the proposed answer, not built.
+
 ## Zero-touch isolation
 
 **Guarantee.** Onboarding a feed changes no pipeline code, job configuration, schedule or runtime. A failure in DRE can never block a production pipeline.
@@ -64,7 +66,7 @@ These stay counts and key states, not new result states: every check still write
 | 3 | Two upstreams feeding one gold target | Met | `test_open_keys_are_kept_per_hop` and `test_a_synthetic_pipeline_with_two_upstreams_exclusions_late_data_and_a_missing_key` in `tests/checks/test_hop.py` |
 | 4 | Legitimate exclusions without false data-loss alerts | Met | The same scenario test, and `test_file_completeness_reports_what_it_excluded_and_what_is_pending` |
 | 5 | Silent success, skipped processing and delayed loads, independent of job status | Met | T1\_ON\_TIME, T1\_ZERO\_ROWS, T1\_FILES\_NOT\_LOADED (replays R01 to R03); no check reads job status |
-| 6 | Recovery from partial DRE writes without duplicate active findings | Met, within Hive's limits | `tests/test_recovery.py`; no atomic commit across tables |
+| 6 | Recovery from partial DRE writes without duplicate active findings | Met (commit rows, ADR-07) | `tests/test_commit_protocol.py` (failure injection at each write boundary, then recovery); `tests/test_recovery.py` |
 | 7 | DRE outage and heavy load do not affect source processing | By design; not yet demonstrated | Needs a run in a representative cluster |
 | 8 | Uncertainty reported clearly | Met | Evidence levels on cause lines, UNASSESSABLE, NOT\_READY |
 
@@ -77,6 +79,8 @@ These stay counts and key states, not new result states: every check still write
 - **The graph.** Datasets form a directed graph: `upstream` lists and `key_map` entries; `dre validate` rejects cycles.
 - **Hop identity.** A hop is (this dataset, one upstream), named `<upstream>-><dataset>`. Each hop check writes one result per hop (group `upstream`).
 - **Key state per hop.** Key events (`dq_key_event.hop`) and open keys (`v_open_keys`) are tracked per hop, so two upstreams of one dataset never flag or clear each other's keys. Cause rows carry the same `hop`.
+- **The ledger** (Phase 1 build step 3; spec section 6, "HOP\_LEDGER"). Per hop, every due upstream record is in exactly one disposition (unassessable, deleted, deleted\_not\_applied, excluded, excluded\_but\_present, rejected, superseded, delivered, divergent, stale, missing), and the engine asserts the buckets add up: if not, the result is DID\_NOT\_RUN / ledger\_unbalanced, never a verdict. Rows here that no upstream row maps to are orphans, where the rows can be attributed to the hop. Every result carries its scope (edge, contract and its hash, claim, population, cutoff, grain, evidence levels and ceiling, blind spots); a hop of a kind the ledger does not judge is DID\_NOT\_RUN / unsupported\_mapping. The ledger's lines are evidence in `dq_reconciliation`, published under the result's commit.
+- **Coverage continuity** (checkpoint 3, L1). Every hop check judges the records whose deadline falls in the hop's deadline range, which starts where the hop's last committed covering result ended. A change of `sla_hours`, or a window whose hop result covered nothing (an error, missing evidence), never leaves records unjudged, and no record is judged twice.
 - **No one-to-one assumption.** A dataset may have any number of upstreams. An error in one hop is DID\_NOT\_RUN for that hop only. `dre trace` follows a key along every `key_map` edge and names the first hop with a gap.
 
 ## Evidence quality
@@ -101,9 +105,11 @@ These stay counts and key states, not new result states: every check still write
 **How:**
 
 - **Deterministic ids.** `evaluation_id` is a hash of (event, check, expectation version, engine version, group). Re-evaluating the same window gives the same ids.
-- **Current state.** Each evaluation's current state is its newest row in the views. `v_latest_result` orders by window, then by evaluation time.
+- **Commit rows** (Phase 1 design, ADR-07; spec section 5, "Commit protocol"). An evaluation's evidence (key events, partition states, ledger lines) is written first, then its results, then its `dq_commit` row, in batches (`commit_batch`, default 25) and at the end of the run; a cause investigation's rows are published by a cause commit naming the result it explains. Before a batch is written, the rows its commits vouch for are counted, and a unit whose rows differ is withheld whole. Every view of current state, and every reader of results, key events, partition states and causes, sees committed rows only, and causes attach to results by identity, never by time. A run that dies, or a write that fails, anywhere before the commit leaves nothing visible; a commit write that fails after its file landed is read back and completed.
+- **What is guaranteed.** A visible evaluation's rows were all stored, and counted, when it was published, under a documented consistency model (one writer, append only, run-scoped rows, verification after the last write; spec section 5, item 6). Each commit records how long its evidence is kept (partition states 13 months, results 84); retention honours it and investigation holds. A daily and weekly integrity sweep records evidence changed or lost afterwards; the unit becomes INVALID (kept, never healthy, never a baseline), a failed sweep makes its scope UNKNOWN, and evidence past its lifetime is EXPIRED. A result is healthy only when PASSED with VALID evidence and no qualifications (checkpoint 3: a PASS whose claim rests on an inferred contract, an unproven attribution, unchecked orphans or reported evidence is listed, never counted healthy). `dq_run`, `dq_file` and `dq_integrity` record observations, not evaluations, and are not commit-gated.
+- **Current state.** Each evaluation's current state is its newest committed row in the views. `v_latest_result` orders by window, then by evaluation time.
 - **Partial writes:**
-  - **Key events not stored.** A result stored without its key events gets a newer DID\_NOT\_RUN / PLATFORM / `evidence_incomplete` row under the same `evaluation_id`, and the run ends PARTIAL.
+  - **Evidence not stored.** The results are not written. A DID\_NOT\_RUN / PLATFORM / `evidence_incomplete` row is written and committed, with no evidence vouched for, so the partial evidence stays invisible, and the run ends PARTIAL.
   - **Interrupted runs.** Any NORMAL event evaluated by a run that did not finish COMPLETED (PARTIAL, FAILED, or died while STARTED) is held, and the next run evaluates it again.
   - **Limit on holding.** A hold lasts at most `max_window_hours`; then a WINDOW\_GAP row records the span that was never checked.
 - **Idempotent reruns.** A RERUN or REPLAY writes a result only if its outcome differs from the stored one. Neither reads nor writes key events.
@@ -112,7 +118,16 @@ These stay counts and key states, not new result states: every check still write
   - The watchdog reports an incomplete investigation, and the digest shows `cause: investigation incomplete`.
   - Each NORMAL run retries such investigations for up to `investigation_retry_days`, as long as the failed result is still its check's latest result.
 
-**Open.** The store is append-only Hive/ORC, which has no transactions across tables. Recovery therefore relies on deterministic ids, newest-row-wins views, and holding windows, not on atomic commits.
+**Proof.** `tests/test_commit_protocol.py` injects a failure at each write boundary and checks that nothing of the interrupted evaluations is visible and that the next run publishes the held window once:
+
+- the process dies after the evidence;
+- it dies before the commit;
+- the commit is refused;
+- the evidence is partly stored.
+
+The checkpoint 2 revision added: a partly stored cause set, a marker over partly stored results, stored rows that differ from a commit, a commit write that fails after none, some or all of its rows, and causes stamped after another run's commit (by identity, they stay out).
+
+**Open.** Hive/ORC still has no transaction across tables, so an interrupted run leaves rows in the tables. They are invisible, not absent, until retention removes them. Concurrency stays as before: one NORMAL run at a time.
 
 ## Historical replay semantics
 

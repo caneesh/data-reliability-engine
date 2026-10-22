@@ -5,7 +5,10 @@ layer: CURATED
 upstream: []
 key: [subscriberidnumber, membernumber, effectivedate, qualifiedhealthplanid]
 record_time: { column: sourcelastupdatets, format: null }   # format not yet confirmed
-load_time: null               # load time column not yet confirmed
+load_time: { column: cdc_upd_ts, format: "yyyy-MM-dd HH:mm:ss:SSSSSS", granularity: minute }
 partition_column: null
+partition_format: null            # how the partition value is written (e.g. yyyy-MM-dd); with it, windowed checks read only the window's partitions
 file_name_column: null
 key_unique: false             # keeps several versions per key
+grain:
+  history: null                 # whether curated keeps every version as loaded is not yet confirmed (platform)

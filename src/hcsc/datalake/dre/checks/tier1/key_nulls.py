@@ -7,9 +7,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from hcsc.datalake.dre.checks.base import (
-    Check, CheckContext, CheckResult, from_counts, group_values, needs_load_time, render_sql, utc_literal,
-)
+from hcsc.datalake.dre.checks.partitions import partition_filter
+from hcsc.datalake.dre.checks.base import Check, CheckContext, CheckResult, from_counts, group_values, needs_load_time, render_sql, utc_literal
+from hcsc.datalake.dre.checks.registry import register_check
 from hcsc.datalake.dre.checks.times import utc_expr
 
 if TYPE_CHECKING:
@@ -38,6 +38,7 @@ class KeyNulls(Check):
             window_start=utc_literal(event.window_start),
             window_end=utc_literal(event.window_end),
             feed_filter=ds.feed_filter,
+            partition_filter=partition_filter(ds, event.window_start, event.window_end, ctx.default_timezone),
         )
         return [
             from_counts(row.population, row.violations,
@@ -46,3 +47,6 @@ class KeyNulls(Check):
                         group_values=group_values(row, ds.group_by))
             for row in ctx.spark.sql(sql).collect()
         ]
+
+
+register_check(KeyNulls())

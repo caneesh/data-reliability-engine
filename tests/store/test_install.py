@@ -34,8 +34,9 @@ def test_print_renders_ddl_for_configured_database(tmp_path, capsys) -> None:
     assert code == 0
     statements = [s.strip() for s in out.split(";") if s.strip()]
     assert len(statements) == len(DQ_TABLES) + len(VIEWS)
-    for statement in statements:
-        assert re.match(r"CREATE (TABLE|VIEW) IF NOT EXISTS dq_printed\.\w+", statement), statement
+    for statement in statements:  # tables are created once; views are replaced (they hold no data; ADR-07)
+        assert re.match(r"CREATE TABLE IF NOT EXISTS dq_printed\.\w+|CREATE OR REPLACE VIEW dq_printed\.\w+",
+                        statement), statement
 
 
 def test_install_mode_is_required(tmp_path) -> None:
@@ -65,8 +66,10 @@ def test_check_reports_missing_and_different_objects(spark, tmp_path, capsys) ->
     conf = conf_for(tmp_path, "dq_install_drift")
     create_database(spark, "dq_install_drift")
     # An older dq_cause_result with a different shape, made before install (IF NOT EXISTS leaves it alone).
-    spark.sql("CREATE TABLE dq_install_drift.dq_cause_result (run_id STRING) "
-              "PARTITIONED BY (run_date DATE) STORED AS ORC")
+    # It keeps every column the views read, plus one, so the views over it can still be created.
+    spark.sql("CREATE TABLE dq_install_drift.dq_cause_result (run_id STRING, evaluation_id STRING, failure_ref STRING, "
+              "hop STRING, cause_check_id STRING, order_no INT, state STRING, cause_code STRING, evidence STRING, "
+              "evaluated_at TIMESTAMP, legacy_note STRING) PARTITIONED BY (run_date DATE) STORED AS ORC")
     install(conf, "apply", capsys)
     spark.sql("DROP VIEW dq_install_drift.v_open_keys")
 
@@ -75,6 +78,25 @@ def test_check_reports_missing_and_different_objects(spark, tmp_path, capsys) ->
     assert re.search(r"DIFFERS\s+dq_install_drift\.dq_cause_result: columns", out)
     assert re.search(r"MISSING\s+dq_install_drift\.v_open_keys", out)
     assert "2 of" in out
+
+
+def test_apply_replaces_views_left_by_an_older_release(spark, tmp_path, capsys) -> None:
+    """Views hold no data, so `dre install --apply` replaces one whose definition is older (ADR-07: the
+    current-state views read committed rows only). An unpublished row is then invisible."""
+    from tests.store.conftest import append_rows
+
+    conf = conf_for(tmp_path, "dq_install_upgrade")
+    create_database(spark, "dq_install_upgrade")
+    install(conf, "apply", capsys)
+    # the release 1 definition: every row of dq_check_result, committed or not
+    spark.sql("CREATE OR REPLACE VIEW dq_install_upgrade.v_latest_result AS SELECT * FROM dq_install_upgrade.dq_check_result")
+    code, out = install(conf, "check", capsys)
+    assert code == 1 and re.search(r"DIFFERS\s+dq_install_upgrade\.v_latest_result", out)
+    assert install(conf, "apply", capsys)[0] == 0
+    assert install(conf, "check", capsys)[0] == 0
+    append_rows(spark, "dq_install_upgrade", "dq_check_result",
+                [{"evaluation_id": "e1", "run_id": "r1", "dataset": "d", "check_id": "c", "state": "PASSED"}], commit=False)
+    assert spark.table("dq_install_upgrade.v_latest_result").count() == 0
 
 
 def test_apply_and_check_need_the_database(spark, tmp_path, capsys) -> None:
@@ -118,5 +140,5 @@ def test_apply_reports_a_failing_statement(spark, tmp_path, capsys) -> None:
     spark.sql("CREATE TABLE dq_install_broken.dq_run (run_id STRING) PARTITIONED BY (run_date DATE) STORED AS ORC")
     code, out = install(conf, "apply", capsys)
     assert code == 1
-    assert "failed at `CREATE VIEW IF NOT EXISTS dq_install_broken.v_latest_run" in out
+    assert "failed at `CREATE OR REPLACE VIEW dq_install_broken.v_latest_run" in out
     assert "dre install --check" in out

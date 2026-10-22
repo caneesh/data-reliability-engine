@@ -46,5 +46,6 @@ SELECT SUM(CASE WHEN up_rows > 0 THEN 1 ELSE 0 END) AS population,
                                           THEN named_struct('f', f, 'up_rows', up_rows, 'dn_rows', dn_rows) END)),
              1, {{ limit }}) AS short,
        SUM(excluded_rows) AS excluded,
-       (SELECT COUNT(*) FROM up_files WHERE first_load >= {{ p.deadline_end }}) AS pending
+       SUM(CASE WHEN up_rows > 0 AND dn_rows > up_rows THEN 1 ELSE 0 END) AS more_here,
+       (SELECT COUNT(*) FROM up_files WHERE first_load >= {{ p.pending_from }}) AS pending
 FROM in_range

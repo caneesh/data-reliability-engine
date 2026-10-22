@@ -1,14 +1,17 @@
 -- dq store tables and views (spec section 5), applied by `dre install --apply`.
 -- Rendered by store/schema.py with a validated dq_database; statements are
--- separated by semicolons. Every statement is IF NOT EXISTS, so applying it
--- again changes nothing. Tables are append-only; views derive current state.
+-- separated by semicolons. Tables are CREATE ... IF NOT EXISTS and views CREATE OR REPLACE,
+-- so applying it again changes nothing, and applying it after an upgrade replaces the views
+-- (they hold no data). Tables are append-only; views derive current state. A column added to a
+-- table after checkpoint 3 goes last among its data columns, with a migration that adds it to an
+-- existing store (store/migrations.py).
 
 CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_run (
   run_id STRING, started_at TIMESTAMP, ended_at TIMESTAMP,
   engine_version STRING, config_commit STRING, status STRING,  -- STARTED | COMPLETED | PARTIAL | FAILED
   checks_expected INT, checks_written INT,
   investigations_expected INT, investigations_done INT,  -- cause investigations of FAILED results
-  execution_type STRING                 -- NORMAL | RERUN | REPLAY
+  execution_type STRING                 -- NORMAL | RERUN | REPLAY | AS_OF_REPLAY
 ) PARTITIONED BY (run_date DATE) STORED AS ORC;
 
 CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_check_result (
@@ -20,7 +23,9 @@ CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_check_result (
   reason_category STRING, reason_code STRING,
   population BIGINT, violations BIGINT, observed STRING, expected STRING,
   group_values MAP<STRING,STRING>,
-  severity STRING, evaluated_at TIMESTAMP, duration_ms BIGINT, detail STRING
+  severity STRING, evaluated_at TIMESTAMP, duration_ms BIGINT, detail STRING,
+  qualifications STRING, coverage_from TIMESTAMP, coverage_to TIMESTAMP,
+  evaluation_mode STRING  -- NORMAL | CURRENT_RECHECK | AS_OF_REPLAY (ADR-05, migration 1)
 ) PARTITIONED BY (run_date DATE) STORED AS ORC;
 
 CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_cause_result (
@@ -30,12 +35,17 @@ CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_cause_result (
   cause_code STRING, evidence STRING, evaluated_at TIMESTAMP
 ) PARTITIONED BY (run_date DATE) STORED AS ORC;
 
+-- key_encoding and predecessor_hash: migration 2 (Gate A remediation, release N). key_encoding is the
+-- encoding of key_value and key_hash (NULL in rows stored before the column existed: encoding 1);
+-- predecessor_hash is the hash, in the other encoding, whose open spell the event continues.
+-- event REKEYED records that an identity's open spell continues under another encoding: it closes nothing.
 CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_key_event (
   run_id STRING, evaluation_id STRING, dataset STRING, check_id STRING,
   hop STRING,
   key_hash STRING, key_value STRING,
   event STRING,
-  state_detail STRING, observed_at TIMESTAMP
+  state_detail STRING, observed_at TIMESTAMP,
+  key_encoding INT, predecessor_hash STRING
 ) PARTITIONED BY (run_date DATE) STORED AS ORC;
 
 CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_file (
@@ -43,9 +53,64 @@ CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_file (
   modified_at TIMESTAMP, observed_at TIMESTAMP, run_id STRING
 ) PARTITIONED BY (run_date DATE) STORED AS ORC;
 
+-- Release 4: what each partition of a table looked like at a run (T1_PARTITION_DRIFT).
+-- row_count is the latest known count, carried forward when the files did not change.
+CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_partition_state (
+  dataset STRING, table_name STRING, partition_value STRING,
+  file_count INT, total_bytes BIGINT, latest_modified_at TIMESTAMP,
+  row_count BIGINT, counted_at TIMESTAMP,
+  observed_at TIMESTAMP, run_id STRING
+) PARTITIONED BY (run_date DATE) STORED AS ORC;
+
+-- Phase 1 design, ADR-07: one row per committed evaluation id (kind result) and one per committed
+-- cause investigation (kind cause). An evaluation's evidence (key events, partition states) and
+-- its result rows are written first, an investigation's cause rows first; the commit row last,
+-- once the rows it vouches for were counted in the store. Every view of current state shows only
+-- committed rows, so an evaluation interrupted anywhere before its commit is invisible, and its
+-- window is evaluated again. Evidence rows of a commit with a count of 0 stay invisible (an
+-- evidence_incomplete marker commits its result rows only). result_run_id and result_run_date
+-- name the run whose committed result the row publishes (a result commit: its own run) or
+-- explains (a cause commit). evidence_kept_until is the last day the rows it vouches for are kept:
+-- run_date plus the shortest retention among the tables they are in; retention refuses to drop
+-- them sooner.
+CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_commit (
+  run_id STRING, evaluation_id STRING, dataset STRING, check_id STRING,
+  kind STRING, result_run_id STRING, result_run_date DATE,
+  result_rows INT, key_event_rows BIGINT, partition_state_rows INT, cause_rows INT,
+  reconciliation_rows INT, evidence_kept_until DATE, committed_at TIMESTAMP
+) PARTITIONED BY (run_date DATE) STORED AS ORC;
+
+-- Phase 1 build step 3: HOP_LEDGER's accounting, one row per line of an evaluation's ledger: the
+-- due, pending and untimed populations, each disposition (with its label: the exclusion rule@version
+-- or the reject reason), orphans, overlap diagnostics and volume guards. class: population, unknown,
+-- authorised, breach, defect, ok, deficit, diagnostic, guard. evidence_level: observed,
+-- reconstructed, reported, inferred, unavailable (ADR-06). scope: the result's scope (ADR-01), the
+-- same JSON on every row of the evaluation. Evidence of its result: written before it, committed with it.
+CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_reconciliation (
+  run_id STRING, evaluation_id STRING, dataset STRING, check_id STRING, upstream STRING,
+  line STRING, label STRING, class STRING, records BIGINT, evidence_level STRING, scope STRING,
+  recorded_at TIMESTAMP
+) PARTITIONED BY (run_date DATE) STORED AS ORC;
+
+-- Checkpoint 2 corrections (R1, R2): what DRE learned about its own store after publishing.
+-- record: SWEEP (an integrity sweep: status COMPLETED or FAILED, scope DAILY or FULL over
+-- scope_from to scope_to), EVIDENCE_MISMATCH (a commit's stored rows no longer match it before its
+-- evidence_kept_until), COMMIT_CONFLICT (one commit identity stored with different contents), or
+-- REBASELINED (a later evaluation re-established the baseline an INVALID unit fed), or
+-- LEDGER_UNBALANCED (a HOP_LEDGER evaluation whose dispositions did not add up: an engine defect,
+-- an incident that makes no unit INVALID; checkpoint 3, L5). The
+-- subject columns name the commit. Observations, not evaluations: not commit-gated.
+CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_integrity (
+  run_id STRING, record STRING, status STRING,
+  subject_run_id STRING, subject_run_date DATE, evaluation_id STRING, commit_kind STRING,
+  dataset STRING, check_id STRING,
+  scope STRING, scope_from DATE, scope_to DATE,
+  detail STRING, recorded_at TIMESTAMP
+) PARTITIONED BY (run_date DATE) STORED AS ORC;
+
 -- A run's state is its latest dq_run row: the final row (COMPLETED, PARTIAL or
 -- FAILED) once written, otherwise STARTED.
-CREATE VIEW IF NOT EXISTS {{ dq_database }}.v_latest_run AS
+CREATE OR REPLACE VIEW {{ dq_database }}.v_latest_run AS
 SELECT run_id, started_at, ended_at, engine_version, config_commit, status,
        checks_expected, checks_written, investigations_expected, investigations_done, execution_type, run_date
 FROM (
@@ -58,54 +123,266 @@ FROM (
 ) ranked
 WHERE latest_rank = 1;
 
+-- One row per commit identity (run, evaluation id, kind, run_date), with its evidence state:
+-- INVALID: the identity was stored with different contents, or a sweep recorded its rows lost or
+--   in conflict (dq_integrity) - compromised; never used as a baseline, never healthy;
+-- EXPIRED: past evidence_kept_until - its evidence rows may be gone by retention, as documented;
+-- UNKNOWN: the latest integrity sweep covering its run_date failed and no later completed sweep
+--   covers it - not verified since; never healthy;
+-- VALID: verified when published, and not found lost since.
+CREATE OR REPLACE VIEW {{ dq_database }}.v_commit_state AS
+WITH c AS (
+  SELECT run_id, evaluation_id, kind, run_date,
+         MAX(dataset) AS dataset, MAX(check_id) AS check_id,
+         MAX(result_run_id) AS result_run_id, MAX(result_run_date) AS result_run_date,
+         MAX(result_rows) AS result_rows, MAX(key_event_rows) AS key_event_rows,
+         MAX(partition_state_rows) AS partition_state_rows, MAX(cause_rows) AS cause_rows,
+         MAX(reconciliation_rows) AS reconciliation_rows, MIN(evidence_kept_until) AS evidence_kept_until,
+         COUNT(DISTINCT concat_ws('|', CAST(result_rows AS STRING), CAST(key_event_rows AS STRING),
+                                  CAST(partition_state_rows AS STRING), CAST(cause_rows AS STRING),
+                                  CAST(reconciliation_rows AS STRING), result_run_id,
+                                  CAST(result_run_date AS STRING), CAST(evidence_kept_until AS STRING))) AS versions
+  FROM {{ dq_database }}.dq_commit
+  GROUP BY run_id, evaluation_id, kind, run_date
+),
+lost AS (
+  SELECT DISTINCT subject_run_id, subject_run_date, evaluation_id, commit_kind
+  FROM {{ dq_database }}.dq_integrity
+  WHERE record IN ('EVIDENCE_MISMATCH', 'COMMIT_CONFLICT')
+),
+latest_sweep AS (
+  SELECT scope, status, scope_from, scope_to, recorded_at FROM (
+    SELECT scope, status, scope_from, scope_to, recorded_at,
+           ROW_NUMBER() OVER (PARTITION BY scope ORDER BY recorded_at DESC, run_id DESC) AS rn
+    FROM {{ dq_database }}.dq_integrity WHERE record = 'SWEEP'
+  ) s WHERE rn = 1
+),
+sweeps AS (
+  SELECT MAX(CASE WHEN scope = 'DAILY' THEN status END) AS d_status,
+         MAX(CASE WHEN scope = 'DAILY' THEN scope_from END) AS d_from,
+         MAX(CASE WHEN scope = 'DAILY' THEN scope_to END) AS d_to,
+         MAX(CASE WHEN scope = 'DAILY' THEN recorded_at END) AS d_at,
+         MAX(CASE WHEN scope = 'FULL' THEN status END) AS f_status,
+         MAX(CASE WHEN scope = 'FULL' THEN scope_from END) AS f_from,
+         MAX(CASE WHEN scope = 'FULL' THEN scope_to END) AS f_to,
+         MAX(CASE WHEN scope = 'FULL' THEN recorded_at END) AS f_at
+  FROM latest_sweep
+)
+SELECT c.run_id, c.evaluation_id, c.kind, c.run_date, c.dataset, c.check_id, c.result_run_id,
+       c.result_run_date, c.result_rows, c.key_event_rows, c.partition_state_rows, c.cause_rows,
+       c.reconciliation_rows, c.evidence_kept_until, c.versions,
+       CASE WHEN c.versions > 1 OR l.evaluation_id IS NOT NULL THEN 'INVALID'
+            WHEN c.evidence_kept_until < current_date() THEN 'EXPIRED'
+            WHEN (s.d_status = 'FAILED' AND c.run_date BETWEEN s.d_from AND s.d_to
+                  AND NOT coalesce(s.f_status = 'COMPLETED' AND s.f_at > s.d_at
+                                   AND c.run_date BETWEEN s.f_from AND s.f_to, FALSE))
+              OR (s.f_status = 'FAILED' AND c.run_date BETWEEN s.f_from AND s.f_to
+                  AND NOT coalesce(s.d_status = 'COMPLETED' AND s.d_at > s.f_at
+                                   AND c.run_date BETWEEN s.d_from AND s.d_to, FALSE)) THEN 'UNKNOWN'
+            ELSE 'VALID' END AS evidence_state
+FROM c
+LEFT JOIN lost l
+  ON l.subject_run_id = c.run_id AND l.subject_run_date = c.run_date AND l.evaluation_id = c.evaluation_id
+  AND l.commit_kind = c.kind
+CROSS JOIN sweeps s;
+
+-- Committed rows only (ADR-07). Every reader of results, key events, partition states and causes
+-- reads these, never the tables, except the window history, which holds every event of a run
+-- that did not finish COMPLETED (a stricter rule that also covers uncommitted rows). A committed
+-- result is kept whatever happens to its evidence later, with its evidence state; evidence rows of
+-- an INVALID unit are never shown, so no baseline is built on compromised evidence.
+CREATE OR REPLACE VIEW {{ dq_database }}.v_committed_result AS
+SELECT r.*, c.evidence_state
+FROM {{ dq_database }}.dq_check_result r
+JOIN {{ dq_database }}.v_commit_state c
+  ON c.kind = 'result' AND c.run_id = r.run_id AND c.evaluation_id = r.evaluation_id AND c.run_date = r.run_date;
+
+CREATE OR REPLACE VIEW {{ dq_database }}.v_committed_key_event AS
+SELECT e.*
+FROM {{ dq_database }}.dq_key_event e
+LEFT SEMI JOIN {{ dq_database }}.v_commit_state c
+  ON c.kind = 'result' AND c.run_id = e.run_id AND c.evaluation_id = e.evaluation_id AND c.run_date = e.run_date
+  AND c.key_event_rows > 0 AND c.evidence_state <> 'INVALID';
+
+CREATE OR REPLACE VIEW {{ dq_database }}.v_committed_partition_state AS
+SELECT s.*
+FROM {{ dq_database }}.dq_partition_state s
+LEFT SEMI JOIN {{ dq_database }}.v_commit_state c
+  ON c.kind = 'result' AND c.run_id = s.run_id AND c.dataset = s.dataset AND c.run_date = s.run_date
+  AND c.check_id = 'T1_PARTITION_DRIFT' AND c.partition_state_rows > 0 AND c.evidence_state <> 'INVALID';
+
+-- HOP_LEDGER's accounting rows of committed evaluations whose commit vouches for them and is not INVALID.
+CREATE OR REPLACE VIEW {{ dq_database }}.v_committed_reconciliation AS
+SELECT x.*
+FROM {{ dq_database }}.dq_reconciliation x
+LEFT SEMI JOIN {{ dq_database }}.v_commit_state c
+  ON c.kind = 'result' AND c.run_id = x.run_id AND c.evaluation_id = x.evaluation_id AND c.run_date = x.run_date
+  AND c.reconciliation_rows > 0 AND c.evidence_state <> 'INVALID';
+
+-- A cause row counts only with a cause commit of its own run, evaluation id and run_date that is
+-- not INVALID, and only while the result that commit names (result_run_id, result_run_date,
+-- evaluation_id) has a result commit: explicit identity, no timestamps. A cause left by a run that
+-- never committed it, or naming a result that was never committed, stays out. An INVALID cause set
+-- is not a valid cause: the next run investigates the result again.
+CREATE OR REPLACE VIEW {{ dq_database }}.v_committed_cause AS
+SELECT x.*, k.result_run_id, k.result_run_date, k.evidence_state
+FROM {{ dq_database }}.dq_cause_result x
+JOIN (
+  SELECT s.run_id, s.evaluation_id, s.run_date, s.result_run_id, s.result_run_date, s.evidence_state
+  FROM {{ dq_database }}.v_commit_state s
+  LEFT SEMI JOIN {{ dq_database }}.v_commit_state r
+    ON r.kind = 'result' AND r.run_id = s.result_run_id AND r.run_date = s.result_run_date
+    AND r.evaluation_id = s.evaluation_id
+  WHERE s.kind = 'cause' AND s.cause_rows > 0 AND s.evidence_state <> 'INVALID'
+) k ON k.run_id = x.run_id AND k.evaluation_id = x.evaluation_id AND k.run_date = x.run_date;
+
+-- Audit: commits whose stored rows now differ from what they declare, with their evidence
+-- state and how long their evidence is kept. A run checks the counts before it writes a commit,
+-- so a row here means rows were lost (or added) afterwards; an EXPIRED row is evidence past its
+-- documented retention. The integrity sweep reads it. Query it with a run_date bound.
+CREATE OR REPLACE VIEW {{ dq_database }}.v_commit_integrity AS
+SELECT c.run_id, c.evaluation_id, c.dataset, c.check_id, c.kind, c.run_date,
+       c.result_rows, coalesce(r.n, 0) AS stored_result_rows,
+       c.key_event_rows, coalesce(e.n, 0) AS stored_key_event_rows,
+       c.partition_state_rows, coalesce(s.n, 0) AS stored_partition_state_rows,
+       c.cause_rows, coalesce(x.n, 0) AS stored_cause_rows,
+       c.reconciliation_rows, coalesce(g.n, 0) AS stored_reconciliation_rows,
+       c.evidence_kept_until, c.evidence_state
+FROM {{ dq_database }}.v_commit_state c
+LEFT JOIN (SELECT run_id, evaluation_id, run_date, COUNT(*) AS n FROM {{ dq_database }}.dq_check_result
+           GROUP BY run_id, evaluation_id, run_date) r
+  ON c.kind = 'result' AND r.run_id = c.run_id AND r.evaluation_id = c.evaluation_id AND r.run_date = c.run_date
+LEFT JOIN (SELECT run_id, evaluation_id, run_date, COUNT(*) AS n FROM {{ dq_database }}.dq_key_event
+           GROUP BY run_id, evaluation_id, run_date) e
+  ON c.kind = 'result' AND e.run_id = c.run_id AND e.evaluation_id = c.evaluation_id AND e.run_date = c.run_date
+LEFT JOIN (SELECT run_id, dataset, run_date, COUNT(*) AS n FROM {{ dq_database }}.dq_partition_state
+           GROUP BY run_id, dataset, run_date) s
+  ON c.kind = 'result' AND c.check_id = 'T1_PARTITION_DRIFT' AND s.run_id = c.run_id AND s.dataset = c.dataset
+  AND s.run_date = c.run_date
+LEFT JOIN (SELECT run_id, evaluation_id, run_date, COUNT(*) AS n FROM {{ dq_database }}.dq_cause_result
+           GROUP BY run_id, evaluation_id, run_date) x
+  ON c.kind = 'cause' AND x.run_id = c.run_id AND x.evaluation_id = c.evaluation_id AND x.run_date = c.run_date
+LEFT JOIN (SELECT run_id, evaluation_id, run_date, COUNT(*) AS n FROM {{ dq_database }}.dq_reconciliation
+           GROUP BY run_id, evaluation_id, run_date) g
+  ON c.kind = 'result' AND g.run_id = c.run_id AND g.evaluation_id = c.evaluation_id AND g.run_date = c.run_date
+WHERE (c.kind = 'result' AND (coalesce(r.n, 0) <> c.result_rows
+                              OR (c.key_event_rows > 0 AND coalesce(e.n, 0) <> c.key_event_rows)
+                              OR (c.partition_state_rows > 0 AND coalesce(s.n, 0) <> c.partition_state_rows)
+                              OR (c.reconciliation_rows > 0 AND coalesce(g.n, 0) <> c.reconciliation_rows)))
+   OR (c.kind = 'cause' AND coalesce(x.n, 0) <> c.cause_rows);
+
 -- Every row of the latest evaluation per (dataset, check_id): one row for an
--- ungrouped check, one row per group for a grouped one. Latest = the latest window, then
+-- ungrouped check, one row per group for a grouped one. healthy is the one definition of a
+-- healthy result: PASSED with VALID evidence (never INVALID, UNKNOWN or EXPIRED) and no
+-- qualifications (a claim that rests on an unproven premise: an inferred contract, an unverified
+-- attribution, orphans not checked, reported evidence; checkpoint 3). Latest = the latest window, then
 -- the latest evaluation of it, so a RERUN or REPLAY of an older window never becomes the
--- current state, while a RERUN of the current window replaces it.
-CREATE VIEW IF NOT EXISTS {{ dq_database }}.v_latest_result AS
+-- current state, while a RERUN of the current window replaces it. evaluation_mode says how the
+-- result read its evidence (ADR-05): a row stored before the column existed is NORMAL when its run
+-- was, and a CURRENT_RECHECK otherwise (RERUN and REPLAY read the tables as they are now).
+CREATE OR REPLACE VIEW {{ dq_database }}.v_latest_result AS
 SELECT evaluation_id, run_id, event_id, window_start, window_end, execution_type, feed, dataset, check_id,
        expectation_version, state, reason_category, reason_code, population,
        violations, observed, expected, group_values, severity, evaluated_at,
-       duration_ms, detail, run_date
+       duration_ms, detail, qualifications, coverage_from, coverage_to, run_date, evidence_state,
+       state = 'PASSED' AND evidence_state = 'VALID' AND qualifications IS NULL AS healthy,
+       coalesce(evaluation_mode,
+                CASE WHEN execution_type = 'NORMAL' THEN 'NORMAL' ELSE 'CURRENT_RECHECK' END) AS evaluation_mode
 FROM (
   SELECT r.*,
          DENSE_RANK() OVER (
            PARTITION BY dataset, check_id
            ORDER BY window_end DESC, evaluated_at DESC, run_id DESC
          ) AS latest_rank
-  FROM {{ dq_database }}.dq_check_result r
+  FROM {{ dq_database }}.v_committed_result r
 ) ranked
 WHERE latest_rank = 1;
 
--- Keys whose latest event at a hop is FLAGGED or STILL_FLAGGED, with the time the key
--- was first flagged in its current open spell (after its last CLEARED).
+-- Identities whose latest committed event at a hop is FLAGGED or STILL_FLAGGED (Gate A remediation,
+-- release N: spec section 5). An identity is a key encoding and a hash: an encoding-1 hash and an
+-- encoding-2 hash are never one identity. Its open spell runs from the first FLAGGED or STILL_FLAGGED
+-- after its last CLEARED: REKEYED never ends a spell, and an identity whose latest event is REKEYED is
+-- not open. first_flagged_at is the spell's start, or the predecessor's when the spell opened with an
+-- event naming a predecessor (in the other encoding) whose latest event is REKEYED: a provable
+-- continuation keeps its age. category: legacy_unresolved for an identity kept open "awaiting
+-- successors" after the encoding change, active otherwise. The latest event is chosen by observed_at,
+-- then run_id: a hop writes at most one event per identity per evaluation, so no two tie.
+-- An open identity re-flagged at the instant it was cleared has no spell: it is still listed, with
+-- first_flagged_at NULL, as before release N.
 -- key_value is restricted and not exposed here.
-CREATE VIEW IF NOT EXISTS {{ dq_database }}.v_open_keys AS
-SELECT dataset, check_id, hop, key_hash, latest_event, state_detail,
-       first_flagged_at, last_observed_at, run_id, evaluation_id
-FROM (
-  SELECT dataset, check_id, hop, key_hash,
-         event AS latest_event, state_detail, run_id, evaluation_id,
-         observed_at AS last_observed_at,
-         MIN(CASE WHEN event IN ('FLAGGED', 'STILL_FLAGGED') AND
-                       (last_cleared_at IS NULL OR observed_at > last_cleared_at)
-                  THEN observed_at END)
-           OVER (PARTITION BY dataset, check_id, hop, key_hash) AS first_flagged_at,
-         ROW_NUMBER() OVER (
-           PARTITION BY dataset, check_id, hop, key_hash
-           ORDER BY observed_at DESC, run_id DESC
-         ) AS latest_rank
-  FROM (
-    SELECT e.*,
-           MAX(CASE WHEN event = 'CLEARED' THEN observed_at END)
-             OVER (PARTITION BY dataset, check_id, hop, key_hash) AS last_cleared_at
-    FROM {{ dq_database }}.dq_key_event e
-  ) with_cleared
-) ranked
-WHERE latest_rank = 1 AND latest_event IN ('FLAGGED', 'STILL_FLAGGED');
+CREATE OR REPLACE VIEW {{ dq_database }}.v_open_keys AS
+WITH ev AS (
+  SELECT dataset, check_id, hop, coalesce(key_encoding, 1) AS key_encoding, key_hash, predecessor_hash,
+         event, state_detail, observed_at, run_id, evaluation_id
+  FROM {{ dq_database }}.v_committed_key_event
+),
+cleared AS (
+  SELECT dataset, check_id, hop, key_encoding, key_hash,
+         MAX(CASE WHEN event = 'CLEARED' THEN observed_at END) AS last_cleared_at
+  FROM ev GROUP BY dataset, check_id, hop, key_encoding, key_hash
+),
+spell AS (
+  SELECT e.dataset, e.check_id, e.hop, e.key_encoding, e.key_hash, MIN(e.observed_at) AS spell_start,
+         element_at(array_sort(collect_list(named_struct('at', e.observed_at, 'run', e.run_id,
+                                                         'pred', e.predecessor_hash))), 1).pred AS spell_predecessor
+  FROM ev e JOIN cleared c
+    ON c.dataset = e.dataset AND c.check_id = e.check_id AND c.hop <=> e.hop
+   AND c.key_encoding = e.key_encoding AND c.key_hash = e.key_hash
+  WHERE e.event IN ('FLAGGED', 'STILL_FLAGGED') AND (c.last_cleared_at IS NULL OR e.observed_at > c.last_cleared_at)
+  GROUP BY e.dataset, e.check_id, e.hop, e.key_encoding, e.key_hash
+),
+latest AS (
+  SELECT * FROM (
+    SELECT ev.*, ROW_NUMBER() OVER (
+             PARTITION BY dataset, check_id, hop, key_encoding, key_hash
+             ORDER BY observed_at DESC, run_id DESC) AS latest_rank
+    FROM ev
+  ) ranked WHERE latest_rank = 1
+)
+SELECT l.dataset, l.check_id, l.hop, l.key_hash, l.event AS latest_event, l.state_detail,
+       CASE WHEN p.event = 'REKEYED' AND ps.spell_start IS NOT NULL THEN ps.spell_start ELSE s.spell_start END
+         AS first_flagged_at,
+       l.observed_at AS last_observed_at, l.run_id, l.evaluation_id,
+       l.key_encoding, s.spell_predecessor AS predecessor_hash,
+       CASE WHEN l.state_detail = 'awaiting successors' THEN 'legacy_unresolved' ELSE 'active' END AS category
+FROM latest l
+LEFT JOIN spell s
+  ON s.dataset = l.dataset AND s.check_id = l.check_id AND s.hop <=> l.hop
+ AND s.key_encoding = l.key_encoding AND s.key_hash = l.key_hash
+LEFT JOIN latest p
+  ON p.dataset = l.dataset AND p.check_id = l.check_id AND p.hop <=> l.hop
+ AND p.key_encoding = CASE WHEN l.key_encoding = 2 THEN 1 ELSE 2 END AND p.key_hash = s.spell_predecessor
+LEFT JOIN spell ps
+  ON ps.dataset = p.dataset AND ps.check_id = p.check_id AND ps.hop <=> p.hop
+ AND ps.key_encoding = p.key_encoding AND ps.key_hash = p.key_hash
+WHERE l.event IN ('FLAGGED', 'STILL_FLAGGED');
+
+-- One row per committed key event that names a predecessor (Gate A remediation, release N: spec section 5):
+-- kind continuation when the predecessor (in the other encoding) was REKEYED, ambiguous otherwise. No
+-- other kind is produced (a rollback kind is deferred: decisions, INC-1). Records of the transition,
+-- never discrepancies. key_value is restricted and not exposed here.
+CREATE OR REPLACE VIEW {{ dq_database }}.v_key_lineage AS
+WITH ev AS (
+  SELECT dataset, check_id, hop, coalesce(key_encoding, 1) AS key_encoding, key_hash, predecessor_hash,
+         event, observed_at, run_id, evaluation_id
+  FROM {{ dq_database }}.v_committed_key_event
+),
+rekeyed AS (
+  SELECT DISTINCT dataset, check_id, hop, key_encoding, key_hash FROM ev WHERE event = 'REKEYED'
+)
+SELECT e.dataset, e.check_id, e.hop,
+       e.predecessor_hash, CASE WHEN e.key_encoding = 2 THEN 1 ELSE 2 END AS predecessor_encoding,
+       e.key_hash AS successor_hash, e.key_encoding AS successor_encoding, e.event AS successor_event,
+       CASE WHEN r.key_hash IS NOT NULL THEN 'continuation' ELSE 'ambiguous' END AS kind,
+       e.observed_at, e.run_id, e.evaluation_id
+FROM ev e
+LEFT JOIN rekeyed r
+  ON r.dataset = e.dataset AND r.check_id = e.check_id AND r.hop <=> e.hop
+ AND r.key_encoding = CASE WHEN e.key_encoding = 2 THEN 1 ELSE 2 END AND r.key_hash = e.predecessor_hash
+WHERE e.predecessor_hash IS NOT NULL;
 
 -- One row per file path: first-seen time, and size and times from the latest observation.
-CREATE VIEW IF NOT EXISTS {{ dq_database }}.v_file_status AS
+CREATE OR REPLACE VIEW {{ dq_database }}.v_file_status AS
 SELECT path, feed, first_seen_at, size_bytes AS latest_size_bytes,
        modified_at AS latest_modified_at, observed_at AS last_observed_at
 FROM (
@@ -113,5 +390,16 @@ FROM (
          MIN(first_seen_at) OVER (PARTITION BY path) AS first_seen_at,
          ROW_NUMBER() OVER (PARTITION BY path ORDER BY observed_at DESC, run_id DESC) AS latest_rank
   FROM {{ dq_database }}.dq_file
+) ranked
+WHERE latest_rank = 1;
+
+-- The latest recorded state per dataset and partition (T1_PARTITION_DRIFT compares against it).
+CREATE OR REPLACE VIEW {{ dq_database }}.v_latest_partition_state AS
+SELECT dataset, table_name, partition_value, file_count, total_bytes, latest_modified_at,
+       row_count, counted_at, observed_at, run_id, run_date
+FROM (
+  SELECT s.*,
+         ROW_NUMBER() OVER (PARTITION BY dataset, partition_value ORDER BY observed_at DESC, run_id DESC) AS latest_rank
+  FROM {{ dq_database }}.v_committed_partition_state s
 ) ranked
 WHERE latest_rank = 1

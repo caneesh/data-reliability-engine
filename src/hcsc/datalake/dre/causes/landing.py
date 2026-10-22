@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from hcsc.datalake.dre.causes.base import (
-    CauseContext, Failure, Outcome, confirmed, not_ready, ruled_out,
+    CauseContext, Failure, Outcome, builtin, confirmed, not_ready, ruled_out,
 )
 from hcsc.datalake.dre.checks.base import error_detail, render_sql
 from hcsc.datalake.dre.checks.times import as_utc
@@ -20,16 +20,48 @@ if TYPE_CHECKING:
     from pyspark.sql import SparkSession
 
 NO_RAW = "the feed has no raw dataset with a file_name_column"
+LISTED_PATHS = 100  # the most paths one failure listing names (causes/failures.py LISTED)
+
+
+def landing_since(cx: CauseContext, failures: list[Failure]) -> datetime | None:
+    """The earliest instant the landing causes of these failures look from: the earliest missed
+    slot, or the earliest first-seen time of the files they name (one bounded read of dq_file);
+    None when nothing bounds them. Every landing cause looks at files first seen with or after
+    its own failure, so files first seen before this cannot matter."""
+    from hcsc.datalake.dre.checks.times import sql_string
+
+    slots = [as_utc(f.slot) for f in failures if f.slot is not None]
+    paths = sorted({p for f in failures for p in (f.files or ())})
+    if cx.feed is None or cx.ctx.dq_database is None or (not slots and not paths):
+        return None
+    seen: list[datetime] = []
+    if paths:
+        listed = ", ".join(sql_string(p) for p in paths[:LISTED_PATHS])
+        row = cx.spark.sql(
+            f"SELECT MIN(first_seen_at) AS first FROM {cx.ctx.dq_database}.dq_file "
+            f"WHERE feed = '{cx.feed.feed}' AND path IN ({listed})").collect()[0]
+        if row.first is None:  # a named file the registry does not know: no bound
+            return None
+        seen.append(as_utc(row.first))
+    return min(slots + seen)
 
 
 def landing_files(cx: CauseContext) -> dict[str, Any]:
-    """path -> row (path, first_seen_at, sizes, raw_rows) for every file of the feed in dq_file."""
+    """path -> row (path, first_seen_at, sizes, raw_rows) for the feed's files in dq_file first seen
+    since the evaluation's earliest failure (cx.cache["landing_since"], set by the cause engine;
+    every file when unset), with the raw row counts of those files only."""
+    from hcsc.datalake.dre.checks.base import utc_literal
+
+    since = cx.cache.get("landing_since")
+
     def query() -> dict[str, Any]:
         raw = cx.raw_dataset()
         sql = render_sql(
             "cause_landing_files.sql.j2", dq_database=cx.ctx.dq_database, feed=cx.feed.feed,
             raw_table=raw.table if raw else None, file_name_column=raw.file_name_column if raw else None,
             feed_filter=raw.feed_filter if raw else None,
+            since=utc_literal(since) if since is not None else None,
+            since_date=as_utc(since).date().isoformat() if since is not None else None,
         )
         return {r.path: r for r in cx.spark.sql(sql).collect()}
     return cx.cached("landing_files", query)
@@ -43,6 +75,7 @@ def unloaded_files_after(cx: CauseContext, after: datetime) -> tuple[str, ...] |
                         if r.raw_rows == 0 and as_utc(r.first_seen_at) >= as_utc(after)))
 
 
+@builtin("PIPELINE_STALLED")
 def pipeline_stalled(cx: CauseContext, failure: Failure) -> Outcome:
     """CONFIRMED when other files were first seen with or after this one (or since the missed
     slot) and none of them has raw rows either. No such file at all: RULED_OUT (nothing shows the
@@ -85,6 +118,7 @@ def _missing(exc: BaseException) -> bool:
     return "FileNotFoundException" in text or "PATH_NOT_FOUND" in text or "does not exist" in text
 
 
+@builtin("UNREADABLE")
 def unreadable(cx: CauseContext, failure: Failure) -> Outcome:
     """CONFIRMED when a file of the failure has no readable header for the feed's file_format."""
     if cx.feed is None or cx.feed.landing is None:

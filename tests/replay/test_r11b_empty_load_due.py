@@ -10,20 +10,22 @@ from tests.fixtures.layers import CURATED_COLUMNS, GOLD_COLUMNS, create_table
 from tests.replay.conftest import REALTIME_DATASETS, latest, replay_conf
 
 CURATED = "datasets/example_curated_enrollment.yaml"
-CURATED_LOAD_TIME = ("load_time: null ", "load_time: { column: sourcelastupdatets, granularity: minute } ")
 PRESENCE = {"T1_ON_TIME", "T1_ZERO_ROWS"}
 
 
 def test_r11b_load_due_presence_checks_fail_row_checks_did_not_run(spark, tmp_path) -> None:
     replay = replay_conf(spark, tmp_path, "r11b", {
-        CURATED: [("key_unique: false", "key_unique: true"), CURATED_LOAD_TIME],
+        CURATED: [("key_unique: false", "key_unique: true")],
     })
     create_table(spark, replay.gold, GOLD_COLUMNS)
     create_table(spark, replay.curated, CURATED_COLUMNS)
 
     assert main(["run", "--conf", str(replay.conf)]) == 0  # FAILED checks still complete the run
     rows = [row for (ds, _), group in latest(spark, replay).items() if ds in REALTIME_DATASETS for row in group]
-    assert len(rows) == 21  # gold: 6 Tier 1 + HOP_KEY_CURRENCY + HOP_VALUE_AGREEMENT + 4 rules = 12; curated 6; table-wide 4; drift once per table
+    # gold: 7 Tier 1 (T1_FRESHNESS is configured in the sample) + HOP_KEY_CURRENCY + HOP_VALUE_AGREEMENT + HOP_LEDGER
+    # + T1_SOURCE_ATTRIBUTION (build step 5) + 4 rules = 15; curated 6; table-wide 4; drift once per table
+    assert len(rows) == 24
+    assert "HOP_LEDGER" in {r.check_id for r in rows}
     for row in rows:
         assert row.state != "PASSED", row
         if row.check_id in PRESENCE:

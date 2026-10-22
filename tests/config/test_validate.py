@@ -35,10 +35,10 @@ def test_sample_config_is_valid() -> None:
     assert set(config.datasets) == {"example_curated_enrollment", "gold_member_coverage", "gold_member_coverage_all",
                                     "provider_roster_raw", "provider_directory"}
     assert len(config.rules) == 6
-    # The curated load time column is not confirmed yet: reported, not an error.
-    # Not confirmed yet, so reported, not errors: the curated load time column, and the raw dataset.
+    # Reported, not errors: the default time zone observes daylight saving time (spec section 4)
+    # and the raw dataset is not confirmed yet. (Curated's load time column was confirmed on 2026-10-15.)
     assert [(Path(w.file).name, w.field) for w in warnings] == [
-        ("example_curated_enrollment.yaml", "load_time"), ("example_realtime.yaml", "datasets")]
+        ("defaults.yaml", "timezone"), ("example_realtime.yaml", "datasets")]
 
 
 def test_cli_validate_exit_codes(conf: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -72,7 +72,7 @@ CASES = [
     ("bad-identifier", GOLD, "key: [sub_id,", 'key: ["sub-id",', "key[0]", "key: [", "not a plain identifier", "letters"),
     ("bad-table", GOLD, "table: gold_db.member_coverage", "table: member_coverage", "table", "table:", "database>.<table", "database.table"),
     ("sql-semicolon", GOLD, "src_sys_nm = 'SRC_A'", "src_sys_nm = 'SRC_A'; DROP TABLE x", "feed_filter", "feed_filter", "';'", "single SQL expression"),
-    ("bad-normaliser", GOLD, "strip_leading_zeros", "trim", "key_normalise.sub_id", "key_normalise", "not allowed", "strip_leading_zeros"),
+    ("bad-normaliser", GOLD, "strip_leading_zeros", "reverse", "key_normalise.sub_id", "key_normalise", "not allowed", "strip_leading_zeros"),
     ("normalise-non-key", GOLD, "{ sub_id: strip", "{ src_sys_nm: strip", "key_normalise.src_sys_nm", "key_normalise", "not a key column", "key columns only"),
     ("unknown-dataset-in-feed", FEED, "datasets: [", "datasets: [missing_ds, ", "datasets[0]", "datasets: [", "unknown dataset", "datasets/missing_ds.yaml"),
     ("unknown-upstream", CURATED, "upstream: []", "upstream: [nowhere]", "upstream[0]", "upstream:", "unknown dataset", "datasets/nowhere.yaml"),
@@ -90,6 +90,8 @@ CASES = [
     ("dq-database-not-identifier", DEFAULTS, "dq_database: dq", "dq_database: dq.prod", "dq_database", "dq_database", "plain identifier", "plain identifier"),
     ("hmac-relative-path", DEFAULTS, "hmac_secret_file: null", "hmac_secret_file: secrets/key", "", "dq_database: dq", "absolute path", "outside the repository"),
     ("retention-missing-table", DEFAULTS, "  dq_file: 13\n", "", "", "dq_database: dq", "retention_months", "dq_file"),
+    ("commit-batch-zero", DEFAULTS, "commit_batch: 25", "commit_batch: 0", "commit_batch", "commit_batch", "greater than", ">= 1"),
+    ("commit-retention-short", DEFAULTS, "  dq_commit: 84", "  dq_commit: 12", "", "dq_database: dq", "shorter than a table it gates", "at least 84 months"),
     ("record-time-shorthand", GOLD, GOLD_RECORD_TIME, "record_time: src_lcts\n", "record_time", "record_time:", "expected a mapping", "key: value"),
     ("key-map-needs-record-time", GOLD, GOLD_RECORD_TIME, "", "record_time", "dataset: gold_member_coverage", "needs record_time", "add record_time"),
     ("upstream-needs-record-time", CURATED, CURATED_RECORD_TIME, "", "record_time", "dataset: example_curated_enrollment", "compares against this dataset", "add record_time"),
@@ -105,8 +107,8 @@ CASES = [
     ("negative-settle", DEFAULTS, "settle_minutes: 15", "settle_minutes: -5", "settle_minutes", "settle_minutes", "greater than", ">= 0"),
     ("table-wide-needs-version", TABLE_WIDE, "expectation_version: 1 ", "# ", "expectation_version", "dataset: gold_member_coverage_all", "needs an expectation_version", "expectation_version: 1"),
     ("feed-dataset-no-version", GOLD, "layer: GOLD\n", "layer: GOLD\nexpectation_version: 2\n", "expectation_version", "expectation_version: 2", "versions this dataset's checks", "bump the feed's"),
-    ("named-calendar-file", FEED, "calendar: EVERYDAY", "calendar: holidays.yaml", "cadence.calendar", "calendar: holidays.yaml", "named calendar file", "EVERYDAY or WEEKDAYS"),
-    ("winner-format-not-ordered", GOLD, 'order_by: ["sourcelastupdatets DESC", "enddate DESC"]', 'order_by: ["sourcelastupdatets DESC", "enddate DESC"]\n  formats: { startdate: yyyy-MM-dd }', "winner_rule.formats.startdate", "formats:", "not in winner_rule.order_by", "columns the winner rule orders by"),
+    ("unknown-calendar", FEED, "calendar: EVERYDAY", "calendar: holidays.yaml", "cadence.calendar", "calendar: holidays.yaml", "is not a calendar", "conf/calendars/holidays.yaml"),
+    ("winner-format-not-ordered", GOLD, "formats: { enddate: yyyy-MM-dd }", "formats: { enddate: yyyy-MM-dd, startdate: yyyy-MM-dd }", "winner_rule.formats.startdate", "formats:", "not in winner_rule.order_by", "columns the winner rule orders by"),
     ("hop-exclusion-not-upstream", GOLD, "winner_rule:", "hop_exclusions: { nowhere: \"x = 1\" }\nwinner_rule:", "hop_exclusions.nowhere", "hop_exclusions", "not an upstream in key_map", "upstreams this dataset's key_map maps"),
     ("bad-email", DEFAULTS, "dre-alerts@example.com", "dre-alerts", "recipients.membership-gold[0]", "membership-gold:", "email", "name@domain"),
 ]
@@ -204,3 +206,52 @@ def test_missing_load_time_warns_with_checks(conf: Path, capsys: pytest.CaptureF
     assert "NOT_RUN, OLDER_VERSION_WRITTEN_LATER" in warning.problem  # gold has a key_map
     assert main(["validate", "--conf", str(conf)]) == 0  # warnings do not fail validation
     assert "warning: load_time is not set" in capsys.readouterr().out
+
+
+def test_partitioning_fields_are_checked(conf: Path) -> None:
+    """partition_format needs partition_column and a pattern the engine can list partitions with;
+    a partition_column without a format is a warning (it prunes nothing)."""
+    edit(conf, GOLD, "partition_format: null", "partition_format: yyyy-MM-dd")
+    _, errors, _ = validate_conf(conf)
+    error = _find(errors, conf / GOLD, "partition_format")
+    assert "partition_format needs partition_column" in error.problem and "partition_column" in error.fix
+    edit(conf, GOLD, "partition_column: null", "partition_column: load_dt")
+    edit(conf, GOLD, "partition_format: yyyy-MM-dd", "partition_format: yyyy-MM")
+    _, errors, _ = validate_conf(conf)
+    error = _find(errors, conf / GOLD, "partition_format")
+    assert "cannot be used to list partitions" in error.problem and "yyyy-MM-dd" in error.fix
+    edit(conf, GOLD, "partition_format: yyyy-MM", "partition_format: null")
+    _, errors, warnings = validate_conf(conf)
+    [warning] = [w for w in warnings if "partition_column" in w.problem]
+    assert "prunes nothing" in warning.problem and "partition_format" in warning.fix and errors == []
+    edit(conf, GOLD, "partition_format: null", "partition_format: yyyy-MM-dd")
+    _, errors, warnings = validate_conf(conf)
+    assert not [e for e in errors + warnings if "partition" in e.problem]
+
+
+def test_winner_rule_terms_and_dst_zones_are_warned_about(conf: Path) -> None:
+    """A winner_rule term that is neither an upstream time column nor in formats orders as stored
+    (a string date lexicographically); a DST zone on defaults.timezone is ambiguous one hour a year."""
+    _, errors, warnings = validate_conf(conf)
+    assert errors == []
+    assert not [w for w in warnings if "ordered as it is stored" in w.problem]  # the sample gives enddate a format
+    [dst] = [w for w in warnings if "daylight saving" in w.problem]
+    assert dst.field == "timezone" and "fall-back" in dst.fix
+    edit(conf, GOLD, "  formats: { enddate: yyyy-MM-dd }", "")
+    _, errors, warnings = validate_conf(conf)
+    [plain] = [w for w in warnings if "ordered as it is stored" in w.problem]
+    assert "'enddate'" in plain.problem and "winner_rule.formats" in plain.fix and errors == []
+    edit(conf, "defaults.yaml", "timezone: America/Chicago", "timezone: UTC")
+    _, _, warnings = validate_conf(conf)
+    assert not [w for w in warnings if "daylight saving" in w.problem]
+
+
+def test_partition_drift_configured_without_partitioning_is_a_warning(conf: Path) -> None:
+    """Release 4: T1_PARTITION_DRIFT needs partition_column and partition_format; without them it is
+    DID_NOT_RUN / invalid_config at run time, so dre validate says so up front."""
+    edit(conf, "datasets/provider_directory.yaml",
+         "partition_column: merge_dt        # the merge's UTC date\npartition_format: yyyy-MM-dd\n", "")
+    _, errors, warnings = validate_conf(conf)
+    assert errors == []
+    found = [w for w in warnings if Path(w.file).name == "provider_directory.yaml" and w.field == "check_params"]
+    assert len(found) == 1 and "T1_PARTITION_DRIFT" in found[0].problem and "set both" in found[0].fix

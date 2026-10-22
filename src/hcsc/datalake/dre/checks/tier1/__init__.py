@@ -1,1 +1,1 @@
-"""Tier 1 checks, one module per check (build step 5)."""
+"""Tier 1 checks, one module per check; each registers itself."""

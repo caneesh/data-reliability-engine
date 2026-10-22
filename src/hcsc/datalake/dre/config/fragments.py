@@ -1,8 +1,9 @@
 """Parse SQL fragments from config against Spark (`dre dry-run`).
 
 `dre validate` only rejects `;`. Here `feed_filter` and rule `open_when` are
-resolved against their dataset's table, and `hop_exclusions` against the upstream's
-table (columns must exist), and probe
+resolved against their dataset's table, `hop_exclusions` and a contract's exclusion and
+tombstone conditions against the upstream's table, a contract's `soft_when` against the
+dataset's own (columns must exist), and probe
 conditions (`table_contains`) are parsed for syntax. Nothing is
 executed: Spark analyses each query when it is built. Problems are reported
 with file, line and field, like validate errors.
@@ -68,6 +69,22 @@ def check_fragments(spark: SparkSession, config: Config, feed_id: str | None = N
                     resolves(up.table, condition)
                 except Exception as exc:
                     report("dataset", ds_id, ("hop_exclusions", up_id), "hop_exclusions", exc)
+        for up_id, contract in ds.contracts.items():  # contract conditions: over the upstream, soft_when over here
+            up = config.datasets.get(up_id)
+            up_ok = up is not None and up.table is not None and table_ok(up.table)
+            checks = [(("contracts", up_id, "exclusions", i, "condition"), e.condition, up_ok, up)
+                      for i, e in enumerate(contract.exclusions)]
+            if contract.deletion is not None:
+                checks.append((("contracts", up_id, "deletion", "tombstone"), contract.deletion.tombstone, up_ok, up))
+                if contract.deletion.soft_when:
+                    checks.append((("contracts", up_id, "deletion", "soft_when"), contract.deletion.soft_when,
+                                   table_ok(ds.table), ds))
+            for loc, expression, ok, where in checks:
+                if ok:
+                    try:
+                        resolves(where.table, expression)
+                    except Exception as exc:
+                        report("dataset", ds_id, loc, loc[-1], exc)
     for rule_id, rule in config.rules.items():
         open_when = rule.params.get("open_when")
         ds = config.datasets.get(rule.dataset)
@@ -76,6 +93,21 @@ def check_fragments(spark: SparkSession, config: Config, feed_id: str | None = N
                 resolves(ds.table, open_when)
             except Exception as exc:
                 report("rule", rule_id, ("params", "open_when"), "open_when", exc)
+    from hcsc.datalake.dre.checks.rules.template import TEMPLATES
+
+    for rule_id, rule in config.rules.items():  # rules on conf templates: the whole rendered query is analysed
+        ds = config.datasets.get(rule.dataset)
+        if rule.template not in config.templates or ds is None or not table_ok(ds.table) \
+                or (feed_id is not None and ds.dataset not in dataset_ids):
+            continue
+        spec = TEMPLATES[rule.template]
+        try:
+            params = spec.params_model.model_validate(rule.params)
+            sql = spec.sql(table=ds.table, feed_filter=ds.feed_filter, group_by=rule.group_by,
+                           **spec.arguments(ds, params, {}))
+            spark.sql(f"SELECT * FROM ({sql}) q LIMIT 0")
+        except Exception as exc:
+            report("rule", rule_id, ("template",), f"template {rule.template}", exc)
     for feed in feeds:
         for key, raw in feed.probes.items():
             many = isinstance(raw, list)

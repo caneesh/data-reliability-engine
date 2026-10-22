@@ -21,13 +21,19 @@ def counts(spark, dq: str) -> tuple[int, int]:
 def test_run_writes_results_and_windows_follow_on(spark, tmp_path, capsys) -> None:
     # Curated has no load time in the sample config, so gold's hop checks are DID_NOT_RUN /
     # invalid_config. A CONFIGURATION reason never holds a window (spec section 4): gold's moves on.
-    replay = replay_conf(spark, tmp_path, "runner_a")
+    # Curated without a load time, so the hop checks have a CONFIGURATION reason to report (below).
+    replay = replay_conf(spark, tmp_path, "runner_a", {"datasets/example_curated_enrollment.yaml": [
+        ('load_time: { column: cdc_upd_ts, format: "yyyy-MM-dd HH:mm:ss:SSSSSS", granularity: minute }',
+         "load_time: null")]})
     create_table(spark, replay.gold, GOLD_COLUMNS, [gold_row(), gold_row()])  # one duplicated key
     create_table(spark, replay.curated, CURATED_COLUMNS, [curated_row()])
 
     assert main(["run", "--conf", str(replay.conf)]) == 0  # FAILED checks still exit 0
     out = capsys.readouterr().out
-    assert "gold_member_coverage T1_KEY_DUPLICATES [src_sys_nm=SRC_A]: FAILED (population 1, violations 1)" in out
+    # A group's value is data (hard rule 6): the log names the column and the group's place, never the value.
+    assert "gold_member_coverage T1_KEY_DUPLICATES [src_sys_nm #1]: FAILED (population 1, violations 1)" in out
+    assert "=SRC_A" not in out and "SRC_A]" not in out
+    assert "HOP_KEY_CURRENCY [upstream=example_curated_enrollment]" in out  # a dataset id, not data
     rows = {r.dataset: r for r in spark.table(f"{replay.dq}.dq_check_result").collect()
             if r.check_id == "T1_KEY_DUPLICATES"}
     first = rows["gold_member_coverage"]
@@ -45,8 +51,10 @@ def test_run_writes_results_and_windows_follow_on(spark, tmp_path, capsys) -> No
 
     # Every check on a dataset in one run shares the same event (the window is fixed before any write).
     gold_run1 = [r for r in spark.table(f"{replay.dq}.dq_check_result").collect() if r.dataset == "gold_member_coverage"]
-    # 12 checks (6 Tier 1, 2 hop, 4 rules); schema drift for this table runs under the table-wide dataset.
-    assert len(gold_run1) == 11
+    # 15 checks (7 Tier 1 with T1_FRESHNESS, 3 hop, 4 rules, T1_SOURCE_ATTRIBUTION: gold is a union_partition
+    # target); schema drift for this table runs under the table-wide dataset.
+    assert len(gold_run1) == 14
+    assert "HOP_LEDGER" in {r.check_id for r in gold_run1}
     assert {(r.event_id, r.window_start, r.window_end) for r in gold_run1} == {
         (first.event_id, first.window_start, first.window_end)}
 
@@ -61,7 +69,8 @@ def test_run_writes_results_and_windows_follow_on(spark, tmp_path, capsys) -> No
     # The CONFIGURATION problem is reported again on every run.
     hops = [(r.check_id, r.reason_code) for r in spark.table(f"{replay.dq}.dq_check_result").collect()
             if r.run_id != run1.run_id and r.dataset == "gold_member_coverage" and r.check_id.startswith("HOP_")]
-    assert sorted(hops) == [("HOP_KEY_CURRENCY", "invalid_config"), ("HOP_VALUE_AGREEMENT", "invalid_config")]
+    assert sorted(hops) == [("HOP_KEY_CURRENCY", "invalid_config"), ("HOP_LEDGER", "invalid_config"),
+                            ("HOP_VALUE_AGREEMENT", "invalid_config")]
 
 
 def test_replay_runs_do_not_move_the_window(spark, tmp_path) -> None:
@@ -89,7 +98,7 @@ def test_dry_run_prints_results_and_writes_nothing(spark, tmp_path, capsys) -> N
     before = counts(spark, replay.dq)
     assert main(["dry-run", "--conf", str(replay.conf), "--feed", "example_realtime"]) == 0
     out = capsys.readouterr().out
-    assert "gold_member_coverage T1_KEY_DUPLICATES [src_sys_nm=SRC_A]: PASSED" in out
+    assert "gold_member_coverage T1_KEY_DUPLICATES [src_sys_nm #1]: PASSED" in out
     assert "nothing written" in out
     assert counts(spark, replay.dq) == before
 
@@ -124,6 +133,24 @@ def test_fragment_checks_cover_open_when_and_filter_rule_syntax(spark, tmp_path)
     assert set(problems) == {"params.open_when", "probes.filter_rules[0].condition"}
     assert problems["params.open_when"].file.endswith("one_open_row_per_coverage.yaml")
     assert "ParseException" in problems["probes.filter_rules[0].condition"].problem
+
+
+def test_fragment_checks_resolve_a_contract_s_conditions(spark, tmp_path) -> None:
+    """dre dry-run resolves a contract's tombstone against the upstream's table and soft_when against
+    the dataset's own; the sample's (a soft void) resolve, a misspelt column does not."""
+    from hcsc.datalake.dre.config.fragments import check_fragments
+    from hcsc.datalake.dre.config.validate import validate_conf
+
+    replay = replay_conf(spark, tmp_path, "runner_contract", {
+        GOLD: [("to_date(enddate, 'yyyy-MM-dd')", "to_date(end_dt, 'yyyy-MM-dd')")],
+    })
+    create_table(spark, replay.gold, GOLD_COLUMNS, [gold_row()])
+    create_table(spark, replay.curated, CURATED_COLUMNS, [curated_row()])
+    config, errors, _ = validate_conf(replay.conf)
+    assert errors == []
+    problems = {p.field: p for p in check_fragments(spark, config, "example_realtime")}
+    assert set(problems) == {"contracts.example_curated_enrollment.deletion.tombstone"}
+    assert "UNRESOLVED_COLUMN" in problems["contracts.example_curated_enrollment.deletion.tombstone"].problem
 
 
 def test_schema_drift_runs_once_per_physical_table(spark, tmp_path) -> None:
@@ -290,7 +317,7 @@ def test_the_full_sweep_runs_once_on_its_day_not_in_every_run() -> None:
 def test_weekly_rules_use_rule_weekly_day_when_set(monkeypatch, tmp_path) -> None:
     import shutil
 
-    from hcsc.datalake.dre.checks.rules import schedule
+    from hcsc.datalake.dre import runner
     from hcsc.datalake.dre.config.loader import load
     from hcsc.datalake.dre.runner import plan_rules, rules_due
     from tests.conftest import REPO_ROOT
@@ -302,42 +329,53 @@ def test_weekly_rules_use_rule_weekly_day_when_set(monkeypatch, tmp_path) -> Non
                         encoding="utf-8")
     config, _ = load(conf)
     days = []
-    monkeypatch.setattr(schedule, "last_completed", lambda spark, db: {})
-    monkeypatch.setattr(schedule, "is_due", lambda freq, start, at, tz, day, done: days.append(day) or True)
+    monkeypatch.setattr(runner, "last_completed", lambda spark, db, since=None: {})
+    monkeypatch.setattr(runner, "is_due", lambda freq, start, at, tz, day, done: days.append(day) or True)
     rules_due(None, config, plan_rules(config), datetime(2026, 1, 16, tzinfo=timezone.utc))
     assert set(days) == {"MONDAY"}
 
 
 def test_a_failed_key_event_write_makes_the_run_partial_and_the_result_is_still_explained(
         spark, tmp_path, monkeypatch, capsys) -> None:
-    """Review finding 4: a result is written only when its key events are too; a stored result is
-    still explained."""
+    """Review finding 4, under the commit protocol (ADR-07): a result is written only when its key
+    events are; the evaluation whose key events fail publishes an evidence_incomplete marker instead,
+    and the run is PARTIAL. Every other result is stored, published and explained."""
     from hcsc.datalake.dre import runner
+    from tests.replay.test_r04_to_r07_hops import setup
 
-    replay = replay_conf(spark, tmp_path, "runner_key_events")
+    replay = setup(spark, tmp_path, "runner_key_events")  # with the HMAC secret: the hop writes key events
     create_table(spark, replay.gold, GOLD_COLUMNS, [gold_row()])
     create_table(spark, replay.curated, CURATED_COLUMNS, [curated_row()])
-    explained: list[int] = []
+    explained: list[tuple[str, int]] = []
     real_explain = runner.explain_failures
 
     def failing_write(*args, **kwargs):
         raise OSError("synthetic write failure")
 
     def spy(spark_, config, evaluation, rows, run, *rest):
-        explained.append(len(rows))
+        explained.append((evaluation.planned.check.check_id, len(rows)))
         return real_explain(spark_, config, evaluation, rows, run, *rest)
 
     monkeypatch.setattr(runner, "write_key_events", failing_write)
     monkeypatch.setattr(runner, "explain_failures", spy)
     assert main(["run", "--conf", str(replay.conf)]) == 2
     [final] = [r for r in spark.table(f"{replay.dq}.dq_run").collect() if r.status != "STARTED"]
-    assert (final.status, final.checks_written) == ("PARTIAL", 0)
-    assert spark.table(f"{replay.dq}.dq_check_result").count() == final.checks_expected  # every result stored
-    assert explained and all(n > 0 for n in explained)  # each with its rows, so causes can be written
+    # The mock fails every evidence write: HOP_KEY_CURRENCY's key events and HOP_LEDGER's ledger lines (step 3).
+    # Each of those evaluations publishes a marker instead of its result, and only they are short.
+    for check in ("HOP_KEY_CURRENCY", "HOP_LEDGER"):
+        hop_rows = [r for r in spark.table(f"{replay.dq}.dq_check_result").collect()
+                    if (r.dataset, r.check_id) == ("gold_member_coverage", check)]
+        assert [(r.state, r.reason_code) for r in hop_rows] == [("DID_NOT_RUN", "evidence_incomplete")], check
+    assert final.status == "PARTIAL" and final.checks_written == final.checks_expected - 2
+    published = spark.table(f"{replay.dq}.v_committed_result").count()
+    assert published == spark.table(f"{replay.dq}.dq_check_result").count()  # everything stored is published
+    others = [n for check, n in explained if check != "HOP_KEY_CURRENCY"]
+    assert others and all(n > 0 for n in others)  # each stored result with its rows, so causes can be written
 
 
-def test_a_planning_error_ends_the_run_failed(spark, tmp_path, monkeypatch) -> None:
-    """Review finding 18: plan() raising after the STARTED row still writes a final FAILED row."""
+def test_a_planning_error_ends_the_run_failed(spark, tmp_path, monkeypatch, capsys) -> None:
+    """Review finding 18: plan() raising after the STARTED row still writes a final FAILED row, and
+    the log says so: a start line with the run id, and a FAILED summary naming the exception type."""
     from hcsc.datalake.dre import runner
 
     replay = replay_conf(spark, tmp_path, "runner_plan_error")
@@ -349,3 +387,76 @@ def test_a_planning_error_ends_the_run_failed(spark, tmp_path, monkeypatch) -> N
     assert main(["run", "--conf", str(replay.conf)]) == 2
     [run] = spark.table(f"{replay.dq}.v_latest_run").collect()
     assert run.status == "FAILED"
+    out = capsys.readouterr().out
+    assert f"dre run: started {run.run_id} (NORMAL run" in out
+    assert f"dre run: FAILED, 0 of 0 checks written (NORMAL run {run.run_id}): ValueError" in out
+    assert "synthetic planning error" not in out  # the type, never the message
+
+
+def test_a_failing_retry_of_pending_investigations_does_not_fail_the_run(spark, tmp_path, monkeypatch, capsys) -> None:
+    from hcsc.datalake.dre import runner
+
+    replay = replay_conf(spark, tmp_path, "runner_retry_error")
+    create_table(spark, replay.gold, GOLD_COLUMNS, [gold_row()])
+    create_table(spark, replay.curated, CURATED_COLUMNS, [curated_row()])
+
+    def broken(*args, **kwargs):
+        raise OSError("synthetic store failure")
+
+    monkeypatch.setattr(runner, "pending_investigations", broken)
+    assert main(["run", "--conf", str(replay.conf)]) == 0
+    [run] = spark.table(f"{replay.dq}.v_latest_run").collect()
+    assert run.status == "COMPLETED"
+    assert "pending cause investigations not retried (OSError); the next run retries them" in capsys.readouterr().out
+
+
+def test_a_normal_run_in_progress_refuses_a_second_one(spark, tmp_path, capsys) -> None:
+    """Two NORMAL runs at once would evaluate the same windows and store everything twice. A run
+    whose latest row is STARTED within watchdog_grace_minutes blocks; an older one is dead."""
+    from hcsc.datalake.dre.store import runs
+
+    replay = replay_conf(spark, tmp_path, "runner_in_progress")
+    create_table(spark, replay.gold, GOLD_COLUMNS, [gold_row()])
+    create_table(spark, replay.curated, CURATED_COLUMNS, [curated_row()])
+    live = runs.start_run(spark, replay.dq, now=datetime.now(timezone.utc) - timedelta(minutes=5))
+    assert main(["run", "--conf", str(replay.conf)]) == 3
+    out = capsys.readouterr().out
+    assert f"dre run: a NORMAL run is in progress (run {live.run_id}" in out
+    assert [r.run_id for r in spark.table(f"{replay.dq}.dq_run").collect()] == [live.run_id]  # nothing written
+    # A RERUN does not write key events or files, and does not block on it.
+    assert main(["run", "--conf", str(replay.conf), "--execution-type", "RERUN", "--window-start", "2026-01-15T00:00",
+                 "--window-end", "2026-01-15T01:00"]) == 0
+    runs.finish_run(spark, replay.dq, live, 1, 1)
+    dead = runs.start_run(spark, replay.dq, now=datetime.now(timezone.utc) - timedelta(minutes=31))  # past the grace
+    assert main(["run", "--conf", str(replay.conf)]) == 0
+    statuses = {r.run_id: r.status for r in spark.table(f"{replay.dq}.v_latest_run").collect()}
+    assert statuses[dead.run_id] == "STARTED" and statuses[live.run_id] == "COMPLETED"
+    assert sorted(statuses.values()).count("COMPLETED") == 3  # the RERUN, the finished one, the new NORMAL run
+
+
+def test_results_older_than_the_history_lookback_do_not_move_the_window(spark, tmp_path) -> None:
+    """history_lookback_days bounds the hourly store reads by run_date; a dataset whose last NORMAL
+    result is older than that windows as on a first run (initial_lookback_hours)."""
+    from hcsc.datalake.dre.checks.events import history_sql
+
+    replay = replay_conf(spark, tmp_path, "runner_lookback", {"defaults.yaml": [
+        ("max_window_hours: 72", "max_window_hours: 24"),
+        ("investigation_retry_days: 7", "investigation_retry_days: 1"),
+        ("history_lookback_days: 400", "history_lookback_days: 2")]})
+    create_table(spark, replay.gold, GOLD_COLUMNS, [gold_row()])
+    create_table(spark, replay.curated, CURATED_COLUMNS, [curated_row()])
+    now = datetime.now(timezone.utc)
+    old_end = (now - timedelta(days=5)).replace(second=0, microsecond=0)
+    append_rows(spark, replay.dq, "dq_check_result", [{
+        "evaluation_id": "old-eval", "run_id": "old-run", "event_id": "old-event", "window_start": old_end - timedelta(hours=1),
+        "window_end": old_end, "execution_type": "NORMAL", "dataset": "gold_member_coverage", "check_id": "T1_KEY_NULLS",
+        "expectation_version": 1, "state": "PASSED", "evaluated_at": old_end, "run_date": old_end.date()}])
+    assert previous_window_end(spark, replay.dq, "gold_member_coverage") == old_end  # unbounded: it is there
+    assert main(["run", "--conf", str(replay.conf), "--feed", "example_realtime"]) == 0
+    [run] = [r for r in spark.table(f"{replay.dq}.v_latest_run").collect() if r.run_id != "old-run"]
+    nulls = [r for r in spark.table(f"{replay.dq}.dq_check_result").collect()
+             if r.check_id == "T1_KEY_NULLS" and r.dataset == "gold_member_coverage" and r.run_id == run.run_id]
+    end = (run.started_at - timedelta(minutes=15)).replace(second=0, microsecond=0)
+    assert [(r.window_start, r.window_end) for r in nulls] == [(end - timedelta(hours=24), end)]
+    plan = spark.sql("EXPLAIN FORMATTED " + history_sql(replay.dq, ["gold_member_coverage"], now.date())).collect()[0][0]
+    assert "PartitionFilters: [" in plan and "run_date" in plan.split("PartitionFilters: [", 1)[1].split("]", 1)[0]

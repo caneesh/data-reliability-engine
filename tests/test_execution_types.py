@@ -55,7 +55,10 @@ def run_types(spark, replay) -> dict[str, str]:
 
 
 def test_a_rerun_re_evaluates_a_historical_window_idempotently(spark, tmp_path) -> None:
-    replay = setup(spark, tmp_path, "rerun")  # R05: gold holds an older version of the key
+    # R05: gold holds an older version of the key. (A RERUN names one window for every dataset, and
+    # the named bounds match a dataset's NORMAL window only at that dataset's granularity: the
+    # sample gives curated and gold the same, minute.)
+    replay = setup(spark, tmp_path, "rerun")
     opened, terminated = curated_load_time(30), curated_load_time(12)
     create_table(spark, replay.curated, CURATED_COLUMNS,
                  [curated_row(updated=opened), curated_row(end="2026-06-30", updated=terminated)])
@@ -137,3 +140,61 @@ def test_a_replay_covers_a_historical_range_idempotently(spark, tmp_path, capsys
     assert main(["run", "--conf", str(replay.conf), "--execution-type", "REPLAY"]) == 3  # needs the range
     assert main(["run", "--conf", str(replay.conf), "--execution-type", "RERUN",
                  "--from", start.isoformat(), "--to", normal.window_end.isoformat()]) == 3
+
+
+def test_stored_outcomes_are_read_by_dataset_and_span(spark) -> None:
+    """RERUN and REPLAY compare with the stored outcomes read by dataset and the span the events
+    cover (one predicate however many events), kept for the jobs' event ids only."""
+    from datetime import datetime, timezone
+
+    from hcsc.datalake.dre.checks.events import Event
+    from hcsc.datalake.dre.checks.tier1.key_nulls import KeyNulls
+    from hcsc.datalake.dre.config.models import Dataset
+    from hcsc.datalake.dre.runner import Planned, stored_outcomes
+    from hcsc.datalake.dre.store.local_setup import create_store
+    from tests.store.conftest import append_rows
+
+    create_store(spark, "dq_outcomes")
+    at = datetime(2026, 1, 15, 12, tzinfo=timezone.utc)
+    inside = Event("gold", at, at + timedelta(hours=1))
+    other = Event("other", at, at + timedelta(hours=1))
+    outside = Event("gold", at + timedelta(days=2), at + timedelta(days=2, hours=1))
+    append_rows(spark, "dq_outcomes", "dq_check_result", [
+        {"evaluation_id": "in", "run_id": "r1", "event_id": inside.event_id, "dataset": "gold", "check_id": "T1_KEY_NULLS",
+         "window_start": inside.window_start, "window_end": inside.window_end, "state": "PASSED", "evaluated_at": at,
+         "run_date": at.date()},
+        {"evaluation_id": "in", "run_id": "r2", "event_id": inside.event_id, "dataset": "gold", "check_id": "T1_KEY_NULLS",
+         "window_start": inside.window_start, "window_end": inside.window_end, "state": "FAILED", "evaluated_at": at + timedelta(hours=2),
+         "run_date": at.date()},
+        {"evaluation_id": "other", "run_id": "r1", "event_id": other.event_id, "dataset": "other", "check_id": "T1_KEY_NULLS",
+         "window_start": other.window_start, "window_end": other.window_end, "state": "PASSED", "evaluated_at": at,
+         "run_date": at.date()},
+        {"evaluation_id": "out", "run_id": "r1", "event_id": outside.event_id, "dataset": "gold", "check_id": "T1_KEY_NULLS",
+         "window_start": outside.window_start, "window_end": outside.window_end, "state": "PASSED", "evaluated_at": at,
+         "run_date": at.date()}])
+    gold = Dataset(dataset="gold", table="x.gold", layer="GOLD", key=["k"])
+    jobs = [(Planned(None, gold, KeyNulls()), inside)]
+    found = stored_outcomes(spark, "dq_outcomes", jobs)
+    assert set(found) == {"in"} and found["in"][0] == "FAILED"  # the latest row; other datasets and spans left out
+    assert stored_outcomes(spark, "dq_outcomes", []) == {}
+
+
+def test_a_recheck_keeps_one_source_attribution_per_table_and_window() -> None:
+    """T1_SOURCE_ATTRIBUTION gives one result per target per window (build step 5): a RERUN or REPLAY
+    plans the datasets sharing a table one by one, so the duplicates are dropped there too."""
+    from types import SimpleNamespace
+
+    from hcsc.datalake.dre.runner import once_per_table_window
+
+    def job(ds: str, table: str, check: str, hour: int):
+        planned = SimpleNamespace(dataset=SimpleNamespace(dataset=ds, table=table),
+                                  check=SimpleNamespace(check_id=check))
+        return planned, Event(ds, at(hour), at(hour + 1))
+
+    jobs = [job("gold_a", "gold_db.member_coverage", "T1_SOURCE_ATTRIBUTION", 1),
+            job("gold_b", "gold_db.member_coverage", "T1_SOURCE_ATTRIBUTION", 1),  # same table, same window
+            job("gold_b", "gold_db.member_coverage", "T1_SOURCE_ATTRIBUTION", 2),  # another window
+            job("gold_b", "gold_db.member_coverage", "HOP_LEDGER", 1)]
+    kept = once_per_table_window(jobs, "T1_SOURCE_ATTRIBUTION")
+    assert [(p.dataset.dataset, p.check.check_id, e.window_start.hour) for p, e in kept] == [
+        ("gold_a", "T1_SOURCE_ATTRIBUTION", 1), ("gold_b", "T1_SOURCE_ATTRIBUTION", 2), ("gold_b", "HOP_LEDGER", 1)]

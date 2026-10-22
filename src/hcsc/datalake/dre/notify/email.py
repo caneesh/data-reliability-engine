@@ -1,6 +1,7 @@
-"""Send digests by SMTP (spec section 8). Standard library only: no runtime service of our own.
+"""Send one plain-text message by SMTP (spec section 8), for the email sink (notify/sinks.py).
+Standard library only: no runtime service of our own.
 
-With email.smtp_host unset the digests are built but not sent, and the caller is told so.
+With email.smtp_host unset the message is not sent, and the caller is told so.
 Nothing is logged but the owner, the recipient count and the subject (counts and codes only).
 """
 
@@ -13,7 +14,6 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from hcsc.datalake.dre.config.models import EmailServer
-    from hcsc.datalake.dre.notify.digest import Digest
 
 log = logging.getLogger(__name__)
 
@@ -41,7 +41,3 @@ def send_text(owner: str, subject: str, body: str, recipients: list[str], server
         return f"email for {owner}: not sent ({type(exc).__name__})"
     return f"email for {owner}: {subject} (sent to {len(recipients)})"
 
-
-def send(digests: list[Digest], server: EmailServer) -> list[str]:
-    """Send each digest; return one status line per digest."""
-    return [send_text(d.owner, d.subject, d.text(), d.recipients, server) for d in digests]

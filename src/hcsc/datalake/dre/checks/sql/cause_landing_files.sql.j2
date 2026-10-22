@@ -2,16 +2,23 @@
    it has been seen with (size_changed), and its raw rows matched on base file name (when the
    feed has a raw dataset with a file_name_column). #}
 WITH files AS (
+  -- every dq_file row carries the file's first_seen_at, so rows from the partitions since the bound
+  -- are enough to know it; files first seen before the bound cannot matter to these failures
   SELECT path, MIN(first_seen_at) AS first_seen_at, COUNT(DISTINCT size_bytes) AS sizes
   FROM {{ dq_database }}.dq_file
-  WHERE feed = '{{ feed }}'
+  WHERE feed = '{{ feed }}'{% if since_date %} AND run_date >= DATE'{{ since_date }}'{% endif %}
+
   GROUP BY path
+{% if since %}
+  HAVING MIN(first_seen_at) >= {{ since }}
+{% endif %}
 ){% if raw_table %},
 raw_files AS (
   SELECT regexp_extract({{ file_name_column }}, '([^/]+)$', 1) AS file_name, COUNT(*) AS raw_rows
   FROM {{ raw_table }}
+  WHERE regexp_extract({{ file_name_column }}, '([^/]+)$', 1) IN (SELECT regexp_extract(path, '([^/]+)$', 1) FROM files)
 {% if feed_filter %}
-  WHERE {{ feed_filter }}
+    AND ({{ feed_filter }})
 {% endif %}
   GROUP BY regexp_extract({{ file_name_column }}, '([^/]+)$', 1)
 ){% endif %}

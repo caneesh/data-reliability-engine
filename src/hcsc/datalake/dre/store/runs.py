@@ -11,11 +11,12 @@ from __future__ import annotations
 import subprocess
 import uuid
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from hcsc.datalake.dre import __version__
+from hcsc.datalake.dre.checks.times import as_utc
 from hcsc.datalake.dre.store import writer
 from hcsc.datalake.dre.store.names import validate_dq_database
 
@@ -81,6 +82,21 @@ def start_run(
     run = new_run(conf_dir, now, execution_type)
     _append(spark, dq_database, run, None, STARTED, None, None)
     return run
+
+
+def in_progress(spark: SparkSession, dq_database: str, now: datetime,
+                grace_minutes: int) -> tuple[str, datetime] | None:
+    """The NORMAL run whose latest row is still STARTED and that started within the last
+    grace_minutes, as (run_id, started_at); None when there is none. An older STARTED run died
+    (the watchdog reports it) and does not block the next run."""
+    validate_dq_database(dq_database)
+    since = as_utc(now) - timedelta(minutes=grace_minutes)
+    rows = spark.sql(
+        f"SELECT run_id, started_at FROM {dq_database}.v_latest_run "
+        f"WHERE status = '{STARTED}' AND execution_type = 'NORMAL' "
+        f"AND started_at >= TIMESTAMP '{since:%Y-%m-%d %H:%M:%S.%f}' ORDER BY started_at DESC LIMIT 1"
+    ).collect()
+    return None if not rows else (rows[0].run_id, as_utc(rows[0].started_at))
 
 
 def finish_run(

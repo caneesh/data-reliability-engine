@@ -20,6 +20,7 @@ from hcsc.datalake.dre.checks.hop.file_completeness import FileCompleteness
 from hcsc.datalake.dre.checks.hop.key_currency import KeyCurrency
 from hcsc.datalake.dre.checks.hop.value_agreement import ValueAgreement
 from hcsc.datalake.dre.config.models import Dataset, TimeColumn
+from hcsc.datalake.dre.store.commits import Commit, append_commits
 from hcsc.datalake.dre.store.key_events import append_key_events
 from hcsc.datalake.dre.store.local_setup import create_store
 from tests.fixtures.layers import CURATED_COLUMNS, GOLD_COLUMNS, create_table, curated_row, gold_row
@@ -61,10 +62,12 @@ def gold(table: str, dataset: str = "gold", **extra) -> Dataset:
 
 
 def run(spark, check, ds: Dataset, up: Dataset | None, event: Event = EVENT, secret: bytes | None = None,
-        full_sweep: bool = False):
+        full_sweep: bool = False, history_since: date | None = None, datasets: list[Dataset] | None = None):
+    """datasets: other configured datasets the check may look across (a union's siblings)."""
     upstreams = {up.dataset: up} if up is not None else {}
+    known = {d.dataset: d for d in [ds, *(datasets or [])]}
     ctx = CheckContext(spark, ds, None, SETTINGS, "UTC", DQ, upstreams=upstreams, key_secret=secret,
-                       full_sweep=full_sweep)
+                       full_sweep=full_sweep, history_since=history_since, datasets=known)
     results, _ = run_check(check, ctx, event)
     return results
 
@@ -81,8 +84,10 @@ def events_of(result) -> list[tuple[str, str, str, str | None]]:
 
 def record(spark, result, ds: Dataset, run_id: str, observed: datetime) -> None:
     hop = hop_label(result.group_values["upstream"], ds.dataset)
-    append_key_events(result.key_events, DQ, run_id, f"eval-{run_id}-{hop}", ds.dataset, "HOP_KEY_CURRENCY",
-                      hop, observed, observed.date())
+    n = append_key_events(result.key_events, DQ, run_id, f"eval-{run_id}-{hop}", ds.dataset, "HOP_KEY_CURRENCY",
+                          hop, observed, observed.date())
+    append_commits(spark, DQ, [Commit(run_id, f"eval-{run_id}-{hop}", ds.dataset, "HOP_KEY_CURRENCY", 1,
+                                      key_event_rows=n)], observed, observed.date())  # ADR-07: published
 
 
 # --- HOP_KEY_CURRENCY ---
@@ -229,7 +234,8 @@ def test_one_broken_hop_does_not_hide_the_others(spark, check) -> None:
     results = run_hops(spark, check, dn, [a, b])
     assert results["curated_a"].state in ("FAILED", "DID_NOT_RUN")
     assert results["curated_a"].reason_code != "table_missing"
-    assert (results["curated_b"].state, results["curated_b"].reason_code) == ("DID_NOT_RUN", "table_missing")
+    assert (results["curated_b"].state, results["curated_b"].reason_code) == ("DID_NOT_RUN", "table_missing"), (
+        results["curated_b"].detail)
 
 
 def test_full_sweep_clears_keys_no_longer_upstream(spark) -> None:
@@ -441,3 +447,116 @@ def test_file_completeness_reports_what_it_excluded_and_what_is_pending(spark) -
                           "1 row excluded by hop_exclusions, 1 file pending (within sla_hours)")
     [plain] = run(spark, FileCompleteness(), dn, up)
     assert (plain.state, plain.violations) == ("FAILED", 1)  # without the contract, the test row looks lost
+
+
+def test_the_hop_s_checkpoints_are_released_with_its_views(spark) -> None:
+    """HOP_KEY_CURRENCY materialises its judgement and its events as local checkpoints; the runner
+    releases both with the temp view, so the blocks do not live until the session ends."""
+    from hcsc.datalake.dre.runner import Evaluation, Planned, drop_judged_views
+
+    def persisted() -> set[int]:  # ids, not a count: the context cleaner frees other tests' RDDs at any time
+        return {info.id() for info in spark.sparkContext._jsc.sc().getRDDStorageInfo()}
+
+    up, dn = tables(spark, "kc_release", [curated_row(updated=IN_WINDOW)], [gold_row(record=EARLIER)])
+    before = persisted()
+    [r] = run(spark, KeyCurrency(), dn, up, secret=SECRET)
+    assert r.state == "FAILED" and r.judged_view is not None and len(r.checkpoints) == 2
+    created = persisted() - before
+    assert len(created) >= 2
+    drop_judged_views(spark, Evaluation(Planned(None, dn, KeyCurrency()), EVENT, [r], datetime.now(UTC), 0))
+    assert not (persisted() & created)
+    assert not spark.catalog.tableExists(r.judged_view)
+
+
+def test_open_keys_are_read_from_recent_partitions_only(spark, monkeypatch) -> None:
+    """The hop reads its open keys from dq_key_event's run_date partitions on or after the history
+    lookback while its coverage continues from inside it (an open key is re-emitted on every
+    evaluation, so its latest event is recent; KI-19: without that continuity the read reaches back
+    to dq_key_event's retention, tests/checks/test_open_keys_idle.py); the plan prunes on run_date,
+    and the result says how many judged keys were open from earlier runs."""
+    from tests.store.conftest import append_rows
+
+    expected_hash = key_hash(SECRET, KEY)
+    long_ago = datetime(2026, 1, 10, 9, 0)  # loaded days before the judged range: only an open key gets it judged
+    up, dn = tables(spark, "kc_lookback", [curated_row(updated=long_ago)], [])
+    # the hop's coverage continues from inside the lookback: a committed covering result of the previous
+    # window, ending where this window's range starts (so the range is unchanged)
+    append_rows(spark, DQ, "dq_check_result", [{
+        "evaluation_id": "eval-kc-lookback-prev", "run_id": "run-prev", "event_id": "x",
+        "window_start": datetime(2026, 1, 14, 12, tzinfo=UTC), "window_end": EVENT.window_start,
+        "execution_type": "NORMAL", "dataset": dn.dataset, "check_id": "HOP_KEY_CURRENCY", "state": "PASSED",
+        "group_values": {"upstream": up.dataset}, "evaluated_at": EVENT.window_start,
+        "coverage_from": datetime(2026, 1, 14, 4, tzinfo=UTC), "coverage_to": datetime(2026, 1, 15, 4, tzinfo=UTC),
+        "run_date": EVENT.window_start.date()}])
+    old_day = datetime(2025, 6, 1, 12, tzinfo=UTC)
+    append_key_events(spark.createDataFrame([(expected_hash, KEY, "FLAGGED", "MISSING")],
+                                            "key_hash STRING, key_value STRING, event STRING, state_detail STRING"),
+                      DQ, "run-old", "eval-old", dn.dataset, "HOP_KEY_CURRENCY",
+                      hop_label(up.dataset, dn.dataset), old_day, old_day.date())
+    append_commits(spark, DQ, [Commit("run-old", "eval-old", dn.dataset, "HOP_KEY_CURRENCY", 1, key_event_rows=1)],
+                   old_day, old_day.date())  # the run that stored it published it (ADR-07)
+    seen: list[str] = []
+    real_sql = spark.sql
+    monkeypatch.setattr(spark, "sql", lambda text: seen.append(text) or real_sql(text))
+    # Unbounded: the old FLAGGED event keeps the key open, so it is judged again (and still missing).
+    [r] = run(spark, KeyCurrency(), dn, up, secret=SECRET)
+    assert (r.state, r.population, r.observed) == ("FAILED", 1, "1 missing and 0 stale of 1 keys; 1 key open from earlier runs")
+    # Bounded to after the event's partition: the key is not open as far as the hop can see, and
+    # nothing else puts it in the judged range.
+    [r] = run(spark, KeyCurrency(), dn, up, secret=SECRET, history_since=date(2026, 1, 1))
+    assert (r.state, r.reason_code) == ("DID_NOT_RUN", "empty_population")
+    judged_sql = [s for s in seen if "v_committed_key_event" in s and "run_date >= DATE'2026-01-01'" in s][-1]
+    plan = real_sql("EXPLAIN FORMATTED " + judged_sql).collect()[0][0]
+    pruned = [part.split("]", 1)[0] for part in plan.split("PartitionFilters: [") if "run_date" in part.split("]", 1)[0]]
+    # both scans behind the committed view prune on run_date: the events', and the commits' (by the join)
+    assert len(pruned) >= 2, plan
+
+
+def test_only_candidate_keys_go_through_the_window_functions(spark, monkeypatch) -> None:
+    """On a normal day the hop pre-selects the keys the window can judge or count (loaded upstream
+    since the judged range began, reloaded here in the window, or open) before the window functions
+    and the key hashing; the judged conditions still decide. The results match the unrestricted
+    judgement: one key judged, one pending, one untouched. The full sweep takes every key."""
+    before_range, pending_load = datetime(2026, 1, 10, 9, 0), datetime(2026, 1, 16, 11, 0)
+    rows = [curated_row(sub_id="1", updated=before_range), curated_row(sub_id="2", updated=IN_WINDOW),
+            curated_row(sub_id="3", updated=pending_load)]
+    gold_rows = [gold_row(sub_id="000000001", record=before_range), gold_row(sub_id="000000002", record=EARLIER)]
+    up, dn = tables(spark, "kc_candidates", rows, gold_rows)
+    seen: list[str] = []
+    real_sql = spark.sql
+    monkeypatch.setattr(spark, "sql", lambda text: seen.append(text) or real_sql(text))
+    [r] = run(spark, KeyCurrency(), dn, up, secret=SECRET)
+    assert (r.state, r.population, r.violations) == ("FAILED", 1, 1)  # key 2 stale; key 1 untouched; key 3 pending
+    assert r.observed == "0 missing and 1 stale of 1 keys; 1 key pending (within sla_hours)"
+    judged_sql = [s for s in seen if "mode" not in s and "candidates AS" in s]
+    assert judged_sql and "JOIN candidates c ON c.k = u.k" in judged_sql[0]
+    seen.clear()
+    [sweep] = run(spark, KeyCurrency(), dn, up, secret=SECRET, full_sweep=True)
+    assert (sweep.state, sweep.population, sweep.violations) == ("FAILED", 2, 1)  # keys 1 and 2 judged, 3 pending
+    assert not [s for s in seen if "candidates AS" in s]
+    # A key regressed here in the window is a candidate through the downstream side.
+    reloaded = tables(spark, "kc_candidates_dn", [curated_row(sub_id="1", updated=before_range)],
+                      [gold_row(sub_id="000000001", record=before_range, loaded="2026-01-15 20:00:00:000000")])
+    [r] = run(spark, KeyCurrency(), gold(reloaded[1].table, dataset=reloaded[1].dataset, load_time=GOLD_LOAD),
+              reloaded[0], secret=SECRET)
+    assert (r.state, r.population) == ("PASSED", 1)
+
+
+def test_a_file_with_more_rows_here_than_upstream_passes_and_is_counted(spark) -> None:
+    """HOP_FILE_COMPLETENESS presumes a file keeps its row count: a file that grew here is not a
+    violation, and the result says so rather than passing silently."""
+    up, dn = file_tables(spark, "fc_more", [("a", IN_WINDOW, "rt_0001.seq")],
+                         [("a", IN_WINDOW, "rt_0001.seq"), ("a", IN_WINDOW, "rt_0001.seq")])
+    [r] = run(spark, FileCompleteness(), dn, up)
+    assert (r.state, r.population, r.violations) == ("PASSED", 1, 0)
+    assert r.observed == "0 of 1 upstream files have fewer rows here; 1 file with more rows here than upstream"
+
+
+def test_a_key_whose_every_column_is_null_is_not_judged(spark) -> None:
+    """An all-null key is not a key (T1_KEY_NULLS counts it); a partly null key still is."""
+    rows = [curated_row(sub_id=None, mem_nbr=None, eff=None, agreement=None, updated=IN_WINDOW),
+            curated_row(sub_id=None, updated=IN_WINDOW)]
+    up, dn = tables(spark, "kc_nulls", rows, [])
+    [r] = run(spark, KeyCurrency(), dn, up, secret=SECRET)
+    assert (r.state, r.population, r.violations) == ("FAILED", 1, 1)  # the partly null key, missing here
+    assert [e[3] for e in events_of(r)] == ["<null>|01|2026-01-01|AGR-A"]

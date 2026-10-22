@@ -6,9 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from hcsc.datalake.dre.checks import registry
-from hcsc.datalake.dre.checks.registry import PATTERNS, TABLE_WIDE, pattern_causes, probe_keys
-from hcsc.datalake.dre.config.probes import PROBE_PARAMS, FileValueCompare, TableContains, is_ready
+from hcsc.datalake.dre.checks import patterns as pattern_files
+from hcsc.datalake.dre.checks.patterns import TABLE_WIDE, pattern_causes, patterns, probe_keys
+from hcsc.datalake.dre.causes.probes import FileValueCompare, TableContains
+from hcsc.datalake.dre.config.probes import PROBES, is_ready
 from hcsc.datalake.dre.config.validate import validate_conf
 from tests.config.conftest import edit, line_with
 
@@ -16,7 +17,7 @@ FEED = "feeds/example_realtime.yaml"
 
 
 def test_every_pattern_has_well_formed_cause_lists() -> None:
-    for pattern in (*PATTERNS, TABLE_WIDE):
+    for pattern in (*patterns(), TABLE_WIDE):
         for failure in pattern_causes(pattern).values():
             assert failure.order[-1].fallback
             assert failure.checks
@@ -31,12 +32,12 @@ def test_every_pattern_has_well_formed_cause_lists() -> None:
      "unknown probe"),
     ("causes:\n  x:\n    checks: [T1_ON_TIME]\n    order:\n      - {code: A, probe: file_exists}\n      - {code: B, fallback: true}\n",
      "names no params key"),
-    ("causes:\n  x:\n    checks: [T1_ON_TIME]\n    order:\n      - {code: A, probe: builtin}\n", "exactly one fallback"),
+    ("causes:\n  x:\n    checks: [T1_ON_TIME]\n    order:\n      - {code: NOT_RUN, probe: builtin}\n", "exactly one fallback"),
 ])
 def test_malformed_cause_lists_are_rejected(monkeypatch, yaml_text: str, message: str) -> None:
     import yaml
 
-    monkeypatch.setattr(registry, "_load_pattern", lambda pattern: yaml.safe_load(yaml_text))
+    monkeypatch.setattr(pattern_files, "_load_pattern", lambda pattern: yaml.safe_load(yaml_text))
     pattern_causes.cache_clear()
     try:
         with pytest.raises(ValueError, match=message):
@@ -53,7 +54,7 @@ def test_null_parameters_are_not_ready() -> None:
     assert is_ready(FileValueCompare(path="/data/ctl/cursor.txt", extract_regex=r"(\d{8})", format="yyyyMMdd",
                                      compare_to="partition"))
     assert is_ready(TableContains(table="ops_db.rejects", condition="reason IS NOT NULL"))  # id, code_ref optional
-    assert is_ready(PROBE_PARAMS["size_changed"]())  # needs no parameters
+    assert is_ready(PROBES["size_changed"].params_model())  # needs no parameters
 
 
 def test_sample_probes_validate(conf: Path) -> None:

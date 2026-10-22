@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from hcsc.datalake.dre.config.loader import load, resolve_settings
 from hcsc.datalake.dre.config.models import SettingsOverride
+from hcsc.datalake.dre.store.names import DQ_TABLES
 from tests.config.conftest import edit
 
 FEED = "feeds/example_realtime.yaml"
@@ -67,3 +68,18 @@ def test_table_wide_dataset_takes_settings_from_defaults(conf: Path) -> None:
     assert config.feed_of("gold_member_coverage_all") is None
     assert config.dataset_settings("gold_member_coverage_all").volume_tolerance_pct == 50
     assert config.dataset_settings("example_curated_enrollment").volume_tolerance_pct == 30
+
+
+def test_the_history_lookback_must_cover_the_longest_hold_and_the_retry_span() -> None:
+    """history_lookback_days bounds the hourly store reads by run_date; shorter than a hold or the
+    investigation retry span, it would lose a held window or a pending investigation."""
+    from hcsc.datalake.dre.config.models import Defaults
+
+    base = {"dq_database": "dq", "environment": "dev", "timezone": "UTC",
+            "retention_months": {t: 84 for t in DQ_TABLES}}
+    assert Defaults(**base).history_lookback_days == 400
+    assert Defaults(**base, history_lookback_days=7, max_window_hours=72).history_lookback_days == 7
+    with pytest.raises(ValidationError, match="history_lookback_days .* is shorter than max_window_hours"):
+        Defaults(**base, history_lookback_days=2, max_window_hours=72)
+    with pytest.raises(ValidationError, match="investigation_retry_days"):
+        Defaults(**base, history_lookback_days=3, max_window_hours=24, investigation_retry_days=7)

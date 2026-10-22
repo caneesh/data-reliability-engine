@@ -11,6 +11,13 @@ shown, not two; groups reported by a check's previous run and missing now are li
 groups over configured columns only (the dataset's or rule's group_by, and a hop's upstream),
 since per-load groups such as T1_VOLUME's slot change every run by design.
 
+A result is healthy only when it PASSED with VALID evidence (store/ddl.sql, v_latest_result):
+current results whose evidence is INVALID or UNKNOWN are listed apart and keep the digest from
+being all clear, and every digest says when the store's integrity was last verified. A PASS with
+qualifications is not healthy either: it is listed apart, counted in the subject, and keeps the
+digest from being all clear (final review, P1-01), so an all-clear digest means every result is
+healthy.
+
 Only counts, check ids, table and dataset names, and codes go in a digest (hard rule 6):
 key_hash samples only when the feed sets email_sample_keys, and never the key itself.
 """
@@ -61,10 +68,18 @@ class Item:
     causes: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     samples: list[str] = field(default_factory=list)
+    scope: str | None = None             # what a reconciliation result's claim covers, in one line
+    qualifications: list[str] = field(default_factory=list)  # what a PASS rests on unproven: never healthy
+    blind_spots: list[str] = field(default_factory=list)     # what a reconciliation result cannot see
+    triage: list[str] = field(default_factory=list)          # what to look at, for a FAILED ledger
+    mode: str | None = None              # evaluation_mode (ADR-05): a recheck is labelled, never a historical result
 
     @property
     def label(self) -> str:
-        return f"{self.dataset} {self.check_id}" + (f" [{self.groups}]" if self.groups else "")
+        labels = {"CURRENT_RECHECK": " (current recheck: the window as the data stands now)",
+                  "AS_OF_REPLAY": " (as-of replay: the window as the data stood at its end)"}
+        return (f"{self.dataset} {self.check_id}" + (f" [{self.groups}]" if self.groups else "")
+                + labels.get(self.mode or "", ""))
 
     @property
     def change(self) -> str:
@@ -87,6 +102,9 @@ class Digest:
     still_failing: list[Item] = field(default_factory=list)
     report_only: list[Item] = field(default_factory=list)
     passing: int = 0
+    evidence: list[Item] = field(default_factory=list)  # current results whose evidence is INVALID or UNKNOWN
+    qualified: list[Item] = field(default_factory=list)  # this run's passes with qualifications: not healthy
+    integrity: str = ""  # when the store's integrity was last verified
 
     @property
     def new_failures(self) -> int:
@@ -94,14 +112,15 @@ class Digest:
 
     @property
     def all_clear(self) -> bool:
-        return not (self.new_failures or self.did_not_run or self.still_failing)
+        return not (self.new_failures or self.did_not_run or self.still_failing or self.evidence or self.qualified)
 
     @property
     def subject(self) -> str:
         if self.all_clear:
             return f"DRE {self.environment}: all clear"
+        qualified = f", {len(self.qualified)} passed with qualifications" if self.qualified else ""
         return (f"DRE {self.environment}: {self.new_failures} new failures, "
-                f"{len(self.did_not_run)} checks did not run")
+                f"{len(self.did_not_run)} checks did not run{qualified}")
 
     def text(self) -> str:
         return _TEXT.get_template("digest.txt.j2").render(d=self)
@@ -113,28 +132,48 @@ GROUPS_SQL = ("array_join(array_sort(transform(map_keys(coalesce(group_values, m
               "k -> concat(k, '=', coalesce(group_values[k], '')))), ',')")
 
 
+def mode_of_row(row: dict[str, Any]) -> str:
+    """A stored result's evaluation mode; a row stored before the column existed takes it from its
+    execution type (store/ddl.sql, v_latest_result)."""
+    from hcsc.datalake.dre.checks.modes import mode_of
+
+    return row.get("evaluation_mode") or mode_of(row.get("execution_type") or "NORMAL")
+
+
 def _groups(values: dict[str, str | None] | None) -> str:
     return ",".join(f"{k}={'' if v is None else v}" for k, v in sorted((values or {}).items()))
 
 
-def read_run(spark: SparkSession, dq_database: str, run_id: str, run_date: date | None = None) -> dict[str, Any]:
+def read_run(spark: SparkSession, dq_database: str, run_id: str, run_date: date | None = None,
+             with_samples: bool = True, since: date | None = None) -> dict[str, Any]:
     """Everything a run's digests need from the dq store. Every row a run writes carries its
-    run_date, so with run_date given the run's own rows are read from that partition only."""
+    run_date, so with run_date given the run's own rows are read from that partition only; the
+    earlier results a digest compares with are read from run_date >= since (the history lookback).
+    Key-hash samples are read only when some dataset wants them (with_samples), at most
+    SAMPLE_KEYS per evaluation, bounded in SQL rather than on the driver."""
     validate_dq_database(dq_database)
     if not _RUN_ID.match(run_id):
         raise ValueError("unexpected run id")
     this_run = f"run_id = '{run_id}'" + (f" AND run_date = DATE'{run_date.isoformat()}'" if run_date else "")
     current = [r.asDict() for r in spark.sql(
-        f"SELECT *, {GROUPS_SQL} AS groups FROM {dq_database}.dq_check_result WHERE {this_run}").collect()]
+        f"SELECT *, {GROUPS_SQL} AS groups FROM {dq_database}.v_committed_result WHERE {this_run}").collect()]
+    recent = f"run_date >= DATE'{since.isoformat()}'" if since else "TRUE"
+    not_healthy = [r.asDict() for r in spark.sql(  # the latest evaluations (as v_latest_result ranks them)
+        f"SELECT * FROM (SELECT r.*, {GROUPS_SQL} AS groups, DENSE_RANK() OVER (PARTITION BY dataset, check_id "
+        f"  ORDER BY window_end DESC, evaluated_at DESC, run_id DESC) AS latest_rank "
+        f"  FROM {dq_database}.v_committed_result r WHERE {recent}) l "
+        f"WHERE latest_rank = 1 AND evidence_state IN ('INVALID', 'UNKNOWN')").collect()]
     if not current:
-        return {"current": [], "history": {}, "previous_groups": {}, "causes": [], "samples": {}}
+        return {"current": [], "history": {}, "previous_groups": {}, "causes": [], "samples": {},
+                "not_healthy": not_healthy}
     started = min(as_utc(r["evaluated_at"]) for r in current)
     pairs = sorted({(r["dataset"], r["check_id"]) for r in current})
     datasets = ", ".join(f"'{validate_identifier(d, 'dataset id')}'" for d in sorted({d for d, _ in pairs}))
     checks = ", ".join(f"'{validate_identifier(c, 'check id')}'" for c in sorted({c for _, c in pairs}))
-    earlier = (f"SELECT *, {GROUPS_SQL} AS groups FROM {dq_database}.dq_check_result "
+    lookback = f" AND run_date >= DATE'{since.isoformat()}'" if since else ""
+    earlier = (f"SELECT *, {GROUPS_SQL} AS groups FROM {dq_database}.v_committed_result "
                f"WHERE execution_type = 'NORMAL' AND run_id <> '{run_id}' AND evaluated_at < {utc_literal(started)} "
-               f"AND dataset IN ({datasets}) AND check_id IN ({checks})")
+               f"AND dataset IN ({datasets}) AND check_id IN ({checks}){lookback}")
     history = {
         (r.dataset, r.check_id, r.groups): r.asDict() for r in spark.sql(
             f"WITH h AS ({earlier}), "
@@ -159,14 +198,17 @@ def read_run(spark: SparkSession, dq_database: str, run_id: str, run_date: date 
             f"  ON l.dataset = h.dataset AND l.check_id = h.check_id AND l.run_id = h.run_id").collect():
         previous_groups.setdefault((r.dataset, r.check_id), {})[r.groups] = r.state
     causes = [r.asDict() for r in spark.sql(
-        f"SELECT * FROM {dq_database}.dq_cause_result WHERE {this_run}").collect()]
+        f"SELECT * FROM {dq_database}.v_committed_cause WHERE {this_run} AND result_run_id = '{run_id}'").collect()]
     samples: dict[str, list[str]] = {}
-    for r in spark.sql(
-            f"SELECT evaluation_id, key_hash FROM {dq_database}.dq_key_event WHERE {this_run} "
-            f"AND event IN ('FLAGGED', 'STILL_FLAGGED') ORDER BY evaluation_id, key_hash").collect():
+    sample_rows = spark.sql(
+        f"SELECT evaluation_id, key_hash FROM ("
+        f"  SELECT evaluation_id, key_hash, ROW_NUMBER() OVER (PARTITION BY evaluation_id ORDER BY key_hash) AS rn "
+        f"  FROM {dq_database}.v_committed_key_event WHERE {this_run} AND event IN ('FLAGGED', 'STILL_FLAGGED')"
+        f") ranked WHERE rn <= {SAMPLE_KEYS} ORDER BY evaluation_id, key_hash").collect() if with_samples else []
+    for r in sample_rows:
         samples.setdefault(r.evaluation_id, []).append(r.key_hash)
     return {"current": current, "history": history, "previous_groups": previous_groups,
-            "causes": causes, "samples": samples}
+            "causes": causes, "samples": samples, "not_healthy": not_healthy}
 
 
 # --- building the digests ---
@@ -184,13 +226,41 @@ def owner_of(config: Config, row: dict[str, Any]) -> str | None:
 INCOMPLETE = "cause: investigation incomplete (the next run retries it)"
 
 
+def scope_of(detail: str | None) -> dict[str, Any] | None:
+    """A reconciliation result's scope (HOP_LEDGER's `detail`, ADR-01), or None for a result whose
+    detail is not a scope."""
+    try:
+        scope = json.loads(detail) if detail else None
+    except ValueError:
+        return None
+    return scope if isinstance(scope, dict) and "claim" in scope and "edge" in scope else None
+
+
+def scope_line(detail: str | None) -> str | None:
+    """The scope in one line: the edge, its kind and contract, the claim, the evidence level, how
+    many columns the values were verified for, the cutoff. Its blind spots and triage are listed
+    under it (Item.blind_spots, Item.triage)."""
+    scope = scope_of(detail)
+    if scope is None:
+        return None
+    parts = [f"{scope['edge']} {scope.get('mapping')} ({scope.get('contract')})", f"claim {scope['claim']}"]
+    if scope.get("evidence_level"):
+        parts.append(f"evidence {scope['evidence_level']}")
+    values = scope.get("values") or {}
+    if values.get("unverified") is not None:
+        verified = len(values.get("verified") or [])
+        parts.append(f"values verified for {verified} of {verified + len(values['unverified'])} columns")
+    parts.append(f"cutoff {scope.get('cutoff')}" + (" (full sweep)" if scope.get("full_sweep") else ""))
+    return "scope: " + "; ".join(parts)
+
+
 def _cause_lines(config: Config, row: dict[str, Any], causes: list[dict[str, Any]]) -> list[str]:
     """One cause line per distinct resolved cause of the evaluation, with how many failures it covers."""
     from collections import Counter
 
     from hcsc.datalake.dre.causes.engine import failure_type, summarise
 
-    rows = [c for c in causes if c["evaluation_id"] == row["evaluation_id"]]
+    rows = causes  # this evaluation's rows (the caller groups them once)
     feed = config.feeds.get(row.get("feed") or "")
     ft = failure_type(feed.pattern if feed else None, row["check_id"])
     if ft is None:
@@ -221,6 +291,9 @@ def build_digests(config: Config, run: Run, data: dict[str, Any]) -> list[Digest
     defaults = config.defaults
     digests: dict[str, Digest] = {}
     current = data["current"]
+    causes_by_evaluation: dict[str, list[dict[str, Any]]] = {}
+    for cause in data["causes"]:
+        causes_by_evaluation.setdefault(cause["evaluation_id"], []).append(cause)
     # One alert for T1_ON_TIME and T1_ZERO_ROWS failing for the same loads of a dataset.
     merged: set[str] = set()
     by_check = {(r["dataset"], r["check_id"], r["groups"]): r for r in current}
@@ -258,7 +331,11 @@ def build_digests(config: Config, run: Run, data: dict[str, Any]) -> list[Digest
             reason=f"{row['reason_category']}/{row['reason_code']}" if row["state"] == "DID_NOT_RUN" else None,
             observed=row.get("observed"), expected=row.get("expected"),
             violations=row.get("violations"), prev_violations=prev["violations"] if prev else None,
-            rule=is_rule,
+            rule=is_rule, scope=scope_line(row.get("detail")),
+            qualifications=[q for q in (row.get("qualifications") or "").split(",") if q],
+            blind_spots=list((scope_of(row.get("detail")) or {}).get("blind_spots") or []),
+            triage=list((scope_of(row.get("detail")) or {}).get("triage") or []),
+            mode=mode_of_row(row),
         )
         if is_rule and rule.status == "proposed":
             digest.report_only.append(item)
@@ -271,14 +348,20 @@ def build_digests(config: Config, run: Run, data: dict[str, Any]) -> list[Digest
                 item.first_failed = as_utc(since).date() if since else None
                 digest.still_failing.append(item)
             else:
-                item.causes = _cause_lines(config, row, data["causes"])
+                item.causes = _cause_lines(config, row, causes_by_evaluation.get(row["evaluation_id"], []))
                 if row["evaluation_id"] in on_time_notes:
                     item.notes.append(on_time_notes[row["evaluation_id"]])
                 if config.dataset_settings(row["dataset"]).email_sample_keys:
                     item.samples = data["samples"].get(row["evaluation_id"], [])[:SAMPLE_KEYS]
                 digest.changed.append(item)
+        elif row.get("evidence_state", "VALID") != "VALID":  # never counted as healthy
+            item.reason = row["evidence_state"]
+            digest.evidence.append(item)
         else:
-            digest.passing += 1
+            if item.qualifications:  # a PASS that rests on something unproven: listed, never healthy
+                digest.qualified.append(item)
+            else:
+                digest.passing += 1
             if item.prev_state in ("FAILED", "DID_NOT_RUN"):
                 digest.changed.append(item)
     # Groups the check's previous run reported that this run did not (configured group columns only).
@@ -295,11 +378,30 @@ def build_digests(config: Config, run: Run, data: dict[str, Any]) -> list[Digest
             if digest is not None and gone:
                 digest.gone.append(Item(ds, check, gone, "NOT_REPORTED",
                                         prev_state=data["previous_groups"][(ds, check)][gone]))
+    # Current results, from any run, whose evidence is INVALID or UNKNOWN: not healthy, whatever their state.
+    listed = {(i.dataset, i.check_id, i.groups) for d in digests.values() for i in d.evidence}
+    for row in sorted(data.get("not_healthy", []), key=lambda r: (r["dataset"], r["check_id"], r["groups"])):
+        digest = digest_for(row)
+        if digest is not None and (row["dataset"], row["check_id"], row["groups"]) not in listed:
+            digest.evidence.append(Item(row["dataset"], row["check_id"], row["groups"], row["state"],
+                                        reason=row["evidence_state"], mode=mode_of_row(row)))
+    for digest in digests.values():
+        digest.integrity = data.get("integrity", "")
     return [digests[o] for o in sorted(digests)]
 
 
 def digests_for_run(spark: SparkSession, config: Config, run: Run) -> list[Digest]:
-    return build_digests(config, run, read_run(spark, config.defaults.dq_database, run.run_id, run.run_date))
+    from hcsc.datalake.dre.store.integrity import freshness
+
+    with_samples = any(config.dataset_settings(ds).email_sample_keys for ds in config.datasets)
+    since = (run.run_date - timedelta(days=config.defaults.history_lookback_days))
+    data = read_run(spark, config.defaults.dq_database, run.run_id, run.run_date, with_samples=with_samples,
+                    since=since)
+    try:
+        data["integrity"] = freshness(spark, config.defaults.dq_database, run.started_at).line()
+    except Exception as exc:
+        data["integrity"] = f"store integrity: unknown (the integrity records could not be read: {type(exc).__name__})"
+    return build_digests(config, run, data)
 
 
 def to_send(digests: list[Digest], defaults: Defaults, run_started: datetime) -> list[Digest]:

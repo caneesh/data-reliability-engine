@@ -14,9 +14,8 @@ from dataclasses import replace
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
-from hcsc.datalake.dre.checks.base import (
-    CheckContext, CheckResult, did_not_run, from_counts, needs_load_time, render_sql, utc_literal,
-)
+from hcsc.datalake.dre.checks.partitions import partition_filter
+from hcsc.datalake.dre.checks.base import CheckContext, CheckResult, did_not_run, from_counts, needs_load_time, render_sql, utc_literal
 from hcsc.datalake.dre.checks.cadence import UnsupportedCalendar, slots
 from hcsc.datalake.dre.checks.times import as_utc, utc_expr
 
@@ -50,6 +49,8 @@ def judge_due_slots(ctx: CheckContext, event: Event, check_id: str, minimum: int
         feed_filter=ds.feed_filter,
         sla_minutes=int(sla.total_seconds() // 60),
         minimum=minimum,
+        first_slot=utc_literal(min(due)), last_slot=utc_literal(max(due)),
+        partition_filter=partition_filter(ds, min(due), max(due) + sla, ctx.default_timezone),
     )
     row = ctx.spark.sql(sql).collect()[0]
     counts = {"violations": row.violations or 0, "population": row.population}

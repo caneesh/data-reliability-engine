@@ -1,7 +1,11 @@
 # Checks for table-wide datasets (no feed, so no ingestion pattern), in run order.
 # Only checks that do not depend on how data arrives (decided in the step 4 review).
 pattern: TABLE_WIDE
+kind: table            # file: data lands as files (the feed needs `landing`); table: it arrives in a table
 checks:
   - T1_SCHEMA_DRIFT
+  - T1_PARTITION_DRIFT  # parametrised (release 4): runs where check_params configures it; once per table
   - T1_KEY_NULLS
   - T1_KEY_DUPLICATES
+  - T1_FRESHNESS      # parametrised: runs where check_params configures it (spec section 3)
+  - T1_COLUMN_RANGE   # parametrised, as above; a pattern may give defaults: {check: T1_FRESHNESS, params: {...}}

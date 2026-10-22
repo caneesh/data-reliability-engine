@@ -3,7 +3,8 @@
 Slots are local times in the cadence's time zone, converted to UTC. Kinds: times
 (every day at each time), interval (every N minutes from local midnight),
 calendar_dates (listed dates), monthly (listed days of the month; a day past the
-month's end is skipped). Calendars, for times and interval: EVERYDAY and WEEKDAYS.
+month's end is skipped). Calendars, for times and interval: EVERYDAY, WEEKDAYS and the named
+calendars from conf/calendars (checks/calendars.py).
 """
 
 from __future__ import annotations
@@ -23,11 +24,12 @@ class UnsupportedCalendar(ValueError):
 
 
 def _runs_on(day: date, calendar: str) -> bool:
-    if calendar == "EVERYDAY":
-        return True
-    if calendar == "WEEKDAYS":
-        return day.weekday() < 5
-    raise UnsupportedCalendar(f"calendar {calendar!r} is not supported yet (EVERYDAY, WEEKDAYS)")
+    from hcsc.datalake.dre.checks.calendars import CALENDARS
+
+    found = CALENDARS.get(calendar)
+    if found is None:
+        raise UnsupportedCalendar(f"calendar {calendar!r} is not known (packaged: EVERYDAY, WEEKDAYS; or conf/calendars)")
+    return found.runs_on(day)
 
 
 def _local_times(cadence: Cadence) -> list[time]:

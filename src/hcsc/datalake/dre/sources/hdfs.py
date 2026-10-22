@@ -41,8 +41,10 @@ def _code(exc: Exception) -> str:
     return "landing_unreadable" if any(name in text for name in _UNREADABLE) else "hdfs_unavailable"
 
 
-def list_landing(spark: SparkSession, roots: list[str], pattern: str = "*") -> list[FileInfo]:
-    """Every file under the roots (recursively) whose name matches pattern, sorted by path."""
+def list_landing(spark: SparkSession, roots: list[str], pattern: str = "*",
+                 max_files: int | None = None) -> list[FileInfo]:
+    """Every file under the roots (recursively) whose name matches pattern, sorted by path. More
+    than max_files of them is a LandingError (landing_unreadable) naming the count."""
     jvm = spark.sparkContext._jvm
     conf = spark.sparkContext._jsc.hadoopConfiguration()
     found: list[FileInfo] = []
@@ -63,11 +65,47 @@ def list_landing(spark: SparkSession, roots: list[str], pattern: str = "*") -> l
                     size_bytes=int(status.getLen()),
                     modified_at=datetime.fromtimestamp(status.getModificationTime() / 1000, tz=timezone.utc),
                 ))
+                if max_files is not None and len(found) > max_files:
+                    raise LandingError("landing_unreadable", f"more than {max_files} files under the landing roots "
+                                       "(landing.max_files): archive or raise the limit")
         except LandingError:
             raise
         except Exception as exc:
             raise LandingError(_code(exc), f"cannot list landing root {root}: {type(exc).__name__}") from None
     return sorted(found, key=lambda f: f.path)
+
+
+@dataclass(frozen=True)
+class DirSummary:
+    """What a directory's files look like, without reading them (T1_PARTITION_DRIFT)."""
+
+    file_count: int
+    total_bytes: int
+    latest_modified_at: datetime | None  # UTC; None when the directory holds no files
+
+
+def summarise_directory(spark: SparkSession, path_text: str) -> DirSummary:
+    """File count, total bytes and latest modification time of the files under the path
+    (recursively, hidden files skipped). A path that cannot be listed is a LandingError."""
+    try:
+        path, fs = _fs(spark, path_text)
+        if not fs.exists(path):
+            raise LandingError("hdfs_unavailable", "partition directory not found")
+        files = fs.listFiles(path, True)
+        count, total, latest = 0, 0, None
+        while files.hasNext():
+            status = files.next()
+            if status.getPath().getName().startswith((".", "_")):
+                continue
+            count += 1
+            total += int(status.getLen())
+            modified = datetime.fromtimestamp(status.getModificationTime() / 1000, tz=timezone.utc)
+            latest = modified if latest is None or modified > latest else latest
+        return DirSummary(count, total, latest)
+    except LandingError:
+        raise
+    except Exception as exc:
+        raise LandingError(_code(exc), f"cannot list a partition directory: {type(exc).__name__}") from None
 
 
 # Read-only helpers for cause probes (spec section 7): existence and glob. Probes read

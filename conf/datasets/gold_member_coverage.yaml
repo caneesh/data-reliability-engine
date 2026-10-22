@@ -9,6 +9,7 @@ key_normalise: { sub_id: strip_leading_zeros }
 record_time: { column: src_lcts, format: null }             # format not yet confirmed
 load_time: { column: gld_lcts, format: "yyyy-MM-dd HH:mm:ss:SSSSSS", granularity: minute }
 partition_column: null
+partition_format: null            # how the partition value is written (e.g. yyyy-MM-dd); with it, windowed checks read only the window's partitions
 file_name_column: null
 min_rows_per_load: 1
 key_unique: true
@@ -23,4 +24,18 @@ key_map:
 owned_columns: { enddate: mbr_mbrshp_covrg_end_dt }
 winner_rule:
   order_by: ["sourcelastupdatets DESC", "enddate DESC"]
+  formats: { enddate: yyyy-MM-dd }   # a time written as a string is ordered as a time, never as a string
+grain:
+  history: mutable                # gold is merged in place on its own schedule (user, 2026-10-16)
+contracts:                        # the hop's reconciliation contract (docs/design/reconciliation-model.md)
+  example_curated_enrollment:
+    # each source's rows sit side by side in gold, told apart by feed_filter, all of equal priority
+    # (developer, 2026-10-16): a union partition, not survivorship
+    mapping: union_partition
+    deletion:                     # a void: a new version whose end date equals its effective date; the row stays
+      tombstone: "to_date(enddate, 'yyyy-MM-dd') = to_date(effectivedate, 'yyyy-MM-dd')"
+      applied_as: soft
+      soft_when: "to_date(mbr_mbrshp_covrg_end_dt, 'yyyy-MM-dd') = to_date(mbr_mbrshp_covrg_eff_dt, 'yyyy-MM-dd')"
 compute_budget_minutes: 8
+check_params:                     # parametrised checks run only where configured (spec section 3)
+  T1_FRESHNESS: { max_age_hours: 72, time: load }   # gold was written within 3 days of each window end

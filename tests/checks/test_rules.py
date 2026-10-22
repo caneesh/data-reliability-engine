@@ -132,7 +132,7 @@ def test_child_within_parent(spark) -> None:
     params = {"parent_dataset": "example_parent", "join": {"sub_id": "member_id"},
               "child_start": "mbr_mbrshp_covrg_eff_dt", "parent_start": "start_dt", "parent_end": "end_dt",
               "format": "yyyy-MM-dd"}
-    check = RuleCheck(rule("child_within_parent", params), parent)
+    check = RuleCheck(rule("child_within_parent", params), {"example_parent": parent})
     ds = table(spark, "cwp", [gold_row(sub_id="000123401", eff="2026-03-01"),               # within (normalised)
                               gold_row(sub_id="555", eff="2030-01-01", source="SRC_B"),     # open-ended parent
                               gold_row(sub_id="123401", eff="2026-08-01", source="SRC_B"),  # after the end

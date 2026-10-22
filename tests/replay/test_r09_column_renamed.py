@@ -42,7 +42,9 @@ def test_r09_renamed_column_is_column_missing_and_run_continues(spark, tmp_path,
 
     [run] = spark.table(f"{replay.dq}.v_latest_run").collect()
     assert run.status == "COMPLETED" and run.checks_written == run.checks_expected
-    # This feed: gold: 6 Tier 1 + HOP_KEY_CURRENCY + HOP_VALUE_AGREEMENT + 4 rules = 12; curated 6; table-wide 3 + 1 rule = 4;
-    # less one: schema drift runs once per physical table.
-    assert len([k for k in results if k[0] in REALTIME_DATASETS]) == 21
+    # This feed: gold: 7 Tier 1 (T1_FRESHNESS is configured in the sample) + HOP_KEY_CURRENCY + HOP_VALUE_AGREEMENT
+    # + HOP_LEDGER + T1_SOURCE_ATTRIBUTION (build step 5: gold is a union_partition target) + 4 rules = 15;
+    # curated 6; table-wide 3 + 1 rule = 4; less one: schema drift runs once per physical table.
+    assert len([k for k in results if k[0] in REALTIME_DATASETS]) == 24
+    assert ("gold_member_coverage", "HOP_LEDGER") in results
     assert "dre run: COMPLETED" in capsys.readouterr().out

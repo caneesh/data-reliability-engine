@@ -10,6 +10,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 GOLD_LOAD_FORMAT = "%Y-%m-%d %H:%M:%S:000000"  # gld_lcts, minute-granular, written in Chicago time
+CURATED_LOAD_FORMAT = "%Y-%m-%d %H:%M:%S:%f"  # cdc_upd_ts, microseconds after a colon, Chicago time
 CHICAGO = ZoneInfo("America/Chicago")
 
 
@@ -32,6 +33,7 @@ GOLD_COLUMNS = [
 CURATED_COLUMNS = [
     ("subscriberidnumber", "STRING"), ("membernumber", "STRING"), ("effectivedate", "STRING"),
     ("qualifiedhealthplanid", "STRING"), ("enddate", "STRING"), ("sourcelastupdatets", "TIMESTAMP"),
+    ("cdc_upd_ts", "STRING"),
 ]
 
 # Synthetic raw layer (test-only columns): one raw table holds two feeds, told apart by file name.
@@ -69,23 +71,36 @@ def gold_row(sub_id: str = "000123401", mem_nbr: str = "01", eff: str = "2026-01
 
 
 def curated_row(sub_id: str = "123401", mem_nbr: str = "01", eff: str = "2026-01-01", agreement: str = "AGR-A",
-                end: str = "9999-12-31", updated: datetime = datetime(2026, 1, 2, 8, 0)) -> dict[str, Any]:
+                end: str = "9999-12-31", updated: datetime = datetime(2026, 1, 2, 8, 0),
+                loaded: datetime | None = None) -> dict[str, Any]:
+    """updated: sourcelastupdatets, the source version (Chicago wall time); loaded: cdc_upd_ts, when
+    curated wrote the row, written as the string curated writes (defaults to the record time, so a
+    row is loaded the moment it was updated)."""
+    loaded = loaded if loaded is not None else updated
     return {"subscriberidnumber": sub_id, "membernumber": mem_nbr, "effectivedate": eff,
-            "qualifiedhealthplanid": agreement, "enddate": end, "sourcelastupdatets": updated}
+            "qualifiedhealthplanid": agreement, "enddate": end, "sourcelastupdatets": updated,
+            "cdc_upd_ts": loaded.strftime(CURATED_LOAD_FORMAT)}
 
 
 def create_table(spark, table: str, columns: list[tuple[str, str]], rows: list[dict[str, Any]] = (),
-                 rename: dict[str, str] | None = None) -> None:
-    """(Re)create an ORC table with these columns, optionally renaming some, and insert rows."""
+                 rename: dict[str, str] | None = None, partition_by: list[str] | None = None) -> None:
+    """(Re)create an ORC table with these columns, optionally renaming some, and insert rows.
+    partition_by names columns (of `columns`) the table is partitioned by; they come last."""
     rename = rename or {}
-    cols = [(rename.get(name, name), kind) for name, kind in columns]
+    partition_by = partition_by or []
+    ordered = [c for c in columns if c[0] not in partition_by] + [c for c in columns if c[0] in partition_by]
+    cols = [(rename.get(name, name), kind) for name, kind in ordered]
+    data_cols = [(n, k) for n, k in cols if n not in {rename.get(p, p) for p in partition_by}]
+    part_cols = [(n, k) for n, k in cols if n in {rename.get(p, p) for p in partition_by}]
     database = table.split(".")[0]
     spark.sql(f"CREATE DATABASE IF NOT EXISTS {database}")
     spark.sql(f"DROP TABLE IF EXISTS {table}")
-    spark.sql(f"CREATE TABLE {table} ({', '.join(f'{n} {k}' for n, k in cols)}) STORED AS ORC")
+    partitioned = f" PARTITIONED BY ({', '.join(f'{n} {k}' for n, k in part_cols)})" if part_cols else ""
+    spark.sql(f"CREATE TABLE {table} ({', '.join(f'{n} {k}' for n, k in data_cols)}){partitioned} STORED AS ORC")
     if rows:
-        data = [tuple(row.get(name) for name, _ in columns) for row in rows]
+        data = [tuple(row.get(name) for name, _ in ordered) for row in rows]
         schema = ", ".join(f"{n} {k}" for n, k in cols)
+        spark.conf.set("hive.exec.dynamic.partition.mode", "nonstrict")
         spark.createDataFrame(data, schema).write.insertInto(table)
 
 
@@ -97,6 +112,7 @@ PROVIDER_RAW_COLUMNS = [
 PROVIDER_GOLD_COLUMNS = [
     ("provider_id", "STRING"), ("provider_name", "STRING"), ("specialty", "STRING"),
     ("roster_effective_ts", "TIMESTAMP"), ("merged_at", "TIMESTAMP"),
+    ("merge_dt", "STRING"),  # the merge's UTC date, the table's partition value (yyyy-MM-dd) in the e2e build
 ]
 
 
@@ -113,4 +129,4 @@ def provider_gold_row(provider_id: str, merged_at: datetime, effective: datetime
     effective = effective if effective is not None else merged_at - timedelta(days=2)
     return {"provider_id": provider_id, "provider_name": f"Provider {provider_id}", "specialty": "general",
             "roster_effective_ts": effective.replace(tzinfo=None),
-            "merged_at": merged_at.replace(tzinfo=None)}
+            "merged_at": merged_at.replace(tzinfo=None), "merge_dt": merged_at.strftime("%Y-%m-%d")}

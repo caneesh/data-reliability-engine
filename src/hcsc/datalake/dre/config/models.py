@@ -16,10 +16,13 @@ from pathlib import PurePosixPath, PureWindowsPath
 from typing import Annotated, Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 from pydantic_core import PydanticCustomError
 
 from hcsc.datalake.dre.store.names import DQ_TABLES, validate_dq_database
+
+# Tables whose rows are visible only through a commit row (ADR-07): dq_commit must outlive them.
+GATED_BY_COMMIT = ("dq_check_result", "dq_cause_result", "dq_key_event", "dq_partition_state", "dq_reconciliation")
 
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _HHMM = re.compile(r"([01]\d|2[0-3]):[0-5]\d")
@@ -49,8 +52,13 @@ def _table(value: str) -> str:
 
 
 def _sql_fragment(value: str) -> str:
+    from hcsc.datalake.dre.config.sqlcheck import forbidden_sql
+
     if ";" in value:
         raise invalid("SQL fragment contains ';'", "use a single SQL expression without ';'")
+    problem = forbidden_sql(value)
+    if problem is not None:
+        raise invalid(problem.problem, problem.fix)
     return value
 
 
@@ -87,6 +95,13 @@ def _dq_database(value: str) -> str:
         raise invalid(str(exc), "use a plain identifier, e.g. dq") from None
 
 
+def _absolute_path(value: str) -> str:
+    if not (PurePosixPath(value).is_absolute() or PureWindowsPath(value).is_absolute()):
+        raise invalid(f"{value!r} is not an absolute path",
+                      "give the absolute path the platform team names for it (a deployment value), or null")
+    return value
+
+
 def _regex(value: str) -> str:
     try:
         re.compile(value)
@@ -95,28 +110,67 @@ def _regex(value: str) -> str:
     return value
 
 
+def _sink_config(value: Any) -> Any:
+    from hcsc.datalake.dre.notify.sinks import validate_sink_config
+
+    try:
+        return validate_sink_config(value)
+    except ValueError as exc:
+        raise invalid(str(exc), "write { kind: email | stdout, ... }; see docs/spec.md section 8") from None
+
+
+def _stem(value: str) -> str:
+    name = value.lower()
+    return name[:-5] if name.endswith(".yaml") else name[:-4] if name.endswith(".yml") else name
+
+
 def _calendar(value: str) -> str:
-    if value not in ("EVERYDAY", "WEEKDAYS"):
-        raise invalid(
-            f"calendar {value!r} looks like a named calendar file, which release 1 does not support",
-            "use EVERYDAY or WEEKDAYS, or list the run dates with kind: calendar_dates",
-        )
+    """EVERYDAY, WEEKDAYS, or a named calendar from conf/calendars (checks/calendars.py)."""
+    from hcsc.datalake.dre.checks.calendars import CALENDARS
+
+    if value not in CALENDARS:
+        raise invalid(f"{value!r} is not a calendar",
+                      f"use one of {list(CALENDARS.ids())}, add conf/calendars/{_stem(value)}.yaml, "
+                      "or list the run dates with kind: calendar_dates")
+    return value
+
+
+_RULE_REF = re.compile(r"[A-Za-z_][A-Za-z0-9_]*@[1-9][0-9]*")
+
+
+def _rule_ref(value: str) -> str:
+    """A business rule named by id and version, as the rejects name it: id@version."""
+    if not _RULE_REF.fullmatch(value):
+        raise invalid(f"{value!r} is not a rule id@version", "write the rule as <id>@<version>, for example code_check@2")
     return value
 
 
 def _normaliser(value: Any) -> Any:
-    """strip_leading_zeros, or {parse_date: <Spark date format>} (a date string read as an ISO date)."""
-    if value == "strip_leading_zeros":
-        return value
-    if isinstance(value, dict) and set(value) == {"parse_date"} and isinstance(value["parse_date"], str) \
-            and value["parse_date"] and "'" not in value["parse_date"]:
-        return value
-    raise invalid(f"{value!r} is not allowed",
-                  "use strip_leading_zeros, or { parse_date: <format> } such as { parse_date: MM/dd/yyyy }")
+    """A registered key normaliser (checks/keys.py): a bare name, or {name: argument}."""
+    from hcsc.datalake.dre.checks.keys import NormaliserError, validate_normaliser
+
+    try:
+        return validate_normaliser(value)
+    except NormaliserError as exc:
+        raise invalid(exc.problem, exc.fix) from None
 
 
-def _str_to_list(value: Any) -> Any:
-    return [value] if isinstance(value, str) else value
+def _pattern(value: str) -> str:
+    """A feed pattern: packaged, or from the conf directory's patterns/ (checks/registry.py)."""
+    from hcsc.datalake.dre.checks.patterns import patterns
+
+    if value not in patterns():
+        raise invalid(f"{value!r} is not allowed", f"use one of {list(patterns())}")
+    return value
+
+
+def _template(value: str) -> str:
+    """A registered gold rule template (checks/rules/template.py)."""
+    from hcsc.datalake.dre.checks.rules.template import TEMPLATES
+
+    if value not in TEMPLATES:
+        raise invalid(f"{value!r} is not allowed", f"use one of {list(TEMPLATES.ids())}")
+    return value
 
 
 Identifier = Annotated[str, AfterValidator(_identifier)]
@@ -129,21 +183,13 @@ TimeZone = Annotated[str, AfterValidator(_timezone)]
 NonEmptyStr = Annotated[str, Field(min_length=1)]
 Regex = Annotated[str, Field(min_length=1), AfterValidator(_regex)]  # a regular expression that compiles
 
-Pattern = Literal["FILE_CYCLIC", "FILE_PERIODIC", "TABLE_MERGE"]
+Pattern = Annotated[str, AfterValidator(_pattern)]  # a packaged feed pattern
 FileFormat = Literal["sequence", "text", "xml", "csv", "parquet", "orc"]
 CadenceKind = Literal["times", "interval", "calendar_dates", "monthly"]
 Layer = Literal["RAW", "CURATED", "CDC", "GOLD"]
 Granularity = Literal["second", "minute", "hour", "day"]
 Weekday = Literal["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"]
-Template = Literal[
-    "max_rows_per_key",
-    "max_open_rows_per_key",
-    "column_order",
-    "superseded_still_open",
-    "child_within_parent",
-    "value_format",
-    "null_rate_max",
-]
+Template = Annotated[str, AfterValidator(_template)]  # a registered gold rule template
 RuleStatus = Literal["proposed", "approved", "retired"]
 RuleFrequency = Literal["every_run", "daily", "weekly"]
 Severity = Literal["high", "medium", "low"]
@@ -197,9 +243,31 @@ class EmailServer(Model):
     smtp_host: NonEmptyStr | None = None
     smtp_port: int = Field(default=25, ge=1, le=65535)
     sender: Email | None = None
-    # An owner's digest with nothing failing or not run ("all clear"): sent every run (spec
-    # default), only from the run starting in the hour from rule_run_at (daily), or never.
+    # An owner's digest whose every result is healthy ("all clear": nothing failing or not run, no
+    # unhealthy evidence, no qualified pass): sent every run (spec default), only from the run
+    # starting in the hour from rule_run_at (daily), or never. Any other digest is always sent.
     all_clear_digest: Literal["every_run", "daily", "never"] = "every_run"
+
+
+class RetentionHold(Model):
+    """An investigation hold (checkpoint 2 corrections, R1): `dre retention` drops no dq partition
+    whose run_date lies in [from, to] while the hold lasts (until that day, inclusive, or until the
+    hold is removed when `until` is null)."""
+
+    from_: date = Field(alias="from")
+    to: date
+    reason: NonEmptyStr
+    until: date | None = None
+
+    @model_validator(mode="after")
+    def _order(self) -> RetentionHold:
+        if self.to < self.from_:
+            raise invalid(f"retention_holds: to ({self.to}) is before from ({self.from_})",
+                          "set `to` on or after `from`")
+        return self
+
+    def holds(self, run_date: date, today: date) -> bool:
+        return self.from_ <= run_date <= self.to and (self.until is None or today <= self.until)
 
 
 class Defaults(SettingsOverride):
@@ -210,6 +278,11 @@ class Defaults(SettingsOverride):
     retention_months: dict[str, Annotated[int, Field(ge=1)]]
     recipients: dict[NonEmptyStr, Annotated[list[Email], Field(min_length=1)]] = {}
     email: EmailServer = EmailServer()
+    # Notification sinks in order (spec section 8); empty: one email sink from `email`. Each entry
+    # is validated by its kind's model (notify/sinks.py).
+    notify: list[Annotated[Any, AfterValidator(_sink_config)]] = []
+    # Extension packages to load, by entry-point name in the group dre.extensions (spec section 2).
+    extensions: list[NonEmptyStr] = []
     # Spec defaults (sections 6 and 8, constraint 6).
     email_sample_keys: bool | None = False
     volume_tolerance_pct: float | None = Field(default=50, gt=0)
@@ -224,8 +297,20 @@ class Defaults(SettingsOverride):
     rule_weekly_day: Weekday | None = None  # weekly rules' day; null: the dataset's full_sweep_day
     # The watchdog (spec section 8) expects the hourly run's dq_run rows this long after the hour.
     watchdog_grace_minutes: int = Field(default=30, ge=1, le=59)
+    # ADR-07: evaluations and investigations a run publishes per append of commit rows.
+    commit_batch: int = Field(default=25, ge=1, le=1000)
+    # Checkpoint 2 corrections (R1): the daily integrity sweep checks the commits of the last
+    # integrity_sweep_days days against the store; on integrity_full_sweep_day it checks every commit
+    # whose evidence is still kept (null: never). Investigation holds keep partitions from retention.
+    integrity_sweep_days: int = Field(default=35, ge=1)
+    integrity_full_sweep_day: Weekday | None = "SUNDAY"
+    retention_holds: list[RetentionHold] = []
     # How far back a run looks for FAILED results whose cause investigation never finished, to retry it.
     investigation_retry_days: int = Field(default=7, ge=1)
+    # How far back (run_date) the hourly reads of the dq store look: the window history, the rule
+    # schedule and the digest's earlier results. Bounds every hourly scan of dq_check_result to
+    # recent partitions; a dataset with no NORMAL result inside it windows as on a first run.
+    history_lookback_days: int = Field(default=400, ge=1)
     watchdog_owner: NonEmptyStr | None = None  # whose recipients get watchdog alerts; null: every recipient
     # Compute budget (spec section 8): each check gets its dataset's compute_budget_minutes
     # ("check"), or the dataset's checks in a run share it ("dataset").
@@ -233,6 +318,25 @@ class Defaults(SettingsOverride):
     # With a throughput figure, a check whose table's estimated scan would take longer than its
     # budget is refused before running (DID_NOT_RUN / budget_exceeded); null: never refused up front.
     scan_mb_per_minute: float | None = Field(default=None, gt=0)
+    # Isolation (ADR-08): the YARN queue DRE runs in (a platform value; null until confirmed), and the
+    # deployment's queues DRE must never use (the production pipelines'). Names are production values:
+    # they live in the deployed configuration only.
+    yarn_queue: NonEmptyStr | None = None
+    protected_queues: list[NonEmptyStr] = []
+    # ADR-08, build step 8 (operations.py): a NORMAL run evaluates its checks in priority order and
+    # writes each one it reaches after run_budget_minutes as DID_NOT_RUN / BUDGET / run_budget_exceeded;
+    # the kill switch is a file (a deployment value, null until named) whose presence, read at the
+    # start and between checks, writes every remaining check as DID_NOT_RUN / PLATFORM / disabled; a
+    # NORMAL run after one that took more than backpressure_share of the run budget defers the weekly
+    # full sweep to the next run that is not under backpressure.
+    run_budget_minutes: float = Field(default=40, gt=0)
+    kill_switch_file: Annotated[str, AfterValidator(_absolute_path)] | None = None
+    backpressure_share: float = Field(default=0.8, gt=0, le=1)
+    # ADR-08's N (final review O6; checks/budget.py): at most this many units of DRE work (a check, an
+    # investigation, an evidence write) issue Spark jobs at once, a unit cancelled by its budget counting
+    # until it stops; a unit not admitted within cancel_grace_seconds is DID_NOT_RUN / concurrency_limit.
+    max_concurrent_jobs: int = Field(default=1, ge=1)
+    cancel_grace_seconds: float = Field(default=60, gt=0)
 
     @model_validator(mode="after")
     def _check(self) -> Defaults:
@@ -243,6 +347,13 @@ class Defaults(SettingsOverride):
                 f"retention_months must list exactly the dq tables; missing {missing}, unknown {unknown}",
                 f"set retention_months for each of {list(DQ_TABLES)}",
             )
+        gated = {t: self.retention_months[t] for t in GATED_BY_COMMIT}
+        if self.retention_months["dq_commit"] < max(gated.values()):
+            raise invalid(
+                f"retention_months.dq_commit ({self.retention_months['dq_commit']}) is shorter than a table it "
+                f"gates ({gated}): results and evidence would become invisible when their commit rows expire",
+                f"keep dq_commit at least {max(gated.values())} months (ADR-07)",
+            )
         if self.hmac_secret_file is not None:
             path = self.hmac_secret_file
             if not (PurePosixPath(path).is_absolute() or PureWindowsPath(path).is_absolute()):
@@ -250,6 +361,13 @@ class Defaults(SettingsOverride):
                     "hmac_secret_file must be an absolute path",
                     "point it at a protected file outside the repository; never commit the secret",
                 )
+        longest_hold = (self.max_window_hours or 0) / 24
+        if self.history_lookback_days < max(longest_hold, self.investigation_retry_days):
+            raise invalid(
+                f"history_lookback_days ({self.history_lookback_days}) is shorter than max_window_hours "
+                f"({self.max_window_hours} hours) or investigation_retry_days ({self.investigation_retry_days})",
+                "the lookback must cover the longest hold and the investigation retry span; raise it",
+            )
         return self
 
 
@@ -260,6 +378,9 @@ class Landing(Model):
     roots: Annotated[list[NonEmptyStr], Field(min_length=1)]
     file_format: FileFormat
     file_name_pattern: NonEmptyStr = "*"
+    # More files than this under the roots (an archive that is never cleared) and the listing is
+    # DID_NOT_RUN / landing_unreadable with the count, rather than walking the archive every hour.
+    max_files: int | None = Field(default=None, ge=1)
 
 
 class Cadence(Model):
@@ -269,7 +390,7 @@ class Cadence(Model):
     dates: list[date] | None = None
     days_of_month: list[Annotated[int, Field(ge=1, le=31)]] | None = None  # kind monthly
     timezone: TimeZone
-    calendar: Annotated[str, AfterValidator(_calendar)] = "EVERYDAY"  # EVERYDAY | WEEKDAYS (named files: not in release 1)
+    calendar: Annotated[str, AfterValidator(_calendar)] = "EVERYDAY"  # EVERYDAY | WEEKDAYS | a conf/calendars name
 
     @model_validator(mode="after")
     def _check(self) -> Cadence:
@@ -291,10 +412,19 @@ class Feed(SettingsOverride):
     check_delay_minutes: int = Field(default=0, ge=0)  # evaluate a slot this long after its deadline
     # Cause probe parameters by config key (spec section 7; checked against the pattern by validate).
     probes: dict[Identifier, dict[str, Any] | list[dict[str, Any]] | None] = {}
+    # Parameters of parametrised checks, by check id, for every dataset of the feed (a dataset's
+    # own check_params override these field by field). Validated against each check's params model.
+    check_params: dict[Identifier, dict[str, Any]] = {}
 
     @model_validator(mode="after")
     def _check(self) -> Feed:
-        if self.pattern.startswith("FILE_") and self.landing is None:
+        from hcsc.datalake.dre.checks.patterns import is_file_pattern
+
+        try:
+            file_kind = is_file_pattern(self.pattern)
+        except ValueError:  # a malformed conf pattern: dre validate reports the file
+            return self
+        if file_kind and self.landing is None:
             raise invalid(
                 f"pattern {self.pattern} needs `landing`",
                 "add landing: with roots and file_format",
@@ -363,6 +493,187 @@ DERIVED_RECORD = TimeColumn(column="record_ts", timezone="UTC")
 DERIVED_LOAD = TimeColumn(column="load_ts", granularity="minute", timezone="UTC")
 
 
+# --- the reconciliation contract (Phase 1 design, ADR-01 to ADR-05; docs/design/reconciliation-model.md) ---
+
+History = Literal["append_only", "mutable", "snapshot_partitioned"]
+# Mapping kinds of a hop (ADR-02, ADR-03; reconciliation model section 4).
+MappingKind = Literal["identity", "dedup", "merge", "union_partition", "join_contribution", "survivorship",
+                      "aggregate", "fan_out"]
+MAPPING_KINDS: tuple[str, ...] = MappingKind.__args__  # type: ignore[attr-defined]
+TOLERATED = ("missing", "stale", "divergent")  # the only deficits a tolerance may cover (ADR-01)
+
+
+class Grain(Model):
+    """What one record of a dataset is (ADR-02, ADR-05). Its key is the dataset's `key` and its version
+    the dataset's `record_time` (ties ordered by a hop's `winner_rule`); `history` says whether the
+    table keeps what it held at a past cutoff. null: not declared, so no as-of replay."""
+
+    history: History | None = None
+
+
+class Effective(Model):
+    """When an exclusion applies, judged against the upstream record's load time: from (inclusive)
+    and to (exclusive) are dates at midnight in defaults.yaml `timezone`. null: unbounded."""
+
+    from_: date | None = Field(default=None, alias="from")
+    to: date | None = None
+
+    @model_validator(mode="after")
+    def _order(self) -> Effective:
+        if self.from_ is not None and self.to is not None and self.to <= self.from_:
+            raise invalid(f"effective.to ({self.to}) is not after effective.from ({self.from_})",
+                          "set `to` after `from`, or leave it null for an open end")
+        return self
+
+
+class Exclusion(Model):
+    """An approved, versioned rule that legitimately keeps upstream rows out of this dataset (ADR-04).
+    A changed condition is a new version. `max_share`: more than this share of due records excluded
+    fails the hop (the volume guard against an over-broad condition)."""
+
+    id: Identifier
+    version: int = Field(ge=1)
+    condition: SqlFragment  # over the upstream's columns
+    effective: Effective = Effective()
+    approved_by: NonEmptyStr  # the change record or approver that authorised the rule
+    code_ref: NonEmptyStr | None = None
+    max_share: float = Field(gt=0, le=1)
+
+    @property
+    def label(self) -> str:
+        return f"{self.id}@{self.version}"
+
+
+class RejectReason(Model):
+    """How the ledger treats a reject reason code (ADR-04). Unlisted codes are defects."""
+
+    disposition: Literal["authorised", "defect"]
+    max_share: float | None = Field(default=None, gt=0, le=1)  # an authorised reason's volume guard
+    # The approved business rules (id@version) a reject of this reason must name to be authorised
+    # (checkpoint 3, C3-01). Empty: the reason alone decides. Needs the rejects' rule columns.
+    rules: list[Annotated[str, AfterValidator(_rule_ref)]] = []
+
+    @model_validator(mode="after")
+    def _guard(self) -> RejectReason:
+        if self.disposition == "authorised" and self.max_share is None:
+            raise invalid("an authorised reject reason needs max_share",
+                          "set max_share (for example 0.02): above it the authorised rejects fail the hop")
+        if self.disposition == "defect" and self.max_share is not None:
+            raise invalid("max_share applies to authorised reasons only", "remove max_share from a defect")
+        if self.disposition == "defect" and self.rules:
+            raise invalid("rules approve rejects of an authorised reason", "remove rules from a defect")
+        return self
+
+
+class Deletion(Model):
+    """How the upstream expresses a deletion, and what the downstream shows for it (ADR-04).
+    `tombstone`: SQL over the upstream's columns marking the version that deletes the record.
+    `applied_as`: hard (absent downstream) or soft (present, matching `soft_when`, SQL over this
+    dataset's columns). Dates held as strings are compared through to_date(column, 'pattern')."""
+
+    tombstone: SqlFragment
+    applied_as: Literal["hard", "soft"]
+    soft_when: SqlFragment | None = None
+
+    @model_validator(mode="after")
+    def _soft(self) -> Deletion:
+        if (self.applied_as == "soft") != (self.soft_when is not None):
+            raise invalid("soft_when goes with applied_as: soft, and only with it",
+                          "for a soft delete set soft_when (SQL over this dataset); for a hard delete remove it")
+        return self
+
+
+class Tolerance(Model):
+    """Deficits a hop may carry and still pass, as absolute counts per hop per window (ADR-01)."""
+
+    missing: int = Field(default=0, ge=0)
+    stale: int = Field(default=0, ge=0)
+    divergent: int = Field(default=0, ge=0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _only_deficits(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            other = [k for k in data if k not in TOLERATED]
+            if other:
+                raise invalid(f"tolerance cannot cover {other}",
+                              f"tolerate only {list(TOLERATED)}: unassessable records, breaches and defect rejects "
+                              "always fail (ADR-01)")
+        return data
+
+
+class BatchLineage(Model):
+    """A reject names the batch of the record it refused: `column` in the rejects table, compared
+    (as text) with `upstream_column`, the upstream's batch column, on the rows of the version under
+    judgement."""
+
+    column: Identifier
+    upstream_column: Identifier
+
+
+class RejectLineage(Model):
+    """How a reject names the record version it refused (checkpoint 3, C3-01): exactly one of
+    `version`, the rejects' column holding the refused record's version (its record time, read with
+    its format and zone and compared, in UTC, with the upstream's record time), or `batch`."""
+
+    version: TimeColumn | None = None
+    batch: BatchLineage | None = None
+
+    @model_validator(mode="after")
+    def _one(self) -> RejectLineage:
+        if (self.version is None) == (self.batch is None):
+            raise invalid("lineage needs exactly one of version and batch",
+                          "set version: {column: <the refused record's version>} or batch: {column, upstream_column}")
+        return self
+
+
+class RejectsSource(Model):
+    """Where the pipeline's rejects evidence for a hop is (ADR-04; the rejects table of
+    docs/evidence-contract.md): reported evidence. Its key columns carry the upstream's names and
+    raw values (the hop's key_map columns, normalised as the upstream normalises them);
+    `reason_column` holds the reason code and `time_column` when the record was rejected (UTC
+    unless its `timezone` says otherwise). `condition` (SQL over the table) narrows it to the stage
+    that feeds this hop. `lineage` (required, C3-01) ties a reject to the record version it refused;
+    `rule_id_column` and `rule_version_column` name the business rule behind it, where the pipeline
+    records one. A reject accounts for the version under judgement only when its key and its
+    lineage match it, and it was rejected before the window end; a reject of the key whose lineage
+    is empty cannot be attributed, and leaves the record unassessable."""
+
+    table: TableName
+    condition: SqlFragment | None = None
+    reason_column: Identifier = "reason_code"
+    time_column: TimeColumn = Field(default_factory=lambda: TimeColumn(column="rejected_at", timezone="UTC"))
+    lineage: RejectLineage
+    rule_id_column: Identifier | None = None
+    rule_version_column: Identifier | None = None
+
+    @model_validator(mode="after")
+    def _rule_columns(self) -> RejectsSource:
+        if (self.rule_id_column is None) != (self.rule_version_column is None):
+            raise invalid("a rule is named by its id and its version", "set both rule_id_column and rule_version_column")
+        return self
+
+
+class EdgeContract(Model):
+    """The reconciliation contract of one hop (this dataset, one upstream): reconciliation model
+    sections 3 to 6. `reference` (join_contribution): this dataset's column -> the contributor's key
+    column. `contributes` (join_contribution): the contributor's column -> this dataset's column it
+    supplies, compared by HOP_CONTRIBUTION. `precedence` (survivorship): the upstreams in order, the
+    winner first. `rejects`: where
+    the rejects evidence the reject policy applies to is read (without it, a rejected record counts
+    as missing)."""
+
+    mapping: MappingKind
+    exclusions: list[Exclusion] = []
+    reject_policy: dict[Identifier, RejectReason] = {}
+    deletion: Deletion | None = None
+    tolerance: Tolerance = Tolerance()
+    reference: dict[Identifier, Identifier] = {}
+    contributes: dict[Identifier, Identifier] = {}
+    precedence: list[Identifier] = []
+    rejects: RejectsSource | None = None
+
+
 class Dataset(SettingsOverride):
     dataset: Identifier
     table: TableName | None = None    # a real table; or
@@ -377,6 +688,9 @@ class Dataset(SettingsOverride):
     record_time: TimeColumn | None = None
     load_time: TimeColumn | None = None
     partition_column: Identifier | None = None
+    # How the partition value is written (a Spark date pattern, e.g. yyyy-MM-dd): with it, windowed
+    # scans add a partition predicate beside the parsed load time (checks/partitions.py).
+    partition_format: NonEmptyStr | None = None
     file_name_column: Identifier | None = None
     key_unique: bool = False
     group_by: list[Identifier] = []
@@ -388,6 +702,13 @@ class Dataset(SettingsOverride):
     # leave those rows out of what they expect.
     hop_exclusions: dict[Identifier, SqlFragment] = {}
     winner_rule: WinnerRule | None = None
+    grain: Grain = Grain()
+    # The reconciliation contract per upstream (Phase 1 design). A hop with none takes its kind from
+    # the fields above: aggregate for a derived upstream, dedup otherwise (config/contracts.py).
+    contracts: dict[Identifier, EdgeContract] = {}
+    # Parameters of parametrised checks (T1_FRESHNESS, T1_COLUMN_RANGE, ...), by check id. A
+    # parametrised check runs only where its pattern, feed or dataset configures it.
+    check_params: dict[Identifier, dict[str, Any]] = {}
 
     @model_validator(mode="before")
     @classmethod
@@ -421,56 +742,3 @@ class Rule(Model):
     status: RuleStatus
     severity: Severity
     frequency: RuleFrequency = "daily"
-
-
-class MaxRowsPerKey(Model):
-    max: int = Field(ge=0)
-
-
-class MaxOpenRowsPerKey(Model):
-    open_when: SqlFragment
-    max: int = Field(ge=0)
-
-
-class ColumnOrder(Model):
-    lower: Identifier
-    upper: Identifier
-    nulls_fail: bool = False
-    format: NonEmptyStr | None = None  # parse both columns as times with this format (never compare as strings)
-
-
-class SupersededStillOpen(Model):
-    group_key: Annotated[list[Identifier], Field(min_length=1), BeforeValidator(_str_to_list)]
-    order_column: Identifier
-    open_when: SqlFragment
-    format: NonEmptyStr | None = None  # parse order_column as a time with this format
-
-
-class ChildWithinParent(Model):
-    parent_dataset: Identifier
-    join: Annotated[dict[Identifier, Identifier], Field(min_length=1)]  # child column: parent column
-    child_start: Identifier
-    parent_start: Identifier
-    parent_end: Identifier
-    format: NonEmptyStr | None = None  # parse the three time columns with this format
-
-
-class ValueFormat(Model):
-    column: Identifier
-    pattern: Regex
-
-
-class NullRateMax(Model):
-    column: Identifier
-    max_rate: float = Field(ge=0, le=1)
-
-
-TEMPLATE_PARAMS: dict[str, type[Model]] = {
-    "max_rows_per_key": MaxRowsPerKey,
-    "max_open_rows_per_key": MaxOpenRowsPerKey,
-    "column_order": ColumnOrder,
-    "superseded_still_open": SupersededStillOpen,
-    "child_within_parent": ChildWithinParent,
-    "value_format": ValueFormat,
-    "null_rate_max": NullRateMax,
-}

@@ -13,6 +13,7 @@ source: what it reads comes from the feed's `probes:` parameters. All reads only
   upstream file (base name of the upstream file_name_column) or key (the upstream's mapped key).
 - size_changed: CONFIRMED when a file of the failure was seen with more than one size.
 
+Each probe is registered with its parameter model (`probe`, config/probes.py).
 Values read from files are parsed through Spark; log lines and file contents never go into
 evidence (only paths, counts and the parsed values). What a probe reads (a value file, the log
 lines matching a pattern, a parsed value) is read once per evaluation and shared by its failures
@@ -23,19 +24,53 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from hcsc.datalake.dre.causes.base import CauseContext, Failure, Outcome, confirmed, not_ready, ruled_out
 from hcsc.datalake.dre.causes.landing import NO_RAW, landing_files
+from hcsc.datalake.dre.causes.merge import hash_literals
 from hcsc.datalake.dre.checks.base import render_sql, utc_literal
 from hcsc.datalake.dre.checks.hop.common import HASH_FUNCTION, register_key_hash
 from hcsc.datalake.dre.checks.keys import column_expr, key_string
 from hcsc.datalake.dre.checks.times import as_utc, sql_string
+from hcsc.datalake.dre.config.models import Model, NonEmptyStr, Regex, SqlFragment, TableName
+from hcsc.datalake.dre.config.probes import probe
 from hcsc.datalake.dre.sources.hdfs import glob_files, path_exists
 
 READ_LINES = 1000  # lines of a value file read when looking for the value
 
 
+class FileExists(Model):
+    path: NonEmptyStr | None = None
+
+
+class FileValueCompare(Model):
+    path: NonEmptyStr | None = None
+    extract_regex: Regex | None = None
+    format: NonEmptyStr | None = None  # Spark datetime pattern for the extracted value, e.g. yyyyMMdd
+    compare_to: Literal["partition", "window"] | None = None
+    # partition: CONFIRMED when the file's value is later than the failure's partition (spec
+    # default), or when it differs from it at all ("different").
+    confirm_when: Literal["later", "different"] = "later"
+
+
+class LogContains(Model):
+    path_glob: NonEmptyStr | None = None
+    pattern: Regex | None = None
+
+
+class TableContains(Model):
+    table: TableName | None = None
+    condition: SqlFragment | None = None
+    id: NonEmptyStr | None = None        # optional label, e.g. a filter rule's name
+    code_ref: NonEmptyStr | None = None  # optional: where the rule lives (file and line, or commit)
+
+
+class SizeChanged(Model):
+    pass
+
+
+@probe("file_exists", FileExists)
 def file_exists(cx: CauseContext, params: Any, failure: Failure) -> Outcome:
     return confirmed(path=params.path) if path_exists(cx.spark, params.path) else ruled_out(path=params.path)
 
@@ -70,6 +105,7 @@ def _file_value(cx: CauseContext, path: str, regex: str) -> str | None:
     return cx.cached(f"file_value:{path}:{regex}", read)
 
 
+@probe("file_value_compare", FileValueCompare)
 def file_value_compare(cx: CauseContext, params: Any, failure: Failure) -> Outcome:
     raw = _file_value(cx, params.path, params.extract_regex)
     if raw is None:
@@ -113,6 +149,10 @@ def _names(failure: Failure) -> list[str]:
     return [failure.file_name] if failure.file_name else []
 
 
+LOG_LINES = 500  # the most matching lines a log probe keeps
+
+
+@probe("log_contains", LogContains)
 def log_contains(cx: CauseContext, params: Any, failure: Failure) -> Outcome:
     from pyspark.sql import functions as F
 
@@ -120,16 +160,26 @@ def log_contains(cx: CauseContext, params: Any, failure: Failure) -> Outcome:
     if not names:
         return ruled_out(reason="no file to look for")
 
+    # Every failing file of the evaluation (the cause engine lists them): the lines read once serve
+    # every failure. Without the list (a probe used on its own) nothing narrows the read by name.
+    wanted = sorted(set(cx.cache["failure_files"])) if cx.cache.get("failure_files") else None
+
     def matching() -> tuple[int, list[tuple[str, str]]]:
-        """(log files, (log, line) for every line matching the pattern): read once per evaluation.
-        The lines stay in memory; only log paths and counts go into evidence."""
+        """(log files, (log, line) for lines matching the pattern that name a failing file): read
+        once per evaluation, bounded in Spark to the files looked for and to LOG_LINES lines. The
+        lines stay in memory; only log paths and counts go into evidence."""
+        from functools import reduce
+
         logs = glob_files(cx.spark, params.path_glob)
         if not logs:
             return 0, []
         lines = cx.spark.read.text(logs).withColumn("log", F.input_file_name())
-        return len(logs), [(r["log"], r["value"]) for r in lines.filter(F.col("value").rlike(params.pattern))
-                           .select("log", "value").collect()]
-    logs, lines = cx.cached(f"log_contains:{params.path_glob}:{params.pattern}", matching)
+        matches = F.col("value").rlike(params.pattern)
+        if wanted:
+            matches = matches & reduce(lambda a, b: a | b, (F.col("value").contains(n) for n in wanted))
+        return len(logs), [(r["log"], r["value"]) for r in lines.filter(matches)
+                           .select("log", "value").limit(LOG_LINES).collect()]
+    logs, lines = cx.cached(f"log_contains:{params.path_glob}:{params.pattern}:{hash(tuple(wanted or ()))}", matching)
     if not logs:
         return ruled_out(logs=0)
     found: dict[str, int] = {}
@@ -141,6 +191,7 @@ def log_contains(cx: CauseContext, params: Any, failure: Failure) -> Outcome:
     return ruled_out(logs=logs)
 
 
+@probe("table_contains", TableContains)
 def table_contains(cx: CauseContext, params: Any, failure: Failure) -> Outcome:
     up = cx.upstream()
     if up is None:
@@ -158,16 +209,21 @@ def table_contains(cx: CauseContext, params: Any, failure: Failure) -> Outcome:
     else:
         return ruled_out(reason="no file or key to look for")
 
+    # The evaluation's failing refs (the cause engine lists them once); alone, just this failure's.
+    refs = sorted(set(cx.cache.get("failure_refs") or [ref]))
+    literals = hash_literals(refs) if by == "key" else [sql_string(r) for r in refs]
+
     def query() -> set[str]:
         sql = render_sql("cause_table_contains.sql.j2", by=by, column=column, table=params.table,
-                         condition=params.condition, hash_fn=HASH_FUNCTION)
+                         condition=params.condition, hash_fn=HASH_FUNCTION, refs=literals)
         return {r.ref for r in cx.spark.sql(sql).collect()}
-    found = cx.cached(f"table_contains:{by}:{params.table}:{params.condition}", query)
+    found = cx.cached(f"table_contains:{by}:{params.table}:{params.condition}:{hash(tuple(refs))}", query)
     evidence = {"table": params.table, **({"id": params.id} if params.id else {}),
                 **({"code_ref": params.code_ref} if params.code_ref else {})}
     return confirmed(**evidence) if ref in found else ruled_out(**evidence)
 
 
+@probe("size_changed", SizeChanged)
 def size_changed(cx: CauseContext, params: Any, failure: Failure) -> Outcome:
     if failure.files is None:
         return not_ready(NO_RAW)
@@ -177,11 +233,3 @@ def size_changed(cx: CauseContext, params: Any, failure: Failure) -> Outcome:
     changed = [p for p in failure.files if p in files and files[p].sizes > 1]
     return confirmed(files=changed) if changed else ruled_out(files_checked=len(failure.files))
 
-
-PROBES = {
-    "file_exists": file_exists,
-    "file_value_compare": file_value_compare,
-    "log_contains": log_contains,
-    "table_contains": table_contains,
-    "size_changed": size_changed,
-}

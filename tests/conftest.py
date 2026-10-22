@@ -46,3 +46,13 @@ def spark(tmp_path_factory: pytest.TempPathFactory) -> Iterator["SparkSession"]:
     )
     yield session
     session.stop()
+
+
+@pytest.fixture(autouse=True)
+def packaged_capabilities_only_afterwards():
+    """A test that loads a configuration leaves its patterns, templates, calendars and extensions
+    behind; the registries go back to the packaged capabilities after every test."""
+    yield
+    from hcsc.datalake.dre.config.loader import reset_conf_state
+
+    reset_conf_state()

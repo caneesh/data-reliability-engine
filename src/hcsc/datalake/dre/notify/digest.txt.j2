@@ -6,8 +6,17 @@ Run {{ d.run_id }}, started {{ d.run_started.strftime("%Y-%m-%d %H:%M") }} UTC, 
 Changed since the last run
 {% for i in d.changed %}
 - {{ i.label }}: {{ i.prev_state or "first result" }} -> {{ i.state }}
+{% if i.scope %}
+    {{ i.scope }}
+{% endif %}
 {% if i.state == "FAILED" %}
     observed: {{ i.observed }}; expected: {{ i.expected }}
+{% for line in i.triage %}
+    triage: {{ line }}
+{% endfor %}
+{% if i.blind_spots %}
+    blind spots: {{ i.blind_spots | join("; ") }}
+{% endif %}
 {% if i.rule %}
     {{ i.change }}
 {% endif %}
@@ -32,6 +41,9 @@ Changed since the last run
 Did not run
 {% for i in d.did_not_run %}
 - {{ i.label }}: {{ i.reason }}
+{% if i.scope %}
+    {{ i.scope }}
+{% endif %}
 {% endfor %}
 {% if not d.did_not_run %}
 - none
@@ -54,4 +66,27 @@ Report only (proposed rules)
 {% endfor %}
 
 {% endif %}
+{% if d.qualified %}
+Passed with qualifications (not counted as healthy)
+{% for i in d.qualified %}
+- {{ i.label }}: {{ i.qualifications | join(", ") }}
+{% if i.scope %}
+    {{ i.scope }}
+{% endif %}
+{% if i.blind_spots %}
+    blind spots: {{ i.blind_spots | join("; ") }}
+{% endif %}
+{% endfor %}
+
+{% endif %}
+{% if d.evidence %}
+Evidence not verified (not counted as healthy)
+{% for i in d.evidence %}
+- {{ i.label }}: {{ i.state }}, evidence {{ i.reason }}
+{% endfor %}
+
+{% endif %}
 Passing checks: {{ d.passing }}
+{% if d.integrity %}
+{{ d.integrity }}
+{% endif %}

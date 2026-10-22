@@ -1,5 +1,6 @@
 {# Shared CTEs for hop checks. p: parameters from checks/hop/common.py.
-   up / dn: each side's rows (canonical key k, record time, load time, owned columns as strings);
+   up_all / dn_all: each side's rows (canonical key k, record time, load time, owned columns as
+   strings); up / dn: the rows of the candidate keys (every key on the full sweep);
    up_top / dn_top: rows at each key's latest record time, ties kept (all of a key's rows when none
    has a record time, so the key is never dropped);
    judged: the keys judged in this window, with MISSING (no row here), UNASSESSABLE (a side has no
@@ -9,7 +10,7 @@
    pending_keys / excluded_keys (with counts=True): what was not judged and why, for the counts in
    the result; left out elsewhere, since Spark analyses even unused CTEs. #}
 {% macro ctes(p, counts=False) %}
-up AS (
+up_all AS (
   SELECT {{ p.up_key }} AS k, {{ p.up_record }} AS record_ts, {{ p.up_load }} AS load_ts
 {% for c in p.owned %}
        , CAST({{ c.up }} AS STRING) AS u_{{ loop.index }}
@@ -19,14 +20,7 @@ up AS (
   WHERE {{ p.up_filter }}
 {% endif %}
 ),
-up_top AS (
-  SELECT * FROM (SELECT up.*, MAX(record_ts) OVER (PARTITION BY k) AS top_ts FROM up) ranked_up
-  WHERE record_ts = top_ts OR top_ts IS NULL
-),
-up_keys AS (
-  SELECT k, MAX(record_ts) AS up_record_ts, MAX(load_ts) AS up_load_ts FROM up_top GROUP BY k
-),
-dn AS (
+dn_all AS (
   SELECT {{ p.dn_key }} AS k, {{ p.dn_record }} AS record_ts,
          {% if p.dn_load %}{{ p.dn_load }}{% else %}CAST(NULL AS TIMESTAMP){% endif %} AS load_ts
 {% for c in p.owned %}
@@ -37,6 +31,64 @@ dn AS (
   WHERE {{ p.dn_filter }}
 {% endif %}
 ),
+open_keys AS (
+{% if p.use_open %}
+  -- the hop's open keys (latest event FLAGGED or STILL_FLAGGED), as v_open_keys defines them, read
+  -- from the recent run_date partitions only: an open key is re-emitted on every evaluation, so its
+  -- latest event is never older than the hop's last evaluation. Only this engine's key encoding (a row
+  -- stored before migration 2 is encoding 1), and REKEYED is no event: a spell a later engine continued
+  -- under its own encoding is still this engine's (Gate A remediation, spec section 6, "Key events")
+  SELECT key_hash, k FROM (
+    SELECT key_hash, key_value AS k, event,
+           ROW_NUMBER() OVER (PARTITION BY key_hash ORDER BY observed_at DESC, run_id DESC) AS rn
+    FROM {{ p.dq_database }}.v_committed_key_event
+    WHERE dataset = '{{ p.dataset }}' AND check_id = 'HOP_KEY_CURRENCY' AND hop = '{{ p.hop }}'
+      AND coalesce(key_encoding, 1) = {{ p.key_encoding }} AND event <> 'REKEYED'
+{% if p.events_since %}
+      AND run_date >= DATE'{{ p.events_since }}'
+{% endif %}
+  ) latest
+  WHERE rn = 1 AND event IN ('FLAGGED', 'STILL_FLAGGED')
+{% else %}
+  SELECT CAST(NULL AS STRING) AS key_hash, CAST(NULL AS STRING) AS k WHERE 1 = 0
+{% endif %}
+),
+{% if p.full_sweep %}
+up AS (SELECT * FROM up_all),
+dn AS (SELECT * FROM dn_all),
+{% else %}
+-- Only the keys this window can judge or count go through the window functions below: keys
+-- loaded upstream since the judged range began (judged, or pending behind their deadline),
+-- keys loaded here in the window (judged again), and open keys. The judged CTE still applies
+-- the exact conditions; this narrows the work, not the answer. The full sweep takes every key.
+candidates AS (
+  SELECT DISTINCT k FROM (
+    SELECT k FROM up_all WHERE load_ts >= {{ p.deadline_start }}
+    UNION ALL
+    SELECT k FROM dn_all WHERE load_ts >= {{ p.window_start }} AND load_ts < {{ p.window_end }}
+    UNION ALL
+    SELECT k FROM open_keys WHERE k IS NOT NULL
+  ) wanted
+),
+-- columns listed (no star): with a table gone, Spark would report the star before the table
+up AS (
+  SELECT u.k, u.record_ts, u.load_ts{% for c in p.owned %}, u.u_{{ loop.index }}{% endfor %}
+
+  FROM up_all u JOIN candidates c ON c.k = u.k
+),
+dn AS (
+  SELECT d.k, d.record_ts, d.load_ts{% for c in p.owned %}, d.d_{{ loop.index }}{% endfor %}
+
+  FROM dn_all d JOIN candidates c ON c.k = d.k
+),
+{% endif %}
+up_top AS (
+  SELECT * FROM (SELECT up.*, MAX(record_ts) OVER (PARTITION BY k) AS top_ts FROM up) ranked_up
+  WHERE record_ts = top_ts OR top_ts IS NULL
+),
+up_keys AS (
+  SELECT k, MAX(record_ts) AS up_record_ts, MAX(load_ts) AS up_load_ts FROM up_top GROUP BY k
+),
 dn_top AS (
   SELECT * FROM (SELECT dn.*, MAX(record_ts) OVER (PARTITION BY k) AS top_ts FROM dn) ranked_dn
   WHERE record_ts = top_ts OR top_ts IS NULL
@@ -45,14 +97,6 @@ dn_keys AS (
   SELECT k, MAX(record_ts) AS dn_record_ts, MAX(load_ts) AS dn_load_ts,
          MAX(CASE WHEN load_ts >= {{ p.window_start }} AND load_ts < {{ p.window_end }} THEN 1 ELSE 0 END) AS dn_loaded
   FROM dn GROUP BY k
-),
-open_keys AS (
-{% if p.use_open %}
-  SELECT DISTINCT key_hash FROM {{ p.dq_database }}.v_open_keys
-  WHERE dataset = '{{ p.dataset }}' AND check_id = 'HOP_KEY_CURRENCY' AND hop = '{{ p.hop }}'
-{% else %}
-  SELECT CAST(NULL AS STRING) AS key_hash WHERE 1 = 0
-{% endif %}
 ),
 hashed_up AS (
   SELECT u.*, {% if p.hashed %}{{ p.hash_fn }}(u.k){% else %}CAST(NULL AS STRING){% endif %} AS key_hash
@@ -77,9 +121,10 @@ judged AS (
 {% endif %}
 ){% if counts %},
 pending_keys AS (
-  -- upstream keys not judged because their deadline has not passed yet (loaded within sla_hours)
+  -- upstream keys not judged because their deadline has not passed yet (loaded within sla_hours);
+  -- after a longer sla_hours, keys before the range's start were judged already, not pending
   SELECT u.k FROM up_keys u LEFT ANTI JOIN judged j ON j.k = u.k
-  WHERE u.up_load_ts >= {{ p.deadline_end }}
+  WHERE u.up_load_ts >= {{ p.pending_from }}
 ),
 excluded_keys AS (
   -- upstream keys whose every row a hop exclusion keeps out, in the range judged

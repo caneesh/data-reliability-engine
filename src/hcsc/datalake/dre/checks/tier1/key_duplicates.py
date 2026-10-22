@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from hcsc.datalake.dre.checks.base import Check, CheckContext, CheckResult, from_counts, group_values, render_sql
 from hcsc.datalake.dre.checks.keys import key_exprs
+from hcsc.datalake.dre.checks.registry import register_check
 
 if TYPE_CHECKING:
     from hcsc.datalake.dre.checks.events import Event
@@ -40,3 +41,6 @@ class KeyDuplicates(Check):
             )
             for row in ctx.spark.sql(sql).collect()
         ]
+
+
+register_check(KeyDuplicates())

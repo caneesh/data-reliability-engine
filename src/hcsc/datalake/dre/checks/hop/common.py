@@ -3,7 +3,8 @@
 A hop is (this dataset, one upstream in its key_map). Keys are joined on the mapped key
 with each side's key_normalise, as one canonical string. Each side's feed_filter applies.
 Keys judged in a window: upstream keys whose latest load time + sla_hours falls in the
-window (judged once, at their deadline); keys with a row here loaded in the window whose
+hop's deadline range (judged once, at their deadline; the range continues from the coverage the
+hop committed, checks/hop/coverage.py); keys with a row here loaded in the window whose
 upstream deadline has passed (so a key that regresses here without an upstream change is
 judged again); and keys still open in v_open_keys. On the full sweep day, every upstream
 key past its deadline. Upstream rows matching the dataset's hop_exclusions for the upstream
@@ -15,21 +16,27 @@ from __future__ import annotations
 import hashlib
 import hmac
 from dataclasses import replace
-from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Callable
 
-from hcsc.datalake.dre.checks.base import CheckContext, CheckResult, did_not_run, from_exception, utc_literal
+from hcsc.datalake.dre.checks.base import (
+    CheckContext, CheckResult, did_not_run, error_detail, from_exception, render_sql, utc_literal,
+)
 from hcsc.datalake.dre.checks.derived import source_of
-from hcsc.datalake.dre.checks.keys import column_expr, key_string
+from hcsc.datalake.dre.checks.hop.coverage import coverage_of, judged
+from hcsc.datalake.dre.checks.keys import KEY_ENCODING, column_expr, key_string
 from hcsc.datalake.dre.checks.times import utc_expr
 
 if TYPE_CHECKING:
-    from pyspark.sql import SparkSession
+    from pyspark.sql import DataFrame, SparkSession
 
     from hcsc.datalake.dre.checks.events import Event
     from hcsc.datalake.dre.config.models import Dataset
 
 HASH_FUNCTION = "dre_key_hash"
+# The REKEYED an engine writes for an identity of another key encoding it finds open (a rollback from
+# a later release): the identity is closed in its own encoding, and its spell continues under this
+# engine's encoding, which REKEYED never ended (spec section 6, "Key events").
+ROLLBACK_DETAIL = f"key encoding {KEY_ENCODING} (rollback)"
 
 
 def hop_label(upstream_id: str, dataset_id: str) -> str:
@@ -51,8 +58,10 @@ def per_hop(up_id: str, evaluate_hop: Callable[[], CheckResult]) -> CheckResult:
         return replace(from_exception(exc), group_values={"upstream": up_id})
 
 
-def hop_params(ctx: CheckContext, event: Event, up_id: str, up: Dataset | None) -> dict[str, Any] | CheckResult:
-    """Template parameters for one hop, or a DID_NOT_RUN result when the hop cannot be evaluated."""
+def hop_params(ctx: CheckContext, event: Event, up_id: str, up: Dataset | None,
+               check_id: str) -> dict[str, Any] | CheckResult:
+    """Template parameters for one hop, or a DID_NOT_RUN result when the hop cannot be evaluated.
+    The deadline range is the hop's own (checks/hop/coverage.py), carried on the result as `coverage`."""
     ds = ctx.dataset
     if up is None:
         return did_not_run("invalid_config", detail=f"upstream {up_id} is not configured",
@@ -70,40 +79,139 @@ def hop_params(ctx: CheckContext, event: Event, up_id: str, up: Dataset | None) 
     except (KeyError, ValueError) as exc:
         return did_not_run("invalid_config", detail=f"upstream {up_id} cannot be read: {type(exc).__name__}",
                            group_values={"upstream": up_id})
-    sla = timedelta(hours=ctx.settings.sla_hours)
+    if up.table is not None:  # the hop's own precondition: the analyzer's error for a gone table is not reliable
+        try:
+            exists = ctx.spark.catalog.tableExists(up.table)
+        except Exception as exc:
+            return did_not_run("metastore_unavailable", detail=error_detail(exc), group_values={"upstream": up_id})
+        if not exists:
+            return did_not_run("table_missing", detail=f"table {up.table} not found", group_values={"upstream": up_id})
+    span = judged(ctx, event, check_id, up_id)
+    start, end = span.start, span.end
+    open_since = ctx.history_since if span.in_lookback else ctx.key_events_since
     owned = [{"up": column_expr(up, u), "dn": column_expr(ds, d)} for u, d in ds.owned_columns.items()]
+    exclusion = exclusion_condition(ds, up_id, up, tz)
     filters = [f"({up.feed_filter})" if up.feed_filter else None,
-               f"NOT coalesce(({ds.hop_exclusions[up_id]}), FALSE)" if up_id in ds.hop_exclusions else None]
+               f"NOT coalesce(({exclusion}), FALSE)" if exclusion else None,
+               has_a_key([mapping[c] for c in ds.key])]
+    dn_filters = [f"({ds.feed_filter})" if ds.feed_filter else None, has_a_key(list(ds.key))]
     return {
         "up_table": up_source, "up_filter": " AND ".join(f for f in filters if f) or None,
         # for counting what the exclusions keep out: the upstream's own filter, and the exclusion
-        "up_base_filter": up.feed_filter, "up_exclusion": ds.hop_exclusions.get(up_id),
+        "up_base_filter": up.feed_filter, "up_exclusion": exclusion,
         "up_key": key_string([column_expr(up, mapping[c]) for c in ds.key]),
         "up_record": utc_expr(up.record_time, tz), "up_load": utc_expr(up.load_time, tz),
         "up_file": up.file_name_column,
-        "dn_table": ds.table, "dn_filter": ds.feed_filter,
+        "dn_table": ds.table, "dn_filter": " AND ".join(f for f in dn_filters if f),
         "dn_key": key_string([column_expr(ds, c) for c in ds.key]),
         "dn_record": utc_expr(ds.record_time, tz), "dn_file": ds.file_name_column,
         "dn_load": utc_expr(ds.load_time, tz) if ds.load_time is not None else None,
         "window_start": utc_literal(event.window_start), "window_end": utc_literal(event.window_end),
         "owned": owned,
-        "deadline_start": utc_literal(event.window_start - sla), "deadline_end": utc_literal(event.window_end - sla),
+        "deadline_start": utc_literal(start), "deadline_end": utc_literal(end),
+        # pending: past the range's end; a record before the range's start was judged already
+        "pending_from": utc_literal(max(start, end)), "coverage": coverage_of(start, end),
+        "qualifications": span.qualifications,  # coverage_gap: the range does not continue from trusted coverage
         "full_sweep": ctx.full_sweep, "hash_fn": HASH_FUNCTION,
         # hashed: compute key_hash with the secret; use_open: also judge keys open in v_open_keys
         # (NORMAL runs only: the open-key state is today's, not a historical window's)
-        "hashed": ctx.key_secret is not None, "use_open": ctx.key_secret is not None and ctx.record_key_events,
+        "hashed": ctx.key_secret is not None,
+        "use_open": ctx.key_secret is not None and (ctx.record_key_events if ctx.judge_open_keys is None
+                                                    else ctx.judge_open_keys),
         "dq_database": ctx.dq_database, "dataset": ds.dataset, "hop": hop_label(up_id, ds.dataset),
+        # open keys are read from dq_key_event's run_date partitions on or after this (None: all of them).
+        # Every evaluation records each open key it reads again, so while the hop's coverage continues
+        # from inside the lookback its open keys' latest events are inside it; otherwise (the hop was
+        # not evaluated for longer) back to dq_key_event's retention (KI-19, as the chain's carry, CA-02)
+        "events_since": open_since.isoformat() if open_since is not None else None,
+        "events_from_retention": not span.in_lookback and ctx.key_events_since is not None,
+        # the open-key read takes this engine's key encoding only, REKEYED as no event (Gate A remediation)
+        "key_encoding": KEY_ENCODING,
     }
 
 
-def not_judged(pending: int | None, excluded: int | None, unit: str, excluded_unit: str | None = None) -> str:
+def foreign_params(ctx: CheckContext, dataset: str, check_id: str, hop: str, since: str | None,
+                   open_events: tuple[str, ...]) -> dict[str, Any]:
+    """Parameters of hop_foreign_keys.sql.j2: identities of another key encoding than this engine's open
+    at a hop (HOP_KEY_CURRENCY) or chain (CHAIN_COMPLETENESS), read as far back as its open keys."""
+    return {"dq_database": ctx.dq_database, "dataset": dataset, "check_id": check_id, "hop": hop,
+            "key_encoding": KEY_ENCODING, "since": since, "open_events": open_events}
+
+
+def foreign_open(ctx: CheckContext, f: dict[str, Any]) -> int:
+    """How many identities of another key encoding are open: a later release's keys after a rollback,
+    or an encoding this engine does not know. Never read as this engine's own (spec section 6)."""
+    return ctx.spark.sql(render_sql("hop_foreign_keys.sql.j2", mode="count", f=f)).collect()[0].n
+
+
+def rekeyed_back(ctx: CheckContext, f: dict[str, Any]) -> DataFrame:
+    """REKEYED events closing each such identity in its own encoding (key_hash, key_value, event,
+    state_detail, key_encoding), to be written with the evaluation that judged the hop in full."""
+    return ctx.spark.sql(render_sql("hop_foreign_keys.sql.j2", mode="rows", f=f)).selectExpr(
+        "key_hash", "key_value", "'REKEYED' AS event", f"'{ROLLBACK_DETAIL}' AS state_detail", "key_encoding")
+
+
+def exclusion_condition(ds: Dataset, up_id: str, up: Dataset, default_timezone: str) -> str | None:
+    """The SQL condition, over the upstream's rows, of what the hop's exclusions keep out; None
+    without exclusions: each rule's term (exclusion_terms) joined with OR."""
+    terms = exclusion_terms(ds, up_id, up, default_timezone)
+    if not terms:
+        return None
+    if len(terms) == 1 and terms[0][0] == "hop_exclusions":
+        return terms[0][1]
+    return " OR ".join(f"({condition})" for _, condition in terms)
+
+
+def exclusion_terms(ds: Dataset, up_id: str, up: Dataset, default_timezone: str) -> list[tuple[str, str]]:
+    """Each exclusion of the hop as (label, SQL condition over the upstream's rows), in contract
+    order. The release 1 `hop_exclusions` entry is one term labelled hop_exclusions, used as written.
+    A contract exclusion (label id@version) matches only rows whose upstream load time falls in its
+    effective span (dates at midnight in defaults.yaml `timezone`)."""
+    from datetime import datetime, time
+    from zoneinfo import ZoneInfo
+
+    from hcsc.datalake.dre.config.contracts import hop_contract
+
+    hop = hop_contract({up_id: up}, ds, up_id)
+    if hop.legacy_exclusion is not None:
+        return [("hop_exclusions", hop.legacy_exclusion)]
+    zone = ZoneInfo(default_timezone)
+    found = []
+    for e in hop.exclusions:
+        terms = [f"({e.condition})"]
+        bounds = ((e.effective.from_, ">="), (e.effective.to, "<"))
+        if any(day is not None for day, _ in bounds) and up.load_time is None:
+            raise ValueError(f"exclusion {e.label} has effective dates and upstream {up_id} has no load_time")
+        for day, op in bounds:
+            if day is not None:
+                instant = datetime.combine(day, time.min, zone)
+                terms.append(f"{utc_expr(up.load_time, default_timezone)} {op} {utc_literal(instant)}")
+        found.append((e.label, " AND ".join(terms)))
+    return found
+
+
+def exclusion_label(ds: Dataset, up_id: str, up: Dataset | None) -> str:
+    """How a hop result names what its exclusions kept out (`hop_exclusions`, or the contract's ids)."""
+    from hcsc.datalake.dre.config.contracts import exclusion_text, hop_contract
+
+    return exclusion_text(hop_contract({up_id: up} if up is not None else {}, ds, up_id))
+
+
+def has_a_key(columns: list[str]) -> str:
+    """A row whose every key column is null has no key: it is not a version of anything and is
+    never judged (T1_KEY_NULLS counts it). A partly null key is still a key."""
+    return "NOT (" + " AND ".join(f"{c} IS NULL" for c in columns) + ")"
+
+
+def not_judged(pending: int | None, excluded: int | None, unit: str, excluded_unit: str | None = None,
+               excluded_by: str = "hop_exclusions") -> str:
     """What a hop result did not judge and why, e.g. `1 key excluded by hop_exclusions, 2 keys pending
-    (within sla_hours)`; empty when nothing was left out."""
+    (within sla_hours)`; empty when nothing was left out. `excluded_by` names the exclusions."""
     def counted(n: int, what: str) -> str:
         return f"{n} {what}{'' if n == 1 else 's'}"
     parts = []
     if excluded:
-        parts.append(f"{counted(excluded, excluded_unit or unit)} excluded by hop_exclusions")
+        parts.append(f"{counted(excluded, excluded_unit or unit)} excluded by {excluded_by}")
     if pending:
         parts.append(f"{counted(pending, unit)} pending (within sla_hours)")
     return ", ".join(parts)

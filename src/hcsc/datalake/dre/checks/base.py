@@ -8,19 +8,25 @@ check never stops the run.
 
 from __future__ import annotations
 
+import logging
 import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from datetime import datetime
+from dataclasses import dataclass, field, replace
+from datetime import date, datetime
 from typing import TYPE_CHECKING, Any
 
 from jinja2 import Environment, PackageLoader, StrictUndefined
 
+from hcsc.datalake.dre.checks.patterns import resolve_params
+
 if TYPE_CHECKING:
     from pyspark.sql import SparkSession
 
+    from hcsc.datalake.dre.causes.base import CauseContext, Failure
     from hcsc.datalake.dre.checks.events import Event
-    from hcsc.datalake.dre.config.models import Dataset, Feed, Settings
+    from hcsc.datalake.dre.config.models import Dataset, Feed, Model, Settings
+
+log = logging.getLogger(__name__)
 
 PASSED, FAILED, DID_NOT_RUN = "PASSED", "FAILED", "DID_NOT_RUN"
 
@@ -29,18 +35,29 @@ REASONS: dict[str, str] = {
     "partition_missing": "DATA_UNAVAILABLE",
     "landing_unreadable": "DATA_UNAVAILABLE",
     "empty_population": "DATA_UNAVAILABLE",
+    # CHAIN_COMPLETENESS: no record lost, but some crossed an edge the ledger cannot judge (default taken:
+    # never holds a window; the unobservable edge does not become observable by waiting)
+    "partial_chain": "DATA_UNAVAILABLE",
     "window_gap": "DATA_UNAVAILABLE",  # a held span given up after max_window_hours: never checked
+    "no_as_of_evidence": "DATA_UNAVAILABLE",  # AS_OF_REPLAY: the data as it stood at the cutoff cannot be read (ADR-05)
     "metastore_unavailable": "PLATFORM",
     "hdfs_unavailable": "PLATFORM",
     "query_failed": "PLATFORM",
     "evidence_incomplete": "PLATFORM",  # the result was stored but its key events were not: evaluated again
+    "evidence_invalid": "PLATFORM",  # its baseline's evidence was found compromised after publication (R1)
+    "ledger_unbalanced": "PLATFORM",  # HOP_LEDGER: the dispositions do not add up to the due population (an engine defect)
+    "disabled": "PLATFORM",  # the kill switch was on: not run, the run ends PARTIAL, the window is held (ADR-08)
     "table_missing": "CONFIGURATION",
     "column_missing": "CONFIGURATION",
     "incompatible_type": "CONFIGURATION",
     "invalid_config": "CONFIGURATION",
+    "unsupported_mapping": "CONFIGURATION",  # HOP_LEDGER: the hop's mapping kind is not judged (ADR-02)
     "budget_exceeded": "BUDGET",
+    "concurrency_limit": "BUDGET",  # max_concurrent_jobs units still live after cancel_grace_seconds (O6)
+    "run_budget_exceeded": "BUDGET",  # reached after the run budget was spent: not run, the window is held (ADR-08)
     "upstream_check_failed": "DEPENDENCY",
     "premise_unconfirmed": "DEPENDENCY",
+    "insufficient_evidence": "DEPENDENCY",  # HOP_LEDGER: evidence the contract requires cannot be read
     "insufficient_history": "BASELINE",
 }
 
@@ -72,6 +89,30 @@ class CheckResult:
     # HOP_KEY_CURRENCY: the temp view holding this hop's judged keys, for the cause engine to read
     # instead of judging again; the runner drops it once the result is explained.
     judged_view: str | None = field(default=None, compare=False, repr=False)
+    # Frames the check materialised (local checkpoints) and the runner releases with the view.
+    checkpoints: tuple[Any, ...] = field(default=(), compare=False, repr=False)
+    # T1_PARTITION_DRIFT: the partitions' states to append to dq_partition_state (store/partitions.py),
+    # written by the runner with the run id after the result, like key events.
+    partition_state: tuple[Any, ...] = field(default=(), compare=False, repr=False)
+    # HOP_LEDGER: the ledger's lines to append to dq_reconciliation (store/reconciliation.py), written by
+    # the runner with the run and evaluation ids before the result, like key events.
+    reconciliation: tuple[dict[str, Any], ...] = field(default=(), compare=False, repr=False)
+    # Hop checks: the deadline range judged, (start, end) in UTC (checks/hop/coverage.py). The runner
+    # stores it as coverage_from and coverage_to on a covering result only (PASSED, FAILED, or
+    # DID_NOT_RUN / empty_population), so the next window continues from it.
+    coverage: tuple[datetime, datetime] | None = field(default=None, compare=False, repr=False)
+    # What a PASS's claim rests on unproven (codes, checks/hop/ledger.py QUALIFICATIONS): stored as
+    # dq_check_result.qualifications; a PASSED result with any is not healthy (v_latest_result).
+    qualifications: tuple[str, ...] = field(default=(), compare=False)
+
+
+def release_checkpoint(frame: Any) -> None:
+    """Free a local checkpoint's blocks on the executors. A checkpointed frame's plan is a
+    LogicalRDD over the persisted RDD; nothing else drops it before the session ends."""
+    try:
+        frame._jdf.queryExecution().logical().rdd().unpersist(False)
+    except Exception as exc:  # only memory is at stake
+        log.warning("could not release a checkpoint: %s", error_detail(exc))
 
 
 def did_not_run(code: str, detail: str | None = None, group_values: dict[str, str | None] | None = None) -> CheckResult:
@@ -105,6 +146,9 @@ class CheckContext:
     dq_database: str | None = None  # for checks that read their own history (T1_VOLUME, T1_SCHEMA_DRIFT)
     landing_problem: CheckResult | None = None  # the feed's landing roots could not be listed this run
     upstreams: dict[str, Dataset] = field(default_factory=dict)  # datasets named in this dataset's key_map
+    # Every configured dataset, for a check that looks across datasets: a union_partition's siblings on
+    # the same physical table (checks/hop/attribution.py). Empty: only this dataset is known.
+    datasets: dict[str, Dataset] = field(default_factory=dict)
     key_secret: bytes | None = None  # HMAC secret for key_hash (from hmac_secret_file); None: no key events
     full_sweep: bool = False  # today is full_sweep_day: hop checks read every key, not only changed ones
     budget_minutes: float | None = None  # this check's budget; None: settings.compute_budget_minutes
@@ -112,6 +156,28 @@ class CheckContext:
     # NORMAL runs keep the open-key state (read v_open_keys, write key events); a RERUN or REPLAY
     # of a historical window neither reads nor changes it, so repeating one changes nothing.
     record_key_events: bool = True
+    # Judge the hop's open keys too (NORMAL runs do; a retried investigation must, to list the keys
+    # the failing evaluation judged only because they were open); None: as record_key_events.
+    judge_open_keys: bool | None = None
+    # The first run_date the hop's open-key read looks at (defaults.history_lookback_days); None: all.
+    history_since: date | None = None
+    # The first run_date still retained in dq_check_result (its retention_months): how far back a hop's
+    # coverage is looked for when the lookback holds none (checks/hop/coverage.py, P1-02); None: all.
+    coverage_since: date | None = None
+    # The first run_date still retained in dq_key_event: how far back a chain's PENDING records are read
+    # when its coverage did not continue from inside the lookback (checks/hop/chain.py, CA-02); None: all.
+    key_events_since: date | None = None
+    # The check's parameters (an instance of Check.params_model), resolved by resolve_params (called from
+    # run_check) from the pattern's defaults, the feed's and the dataset's `check_params`; None without.
+    params: Any = None
+    # AS_OF_REPLAY (ADR-05): the evidence cutoff C, the window end; the check reads every dataset as it
+    # stood at C (rows loaded at or before C). None: the tables as they are now (NORMAL, CURRENT_RECHECK).
+    as_of: datetime | None = None
+    # What the as-of reading rests on, set by the AS_OF_REPLAY gate (checks/modes.py) for the scope.
+    as_of_proof: str | None = None
+    # The loaded configuration (config/loader.Config), for a check that reads beyond the dataset's own
+    # upstreams (CHAIN_COMPLETENESS follows a key_map path to its terminal); None when built by hand.
+    config: Any = None
 
 
 class Check(ABC):
@@ -119,17 +185,29 @@ class Check(ABC):
 
     check_id: str
     severity: str | None = None  # set for gold rules
+    # A parametrised check names its params model; it runs only where `check_params` configures it
+    # (spec section 3), and gets the validated instance in ctx.params.
+    params_model: type[Model] | None = None
+    # Whether the check can read its datasets as they stood at a cutoff (ctx.as_of): every read bounded
+    # by load time at or before it. Any other check is DID_NOT_RUN / no_as_of_evidence in AS_OF_REPLAY.
+    as_of_capable: bool = False
 
     def applies_to(self, dataset: Dataset, pattern: str | None) -> bool:
         return True
 
     @abstractmethod
-    def required_columns(self, dataset: Dataset) -> list[str]:
-        """Configured columns the check reads; a missing one makes it DID_NOT_RUN."""
+    def required_columns(self, dataset: Dataset, params: Any = None) -> list[str]:
+        """Configured columns the check reads; a missing one makes it DID_NOT_RUN. A parametrised
+        check gets its params too."""
 
     @abstractmethod
     def evaluate(self, ctx: CheckContext, event: Event) -> list[CheckResult]:
         """One result per group (one in total for an ungrouped check)."""
+
+    def failures(self, cx: CauseContext, result: CheckResult) -> list[Failure] | None:
+        """The failing things of a FAILED result, for the cause engine (spec section 7); None
+        leaves it to causes/failures.py. A check with no cause checks needs neither."""
+        return None
 
 
 def needs_load_time(ctx: CheckContext) -> CheckResult | None:
@@ -198,17 +276,29 @@ def preconditions(spark: SparkSession, dataset: Dataset, columns: list[str]) -> 
     return None
 
 
+def estimated_scan(ctx: CheckContext, check: Check) -> int | None:
+    """The bytes a check reads, from table statistics: the dataset's table and, for a hop check,
+    its upstream tables (a derived upstream has no table of its own); None without statistics."""
+    from hcsc.datalake.dre.checks.budget import estimated_scan_bytes
+
+    tables = [ctx.dataset.table]
+    if check.check_id.startswith("HOP_"):
+        tables += [up.table for up in ctx.upstreams.values() if up.table is not None]
+    sizes = [estimated_scan_bytes(ctx.spark, table) for table in tables if table is not None]
+    return None if not sizes or any(s is None for s in sizes) else sum(sizes)
+
+
 def run_check(check: Check, ctx: CheckContext, event: Event) -> tuple[list[CheckResult], int]:
     """(results, duration_ms). Never raises: a failure is a DID_NOT_RUN result. The check runs
     within its dataset's compute_budget_minutes (checks/budget.py)."""
-    from hcsc.datalake.dre.checks.budget import BudgetExceeded, estimated_scan_bytes, within_budget
+    from hcsc.datalake.dre.checks.budget import BudgetExceeded, ConcurrencyLimit, within_budget
 
     started = time.monotonic()
     budget = ctx.settings.compute_budget_minutes if ctx.budget_minutes is None else ctx.budget_minutes
     if budget <= 0:
         return [did_not_run("budget_exceeded", detail="the dataset's compute budget is spent for this run")], 0
     if ctx.scan_mb_per_minute is not None:
-        size = estimated_scan_bytes(ctx.spark, ctx.dataset.table)
+        size = estimated_scan(ctx, check)
         if size is not None and size / 1_000_000 / ctx.scan_mb_per_minute > budget:
             minutes = size / 1_000_000 / ctx.scan_mb_per_minute
             return [did_not_run("budget_exceeded", detail=(
@@ -216,15 +306,37 @@ def run_check(check: Check, ctx: CheckContext, event: Event) -> tuple[list[Check
                 f"{minutes:.1f} minutes, over the budget of {budget:g}; not run"))], 0
 
     def work() -> list[CheckResult]:
-        failed = preconditions(ctx.spark, ctx.dataset, check.required_columns(ctx.dataset))
+        from pydantic import ValidationError
+
+        nonlocal ctx
+        if check.params_model is not None:
+            try:
+                ctx = replace(ctx, params=resolve_params(check, ctx))
+            except ValidationError as exc:
+                fields = sorted({str(e["loc"][0]) for e in exc.errors() if e["loc"]})
+                return [did_not_run("invalid_config", detail=f"check_params.{check.check_id} is not valid "
+                                                            f"(fields {fields}); dre validate names the fix")]
+            columns = check.required_columns(ctx.dataset, ctx.params)
+        else:
+            columns = check.required_columns(ctx.dataset)
+        failed = preconditions(ctx.spark, ctx.dataset, columns)
         if failed is not None:
             return [failed]
+        if ctx.as_of is not None:
+            from hcsc.datalake.dre.checks.modes import as_of_refusal
+
+            refused, proof = as_of_refusal(ctx, check)
+            if refused is not None:
+                return [refused]
+            ctx = replace(ctx, as_of_proof=proof)
         return check.evaluate(ctx, event) or [did_not_run("empty_population")]
 
     try:
         results = within_budget(ctx.spark, budget, work)
+    except ConcurrencyLimit as exc:
+        results = [did_not_run("concurrency_limit", detail=str(exc))]
     except BudgetExceeded as exc:
-        size = estimated_scan_bytes(ctx.spark, ctx.dataset.table)
+        size = estimated_scan(ctx, check)
         scan = f"; estimated scan {size} bytes" if size is not None else "; no table statistics for a scan estimate"
         results = [did_not_run("budget_exceeded", detail=f"{exc}{scan}")]
     except Exception as exc:
