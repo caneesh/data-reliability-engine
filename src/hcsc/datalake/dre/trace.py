@@ -149,6 +149,42 @@ def cause_line(spark: SparkSession, config: Config, up: Layer, down: Layer, key_
     return resolve(rows, ft).text()
 
 
+def other_encodings(spark: SparkSession, config: Config, up: Layer, down: Layer) -> dict[int, int]:
+    """Key encodings other than this engine's with committed key events at the hop (up -> down), and how
+    many identities each: keys a later engine wrote, which this engine cannot compute (Gate A
+    remediation, spec section 8, "Trace")."""
+    from hcsc.datalake.dre.checks.hop.common import hop_label
+    from hcsc.datalake.dre.checks.keys import KEY_ENCODING
+
+    dq_database = validate_dq_database(config.defaults.dq_database)
+    ds = down.dataset
+    hop = hop_label(validate_identifier(up.dataset.dataset, "dataset id"),
+                    validate_identifier(ds.dataset, "dataset id"))
+    rows = spark.sql(
+        f"SELECT coalesce(key_encoding, 1) AS encoding, COUNT(DISTINCT key_hash) AS n "
+        f"FROM {dq_database}.v_committed_key_event WHERE dataset = '{ds.dataset}' "
+        f"AND check_id = 'HOP_KEY_CURRENCY' AND hop = '{hop}' AND coalesce(key_encoding, 1) <> {KEY_ENCODING} "
+        f"GROUP BY coalesce(key_encoding, 1) ORDER BY encoding").collect()
+    return {r.encoding: r.n for r in rows}
+
+
+def cause_lines(spark: SparkSession, config: Config, up: Layer, down: Layer, key_secret: bytes | None) -> list[str]:
+    """The cause line, labelled by its key encoding when the hop also holds key events of another
+    encoding, followed then by one line per such encoding: present, but not searchable by this
+    engine's key. With one encoding at the hop the output is the cause line alone, as before."""
+    from hcsc.datalake.dre.checks.keys import KEY_ENCODING
+
+    line = cause_line(spark, config, up, down, key_secret)
+    if key_secret is None:
+        return [line]
+    others = other_encodings(spark, config, up, down)
+    if not others:
+        return [line]
+    return [f"{line} [key encoding {KEY_ENCODING}]",
+            *(f"key encoding {enc}: {n} key{'s' if n != 1 else ''} with events at this hop, written by a later "
+              "engine; not searchable by this engine's key" for enc, n in others.items())]
+
+
 def trace(spark: SparkSession, config: Config, dataset_id: str, raw_key: list[str],
           key_secret: bytes | None) -> list[str]:
     ds = config.datasets[dataset_id]
@@ -171,7 +207,7 @@ def trace(spark: SparkSession, config: Config, dataset_id: str, raw_key: list[st
     what = "does not have the key" if state == "MISSING" else "holds an older version"
     lines.append(f"first gap: {up.dataset.dataset} -> {down.dataset.dataset}: "
                  f"{down.dataset.dataset} {what} ({state})")
-    lines.append(cause_line(spark, config, up, down, key_secret))
+    lines.extend(cause_lines(spark, config, up, down, key_secret))
     return lines
 
 

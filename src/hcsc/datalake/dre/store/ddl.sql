@@ -35,12 +35,17 @@ CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_cause_result (
   cause_code STRING, evidence STRING, evaluated_at TIMESTAMP
 ) PARTITIONED BY (run_date DATE) STORED AS ORC;
 
+-- key_encoding and predecessor_hash: migration 2 (Gate A remediation, release N). key_encoding is the
+-- encoding of key_value and key_hash (NULL in rows stored before the column existed: encoding 1);
+-- predecessor_hash is the hash, in the other encoding, whose open spell the event continues.
+-- event REKEYED records that an identity's open spell continues under another encoding: it closes nothing.
 CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_key_event (
   run_id STRING, evaluation_id STRING, dataset STRING, check_id STRING,
   hop STRING,
   key_hash STRING, key_value STRING,
   event STRING,
-  state_detail STRING, observed_at TIMESTAMP
+  state_detail STRING, observed_at TIMESTAMP,
+  key_encoding INT, predecessor_hash STRING
 ) PARTITIONED BY (run_date DATE) STORED AS ORC;
 
 CREATE TABLE IF NOT EXISTS {{ dq_database }}.dq_file (
@@ -293,32 +298,86 @@ FROM (
 ) ranked
 WHERE latest_rank = 1;
 
--- Keys whose latest event at a hop is FLAGGED or STILL_FLAGGED, with the time the key
--- was first flagged in its current open spell (after its last CLEARED).
+-- Identities whose latest committed event at a hop is FLAGGED or STILL_FLAGGED (Gate A remediation,
+-- release N: spec section 5). An identity is a key encoding and a hash: an encoding-1 hash and an
+-- encoding-2 hash are never one identity. Its open spell runs from the first FLAGGED or STILL_FLAGGED
+-- after its last CLEARED: REKEYED never ends a spell, and an identity whose latest event is REKEYED is
+-- not open. first_flagged_at is the spell's start, or the predecessor's when the spell opened with an
+-- event naming a predecessor (in the other encoding) whose latest event is REKEYED: a provable
+-- continuation keeps its age. category: legacy_unresolved for an identity kept open "awaiting
+-- successors" after the encoding change, active otherwise. The latest event is chosen by observed_at,
+-- then run_id: a hop writes at most one event per identity per evaluation, so no two tie.
 -- key_value is restricted and not exposed here.
 CREATE OR REPLACE VIEW {{ dq_database }}.v_open_keys AS
-SELECT dataset, check_id, hop, key_hash, latest_event, state_detail,
-       first_flagged_at, last_observed_at, run_id, evaluation_id
-FROM (
-  SELECT dataset, check_id, hop, key_hash,
-         event AS latest_event, state_detail, run_id, evaluation_id,
-         observed_at AS last_observed_at,
-         MIN(CASE WHEN event IN ('FLAGGED', 'STILL_FLAGGED') AND
-                       (last_cleared_at IS NULL OR observed_at > last_cleared_at)
-                  THEN observed_at END)
-           OVER (PARTITION BY dataset, check_id, hop, key_hash) AS first_flagged_at,
-         ROW_NUMBER() OVER (
-           PARTITION BY dataset, check_id, hop, key_hash
-           ORDER BY observed_at DESC, run_id DESC
-         ) AS latest_rank
-  FROM (
-    SELECT e.*,
-           MAX(CASE WHEN event = 'CLEARED' THEN observed_at END)
-             OVER (PARTITION BY dataset, check_id, hop, key_hash) AS last_cleared_at
-    FROM {{ dq_database }}.v_committed_key_event e
-  ) with_cleared
-) ranked
-WHERE latest_rank = 1 AND latest_event IN ('FLAGGED', 'STILL_FLAGGED');
+WITH ev AS (
+  SELECT dataset, check_id, hop, coalesce(key_encoding, 1) AS key_encoding, key_hash, predecessor_hash,
+         event, state_detail, observed_at, run_id, evaluation_id
+  FROM {{ dq_database }}.v_committed_key_event
+),
+cleared AS (
+  SELECT dataset, check_id, hop, key_encoding, key_hash,
+         MAX(CASE WHEN event = 'CLEARED' THEN observed_at END) AS last_cleared_at
+  FROM ev GROUP BY dataset, check_id, hop, key_encoding, key_hash
+),
+spell AS (
+  SELECT e.dataset, e.check_id, e.hop, e.key_encoding, e.key_hash, MIN(e.observed_at) AS spell_start,
+         element_at(array_sort(collect_list(named_struct('at', e.observed_at, 'run', e.run_id,
+                                                         'pred', e.predecessor_hash))), 1).pred AS spell_predecessor
+  FROM ev e JOIN cleared c
+    ON c.dataset = e.dataset AND c.check_id = e.check_id AND c.hop <=> e.hop
+   AND c.key_encoding = e.key_encoding AND c.key_hash = e.key_hash
+  WHERE e.event IN ('FLAGGED', 'STILL_FLAGGED') AND (c.last_cleared_at IS NULL OR e.observed_at > c.last_cleared_at)
+  GROUP BY e.dataset, e.check_id, e.hop, e.key_encoding, e.key_hash
+),
+latest AS (
+  SELECT * FROM (
+    SELECT ev.*, ROW_NUMBER() OVER (
+             PARTITION BY dataset, check_id, hop, key_encoding, key_hash
+             ORDER BY observed_at DESC, run_id DESC) AS latest_rank
+    FROM ev
+  ) ranked WHERE latest_rank = 1
+)
+SELECT l.dataset, l.check_id, l.hop, l.key_hash, l.event AS latest_event, l.state_detail,
+       CASE WHEN p.event = 'REKEYED' AND ps.spell_start IS NOT NULL THEN ps.spell_start ELSE s.spell_start END
+         AS first_flagged_at,
+       l.observed_at AS last_observed_at, l.run_id, l.evaluation_id,
+       l.key_encoding, s.spell_predecessor AS predecessor_hash,
+       CASE WHEN l.state_detail = 'awaiting successors' THEN 'legacy_unresolved' ELSE 'active' END AS category
+FROM latest l
+JOIN spell s
+  ON s.dataset = l.dataset AND s.check_id = l.check_id AND s.hop <=> l.hop
+ AND s.key_encoding = l.key_encoding AND s.key_hash = l.key_hash
+LEFT JOIN latest p
+  ON p.dataset = l.dataset AND p.check_id = l.check_id AND p.hop <=> l.hop
+ AND p.key_encoding = CASE WHEN l.key_encoding = 2 THEN 1 ELSE 2 END AND p.key_hash = s.spell_predecessor
+LEFT JOIN spell ps
+  ON ps.dataset = p.dataset AND ps.check_id = p.check_id AND ps.hop <=> p.hop
+ AND ps.key_encoding = p.key_encoding AND ps.key_hash = p.key_hash
+WHERE l.event IN ('FLAGGED', 'STILL_FLAGGED');
+
+-- One row per committed key event that names a predecessor (Gate A remediation, release N: spec section 5):
+-- kind continuation when the predecessor (in the other encoding) was REKEYED, ambiguous otherwise. No
+-- other kind is produced (a rollback kind is deferred: decisions, INC-1). Records of the transition,
+-- never discrepancies. key_value is restricted and not exposed here.
+CREATE OR REPLACE VIEW {{ dq_database }}.v_key_lineage AS
+WITH ev AS (
+  SELECT dataset, check_id, hop, coalesce(key_encoding, 1) AS key_encoding, key_hash, predecessor_hash,
+         event, observed_at, run_id, evaluation_id
+  FROM {{ dq_database }}.v_committed_key_event
+),
+rekeyed AS (
+  SELECT DISTINCT dataset, check_id, hop, key_encoding, key_hash FROM ev WHERE event = 'REKEYED'
+)
+SELECT e.dataset, e.check_id, e.hop,
+       e.predecessor_hash, CASE WHEN e.key_encoding = 2 THEN 1 ELSE 2 END AS predecessor_encoding,
+       e.key_hash AS successor_hash, e.key_encoding AS successor_encoding, e.event AS successor_event,
+       CASE WHEN r.key_hash IS NOT NULL THEN 'continuation' ELSE 'ambiguous' END AS kind,
+       e.observed_at, e.run_id, e.evaluation_id
+FROM ev e
+LEFT JOIN rekeyed r
+  ON r.dataset = e.dataset AND r.check_id = e.check_id AND r.hop <=> e.hop
+ AND r.key_encoding = CASE WHEN e.key_encoding = 2 THEN 1 ELSE 2 END AND r.key_hash = e.predecessor_hash
+WHERE e.predecessor_hash IS NOT NULL;
 
 -- One row per file path: first-seen time, and size and times from the latest observation.
 CREATE OR REPLACE VIEW {{ dq_database }}.v_file_status AS

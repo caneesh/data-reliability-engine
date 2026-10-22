@@ -45,9 +45,11 @@ from hcsc.datalake.dre.checks.base import (
     utc_literal,
 )
 from hcsc.datalake.dre.checks.derived import base_datasets
-from hcsc.datalake.dre.checks.hop.common import HASH_FUNCTION, has_a_key, hop_label, register_key_hash
+from hcsc.datalake.dre.checks.hop.common import (
+    HASH_FUNCTION, foreign_open, foreign_params, has_a_key, hop_label, register_key_hash, rekeyed_back,
+)
 from hcsc.datalake.dre.checks.hop.coverage import GAP, coverage_of, judged
-from hcsc.datalake.dre.checks.keys import column_expr, key_string
+from hcsc.datalake.dre.checks.keys import KEY_ENCODING, column_expr, key_string
 from hcsc.datalake.dre.checks.registry import register_check
 from hcsc.datalake.dre.config.models import Identifier, Model
 
@@ -160,10 +162,12 @@ def resolve(ctx: CheckContext) -> list[Edge] | CheckResult:
 
 
 def edge_params(ctx: CheckContext, event: Event, edge: Edge, first: bool, judged: tuple[Any, Any],
-                carried: str | None, recheck: str | None = None) -> dict[str, Any] | CheckResult:
+                carried: str | None, recheck: str | None = None, sweep: bool = False) -> dict[str, Any] | CheckResult:
     """HOP_LEDGER's parameters for one edge, bounded for the chain: the first edge judges the source
     records whose chain deadline falls in the chain's range; a later edge judges only the carried keys,
-    due when their latest version's load time + the edge's sla_hours is at or before the cutoff."""
+    due when their latest version's load time + the edge's sla_hours is at or before the cutoff.
+    sweep: the first edge judges every source record, as on the full sweep (records of another key
+    encoding are open: Gate A remediation, spec section 6, "Key events")."""
     from hcsc.datalake.dre.checks.hop.ledger import ledger_params
 
     params = ledger_params(edge.ctx, event, edge.hop, edge.up)
@@ -179,7 +183,8 @@ def edge_params(ctx: CheckContext, event: Event, edge: Edge, first: bool, judged
     if first:
         start, end = judged
         bounds = {"deadline_start": utc_literal(start), "deadline_end": utc_literal(end),
-                  "pending_from": utc_literal(max(start, end)), "full_sweep": ctx.full_sweep, "recheck": recheck}
+                  "pending_from": utc_literal(max(start, end)), "full_sweep": ctx.full_sweep or sweep,
+                  "recheck": recheck}
     else:
         bound = utc_literal(event.window_end - timedelta(hours=edge.sla_hours))
         bounds = {"deadline_start": bound, "deadline_end": bound, "pending_from": bound, "full_sweep": True}
@@ -303,6 +308,8 @@ class ChainCompleteness(Check):
 
     @staticmethod
     def _judge(ctx: CheckContext, event: Event, edges: list[Edge], views: list[str], frames: list[Any]) -> CheckResult:
+        from pyspark.sql import functions as F
+
         from hcsc.datalake.dre.checks.hop.ledger import DISPOSITIONS, LEVELS, qualifications_of
 
         source, terminal = ctx.dataset.dataset, ctx.params.terminal
@@ -333,18 +340,26 @@ class ChainCompleteness(Check):
         # coverage continues from inside the lookback its outstanding records' latest events are inside it
         # too; otherwise (the chain was not evaluated for longer) the read reaches back to dq_key_event's
         # retention, so a long-pending record is never forgotten (final conditional approval, CA-02).
+        # Key encodings (Gate A remediation, spec section 6, "Key events"): the carry reads PENDING records
+        # of this engine's encoding, REKEYED taken as no event. A record of another encoding (a later
+        # engine's, after a rollback) cannot be read by this engine's key: when one is open, the first edge
+        # judges every source record, and the record is closed with REKEYED in its own encoding.
         carrying = ctx.record_key_events and ctx.key_secret is not None and ctx.dq_database is not None
-        recheck, carried_in = None, 0
+        recheck, carried_in, foreign, foreign_n = None, 0, None, 0
         carry_since = ctx.history_since if span.in_lookback else ctx.key_events_since
         if carrying and ctx.spark.catalog.tableExists(f"{ctx.dq_database}.v_committed_key_event"):
             since = f" AND run_date >= DATE'{carry_since.isoformat()}'" if carry_since is not None else ""
             materialise(
                 f"SELECT key_value AS k FROM (SELECT key_value, event, ROW_NUMBER() OVER (PARTITION BY key_hash "
                 f"ORDER BY observed_at DESC, run_id DESC) AS rn FROM {ctx.dq_database}.v_committed_key_event "
-                f"WHERE dataset = '{source}' AND check_id = '{CHECK_ID}' AND hop = '{label}'{since}) x "
+                f"WHERE dataset = '{source}' AND check_id = '{CHECK_ID}' AND hop = '{label}'{since} "
+                f"AND coalesce(key_encoding, 1) = {KEY_ENCODING} AND event <> 'REKEYED') x "
                 f"WHERE rn = 1 AND event = 'PENDING' AND key_value IS NOT NULL", name("recheck", 0))
             recheck = name("recheck", 0)
             carried_in = ctx.spark.table(recheck).count()
+            foreign = foreign_params(ctx, source, CHECK_ID, label,
+                                     carry_since.isoformat() if carry_since is not None else None, ("PENDING",))
+            foreign_n = foreign_open(ctx, foreign)
         state_views: list[str] = []
         for i, edge in enumerate(read):
             carried = None
@@ -353,7 +368,8 @@ class ChainCompleteness(Check):
                                        f=forward_params(read[i - 1], edge, state_views[-1])), name("forward", i))
                 materialise(render_sql("chain.sql.j2", mode="keys", source=name("forward", i)), name("keys", i))
                 carried = name("keys", i)
-            params = edge_params(ctx, event, edge, i == 0, (start, end), carried, recheck if i == 0 else None)
+            params = edge_params(ctx, event, edge, i == 0, (start, end), carried, recheck if i == 0 else None,
+                                 sweep=i == 0 and foreign_n > 0)
             if isinstance(params, CheckResult):
                 return replace(params, detail=f"edge {edge.label}: {params.detail}", group_values=groups)
             materialise(render_sql("hop_ledger.sql.j2", p=params, mode="assessed", source=None), name("assessed", i))
@@ -433,6 +449,8 @@ class ChainCompleteness(Check):
                            else "not recorded: hmac_secret_file is not set") if exceptions else None,
             "carried_in": carried_in,
         }
+        if foreign_n:  # records of another key encoding were open: judged in full, closed with REKEYED
+            scope["other_key_encoding_open"] = foreign_n
         state = FAILED if totals["lost"] else PASSED
         if state == FAILED:
             scope["triage"] = [f"{t['by_edge'][gap]['lost']} record(s) first lost at {gap}: its HOP_LEDGER result and "
@@ -449,11 +467,14 @@ class ChainCompleteness(Check):
         if not balanced:
             return replace(did_not_run("ledger_unbalanced", detail=scope_json, group_values=groups), **held)
         events = None
-        if carrying and (exceptions or sum(pending_edges.values()) or carried_in):
+        if carrying and (exceptions or sum(pending_edges.values()) or carried_in or foreign_n):
             register_key_hash(ctx.spark, ctx.key_secret)
             events = ctx.spark.sql(render_sql("chain.sql.j2", mode="events", source=name("fate", 0),
                                               hash_fn=HASH_FUNCTION, first=first_label,
-                                              recheck=recheck)).localCheckpoint()
+                                              recheck=recheck)).withColumn("key_encoding", F.lit(KEY_ENCODING))
+            if foreign_n:  # one event per identity: an identity is its encoding and its hash
+                events = events.unionByName(rekeyed_back(ctx, foreign))
+            events = events.localCheckpoint()
         carry = {"key_events": events, "checkpoints": (events,) if events is not None else ()}
         if not due:  # a window whose only records are pending at an edge still records them, to carry
             return replace(did_not_run("empty_population", detail=scope_json, group_values=groups), **held, **carry)

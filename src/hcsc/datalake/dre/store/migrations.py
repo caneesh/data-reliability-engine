@@ -42,7 +42,16 @@ class Migration:
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(1, "dq_check_result", (("evaluation_mode", "STRING"),),
               "build step 4: NORMAL, CURRENT_RECHECK or AS_OF_REPLAY (ADR-05)"),
+    Migration(2, "dq_key_event", (("key_encoding", "INT"), ("predecessor_hash", "STRING")),
+              "Gate A remediation, release N: the key encoding of each event (NULL: 1) and the hash, in the "
+              "other encoding, whose open spell it continues"),
 )
+
+
+def added_columns(table: str) -> dict[str, str]:
+    """The columns migrations added to a dq table, name -> type: what the writer may fill with NULL
+    when a frame lacks them (store/writer.py)."""
+    return {c.lower(): t for m in MIGRATIONS if m.table == table for c, t in m.columns}
 
 
 def pending(spark: SparkSession, dq_database: str) -> list[Migration]:

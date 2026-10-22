@@ -1,0 +1,27 @@
+{# Identities of another key encoding than this engine's that are open at a hop or chain (Gate A
+   remediation, release N; spec section 6, "Key events"). An identity is its key encoding and its
+   hash; its latest committed event (REKEYED included) decides whether it is open, so an identity this
+   engine closed with REKEYED is not found again. A stored row without key_encoding is encoding 1.
+   The read is bounded like the hop's open-key read (run_date on or after `since`).
+   f: dq_database, dataset, check_id, hop, key_encoding (this engine's), since (ISO date or None),
+   open_events (the events that leave an identity open). mode count: how many; mode rows: the
+   identities (key_hash, key_value, key_encoding). #}
+{% macro latest(f) %}
+SELECT key_hash, key_value, key_encoding FROM (
+  SELECT key_hash, key_value, coalesce(key_encoding, 1) AS key_encoding, event,
+         ROW_NUMBER() OVER (PARTITION BY coalesce(key_encoding, 1), key_hash
+                            ORDER BY observed_at DESC, run_id DESC) AS rn
+  FROM {{ f.dq_database }}.v_committed_key_event
+  WHERE dataset = '{{ f.dataset }}' AND check_id = '{{ f.check_id }}' AND hop = '{{ f.hop }}'
+    AND coalesce(key_encoding, 1) <> {{ f.key_encoding }}
+{% if f.since %}
+    AND run_date >= DATE'{{ f.since }}'
+{% endif %}
+) latest
+WHERE rn = 1 AND event IN ({% for e in f.open_events %}'{{ e }}'{% if not loop.last %}, {% endif %}{% endfor %})
+{% endmacro %}
+{% if mode == "count" %}
+SELECT COUNT(*) AS n FROM ({{ latest(f) }}) foreign_open
+{% else %}
+{{ latest(f) }}
+{% endif %}

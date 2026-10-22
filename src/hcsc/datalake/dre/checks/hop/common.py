@@ -18,19 +18,25 @@ import hmac
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Callable
 
-from hcsc.datalake.dre.checks.base import CheckContext, CheckResult, did_not_run, error_detail, from_exception, utc_literal
+from hcsc.datalake.dre.checks.base import (
+    CheckContext, CheckResult, did_not_run, error_detail, from_exception, render_sql, utc_literal,
+)
 from hcsc.datalake.dre.checks.derived import source_of
 from hcsc.datalake.dre.checks.hop.coverage import coverage_of, judged
-from hcsc.datalake.dre.checks.keys import column_expr, key_string
+from hcsc.datalake.dre.checks.keys import KEY_ENCODING, column_expr, key_string
 from hcsc.datalake.dre.checks.times import utc_expr
 
 if TYPE_CHECKING:
-    from pyspark.sql import SparkSession
+    from pyspark.sql import DataFrame, SparkSession
 
     from hcsc.datalake.dre.checks.events import Event
     from hcsc.datalake.dre.config.models import Dataset
 
 HASH_FUNCTION = "dre_key_hash"
+# The REKEYED an engine writes for an identity of another key encoding it finds open (a rollback from
+# a later release): the identity is closed in its own encoding, and its spell continues under this
+# engine's encoding, which REKEYED never ended (spec section 6, "Key events").
+ROLLBACK_DETAIL = f"key encoding {KEY_ENCODING} (rollback)"
 
 
 def hop_label(upstream_id: str, dataset_id: str) -> str:
@@ -119,7 +125,30 @@ def hop_params(ctx: CheckContext, event: Event, up_id: str, up: Dataset | None,
         # not evaluated for longer) back to dq_key_event's retention (KI-19, as the chain's carry, CA-02)
         "events_since": open_since.isoformat() if open_since is not None else None,
         "events_from_retention": not span.in_lookback and ctx.key_events_since is not None,
+        # the open-key read takes this engine's key encoding only, REKEYED as no event (Gate A remediation)
+        "key_encoding": KEY_ENCODING,
     }
+
+
+def foreign_params(ctx: CheckContext, dataset: str, check_id: str, hop: str, since: str | None,
+                   open_events: tuple[str, ...]) -> dict[str, Any]:
+    """Parameters of hop_foreign_keys.sql.j2: identities of another key encoding than this engine's open
+    at a hop (HOP_KEY_CURRENCY) or chain (CHAIN_COMPLETENESS), read as far back as its open keys."""
+    return {"dq_database": ctx.dq_database, "dataset": dataset, "check_id": check_id, "hop": hop,
+            "key_encoding": KEY_ENCODING, "since": since, "open_events": open_events}
+
+
+def foreign_open(ctx: CheckContext, f: dict[str, Any]) -> int:
+    """How many identities of another key encoding are open: a later release's keys after a rollback,
+    or an encoding this engine does not know. Never read as this engine's own (spec section 6)."""
+    return ctx.spark.sql(render_sql("hop_foreign_keys.sql.j2", mode="count", f=f)).collect()[0].n
+
+
+def rekeyed_back(ctx: CheckContext, f: dict[str, Any]) -> DataFrame:
+    """REKEYED events closing each such identity in its own encoding (key_hash, key_value, event,
+    state_detail, key_encoding), to be written with the evaluation that judged the hop in full."""
+    return ctx.spark.sql(render_sql("hop_foreign_keys.sql.j2", mode="rows", f=f)).selectExpr(
+        "key_hash", "key_value", "'REKEYED' AS event", f"'{ROLLBACK_DETAIL}' AS state_detail", "key_encoding")
 
 
 def exclusion_condition(ds: Dataset, up_id: str, up: Dataset, default_timezone: str) -> str | None:

@@ -116,6 +116,12 @@ def key_exprs(dataset: Dataset) -> list[str]:
     return [column_expr(dataset, c) for c in dataset.key]
 
 
+# The key encoding this engine computes (spec section 6, "Hop details"). Release N computes encoding 1
+# only; encoding 2 (Gate A remediation) is release N+1's. Every key event records the encoding of its
+# key_value and key_hash (dq_key_event.key_encoding; NULL in rows stored before migration 2 means 1).
+KEY_ENCODING = 1
+
+
 def key_string(exprs: list[str]) -> str:
     """One canonical string for a (normalised) key: parts joined with '|', null written as <null>."""
     parts = [f"coalesce(CAST({e} AS STRING), '<null>')" for e in exprs]

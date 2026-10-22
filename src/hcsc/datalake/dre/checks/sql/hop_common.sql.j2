@@ -35,12 +35,15 @@ open_keys AS (
 {% if p.use_open %}
   -- the hop's open keys (latest event FLAGGED or STILL_FLAGGED), as v_open_keys defines them, read
   -- from the recent run_date partitions only: an open key is re-emitted on every evaluation, so its
-  -- latest event is never older than the hop's last evaluation
+  -- latest event is never older than the hop's last evaluation. Only this engine's key encoding (a row
+  -- stored before migration 2 is encoding 1), and REKEYED is no event: a spell a later engine continued
+  -- under its own encoding is still this engine's (Gate A remediation, spec section 6, "Key events")
   SELECT key_hash, k FROM (
     SELECT key_hash, key_value AS k, event,
            ROW_NUMBER() OVER (PARTITION BY key_hash ORDER BY observed_at DESC, run_id DESC) AS rn
     FROM {{ p.dq_database }}.v_committed_key_event
     WHERE dataset = '{{ p.dataset }}' AND check_id = 'HOP_KEY_CURRENCY' AND hop = '{{ p.hop }}'
+      AND coalesce(key_encoding, 1) = {{ p.key_encoding }} AND event <> 'REKEYED'
 {% if p.events_since %}
       AND run_date >= DATE'{{ p.events_since }}'
 {% endif %}
