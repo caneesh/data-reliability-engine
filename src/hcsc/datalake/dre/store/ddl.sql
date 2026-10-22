@@ -307,6 +307,8 @@ WHERE latest_rank = 1;
 -- continuation keeps its age. category: legacy_unresolved for an identity kept open "awaiting
 -- successors" after the encoding change, active otherwise. The latest event is chosen by observed_at,
 -- then run_id: a hop writes at most one event per identity per evaluation, so no two tie.
+-- An open identity re-flagged at the instant it was cleared has no spell: it is still listed, with
+-- first_flagged_at NULL, as before release N.
 -- key_value is restricted and not exposed here.
 CREATE OR REPLACE VIEW {{ dq_database }}.v_open_keys AS
 WITH ev AS (
@@ -344,7 +346,7 @@ SELECT l.dataset, l.check_id, l.hop, l.key_hash, l.event AS latest_event, l.stat
        l.key_encoding, s.spell_predecessor AS predecessor_hash,
        CASE WHEN l.state_detail = 'awaiting successors' THEN 'legacy_unresolved' ELSE 'active' END AS category
 FROM latest l
-JOIN spell s
+LEFT JOIN spell s
   ON s.dataset = l.dataset AND s.check_id = l.check_id AND s.hop <=> l.hop
  AND s.key_encoding = l.key_encoding AND s.key_hash = l.key_hash
 LEFT JOIN latest p

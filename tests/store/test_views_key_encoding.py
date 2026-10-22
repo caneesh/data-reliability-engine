@@ -105,3 +105,14 @@ def test_latest_event_selection_is_deterministic_across_shuffle_partitions(spark
     finally:
         spark.conf.set("spark.sql.shuffle.partitions", prior)
     assert seen[0] == seen[1]
+
+
+def test_a_key_flagged_again_at_the_instant_it_was_cleared_stays_listed(spark, store) -> None:
+    """Release N review, F1: a key CLEARED by one run and FLAGGED again by a later run at the same
+    observed_at is open (its latest event, by run_id, is FLAGGED). It stays in v_open_keys with
+    first_flagged_at NULL, as before release N, rather than being dropped for want of a spell."""
+    append_rows(spark, store, "dq_key_event", [
+        ev("g_tie", "FLAGGED", 1), ev("g_tie", "CLEARED", 2, run="r2-g-a"),
+        {**ev("g_tie", "FLAGGED", 2, run="r2-g-b"), "evaluation_id": "e2-g-b"}])
+    r = open_keys(spark, store)[(1, "g_tie")]
+    assert (r.latest_event, r.first_flagged_at, r.predecessor_hash, r.category) == ("FLAGGED", None, None, "active")
