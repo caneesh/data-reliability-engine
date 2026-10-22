@@ -505,6 +505,14 @@ The traceability matrix comes before code (exit criterion 6).
    - **Backpressure:** at 80% of the budget the next run defers the full sweep.
    - **Load test:** on a representative cluster, which needs the platform team.
 
+## Gate A remediation: release N review and closure (2026-10-22)
+
+The user asked for an independent verification of release N and then its acceptance closure. Review: `docs/reviews/release-n/independent-review.md` (reviewed `b72b45a`; it was done by the implementing session, so the "reviewer other than the implementer" condition stays open). Evidence: `docs/design/evidence/release-n-final-acceptance.md`.
+
+- **F1 fixed** (`2d27831`): `v_open_keys` dropped an open key re-flagged at the instant it was cleared (no spell, INNER JOIN). The spell join is now a LEFT JOIN, so such a key is listed with `first_flagged_at` NULL, exactly as before release N. It was escalated because the existing-store equivalence gate requires identical reader behaviour on an encoding-1 store. Breaking the tie by `run_id` instead was not chosen: it would change behaviour against the baseline.
+- **F2 and F4 accepted** as KI-21 and KI-22; **F3 and F5 need no change** (F3 is what the approved text requires; F5 is covered by the review executing the baseline writer).
+- **Default taken:** none. ID-1 to ID-4 and TR-1 still await ratification (KI-16).
+
 ## Gate A remediation: release N built (2026-10-22)
 
 Authorised by the user on 2026-10-22 ("Release N compatibility implementation is authorized, conditional on successful baseline CI verification"; CI #107 on `390b0bd` was green). Release N+1, merging, shared-database migration and deployment are not authorised. Evidence: `docs/design/evidence/release-n-implementation.md`.

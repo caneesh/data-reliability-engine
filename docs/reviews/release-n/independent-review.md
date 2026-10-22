@@ -120,7 +120,7 @@ TR-1 (trace labels only when another encoding is present) and ID-1 to ID-4 are r
 
 | Run | Command | Result |
 | --- | --- | --- |
-| Adversarial | `BASELINE=<worktree> pytest docs/reviews/release-n/adversarial` | 8 passed. F1 and F2 reproduced; F3 observed; the baseline writer refuses a migrated store |
+| Adversarial | `BASELINE=<worktree> python -m pytest docs/reviews/release-n/adversarial` (from the repository root, so `tests` imports) | 8 passed. F1 and F2 reproduced; F3 observed; the baseline writer refuses a migrated store |
 | Release N tests plus regression protection | `pytest` on the 6 release N files with `test_coverage_gap`, `test_hop_coverage`, `test_open_keys_idle`, `test_chain`, `test_views`, `test_ddl`, `test_evaluation_modes` and `test_hop.py::test_sql_key_hash_matches_python_hmac` | See §5.1 |
 | Equivalence | `equivalence.py <baseline-worktree> <scratch>` | **EQUIVALENT** (exit 0). Fresh: 50 results and 2 key events. Upgrade: `install --check` gives 1 before apply; `dre run` gives 3 before apply; `install --check` gives 0 after; run 2 compared 33 results and 2 key events. Release N values are all `(key_encoding 1, predecessor_hash NULL)` |
 | Release N tests on the baseline | The 35 new tests against `390b0bd` | 26 fail and 9 pass. The 9 pin preserved behaviour, so the new tests discriminate |

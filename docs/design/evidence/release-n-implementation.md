@@ -139,4 +139,4 @@ A first version of the script had no failing keys, so it compared no key events 
 
 ## 12. CI
 
-To be recorded after the push (handoff history row).
+#108 on `b72b45a` (source `079b6cb`): success (test, e2e, package). The independent review and its correction (F1, `2d27831`) are recorded in `release-n-final-acceptance.md`.
