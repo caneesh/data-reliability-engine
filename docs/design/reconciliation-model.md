@@ -87,14 +87,14 @@ grain:
   history: append_only            # append_only | mutable | snapshot_partitioned (section 8)
 ```
 
-As built (step 1): the grain's key is the dataset's `key`, and its version is the dataset's `record_time`, with ties ordered by a hop's `winner_rule`. Neither is repeated under `grain`. Each edge's contract sits under the dataset's `contracts`, keyed by upstream (spec section 3).
+As built (step 1): the grain's key is the dataset's `key`, and its version is the dataset's `record_time`; every row at the latest record time is kept, and `winner_rule` orders nothing in a check (it is read only by the TIE_RESOLVED_BY_RULE cause). (Corrected 2026-10-22, Gate A remediation A-13: the earlier wording said ties were ordered by `winner_rule`, which the engine never did.) Neither is repeated under `grain`. Each edge's contract sits under the dataset's `contracts`, keyed by upstream (spec section 3).
 
 Each edge declares exactly one **mapping kind**. An edge without a supported kind is DID_NOT_RUN / `unsupported_mapping` (CONFIGURATION) on every run. It is never passed, and `dre validate` lists it as a blind spot.
 
 | Kind | Meaning | Target grain | Lineage | Status |
 | --- | --- | --- | --- | --- |
 | `identity` | One U record ↔ one D record, key mapped and normalised | U key | Key equality after `key_map` and `key_normalise`. A normaliser can collapse distinct keys (`strip_leading_zeros` makes `007` and `07` one key), and nothing checks this today. The ledger detects collisions at run time: distinct raw keys on one side that share a normalised key are `unassessable` | Built (`key_map`); collision detection proposed |
-| `dedup` | Many U versions → the winning version per key in D | U key | Key equality. The winner comes from `version` | Built (`winner_rule`) |
+| `dedup` | Many U versions → the winning version per key in D | U key | Key equality. The winner comes from `version` | Built (key_map; version by record_time) |
 | `merge` | `dedup` into a mutable target, with tombstones | U key | Key equality; `deletion` rule | Partly built: deletions missing |
 | `union_partition` | D's rows partitioned among several U by an attribution predicate | U key within the predicate | Key equality inside the predicate. T1_SOURCE_ATTRIBUTION proves the predicates are disjoint and complete | Proposed |
 | `join_contribution` | D's row is built from one **primary** U, which owns the population, plus **contributor** U's joined by a reference | Primary's key | Primary: key equality. Contributor: reference resolution | Proposed |
@@ -221,6 +221,8 @@ A chain PASS is the only result that may be read as "every expected business rec
 | Evidence cutoff C | The instant the evaluation reads as. NORMAL: the run's start |
 
 These are never compared with each other, except for the deadline against C.
+
+**Gate A remediation (approved 2026-10-22; release N+1, not built).** A dataset's disorder bound compares load time with load time (spec section 6, "Untimed rows"); it never chooses a version.
 
 **Evaluation modes** (P1-03):
 

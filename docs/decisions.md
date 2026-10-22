@@ -505,6 +505,51 @@ The traceability matrix comes before code (exit criterion 6).
    - **Backpressure:** at 80% of the budget the next run defers the full sweep.
    - **Load test:** on a representative cluster, which needs the platform team.
 
+## Gate A remediation: Step 0 specification approval (2026-10-22)
+
+**Approval.** The user, as spec owner, gave the architecture review disposition "APPROVED, subject to the documented implementation verification gates" on 2026-10-22 for the package `docs/reviews/gate-a-step0/final-approval-package/` (committed `21e54f2`, CI #106 green). No individual signatory or organisational authorisation beyond that disposition is implied. This Gate A remediation (the reconciliation examination's F-02, F-05 and F-07) is distinct from the earlier build gate also called Gate A (steps 4 and 5, defaults M1 to M9).
+
+The approved decision-log text (A-15r), as approved:
+
+> **Gate A: key identity, untimed rows, ties (approved 2026-10-22).**
+>
+> Approved by the user: A-1r, A-2, A-3, A-4r, A-5r, A-6 to A-8, A-9r, A-10r, A-11 to A-14 and A-16 of `docs/reviews/gate-a-step0/final-approval-package/01-amendment-approval-matrix.md`.
+>
+> **Previously approved behaviour changed:**
+> - the key string (spec §6, line 641), including:
+>   - CHAR keys compared without pad;
+>   - DECIMAL keys compared by numeric value;
+> - HOP_KEY_CURRENCY's UNASSESSABLE (line 605);
+> - the ledger's "no record time" (line 613);
+> - the ledger's exclusion effectiveness for tied rows (per row).
+>
+> **Unchanged:** `winner_rule` semantics, R06, the value-set tie rule, ADR-01 to ADR-08 (ADR-02's collision rule implemented).
+>
+> **Defaults taken:**
+> - every disorder bound `null`;
+> - a refuted bound stays refuted until a new version;
+> - TIMESTAMP_NTZ and BINARY key parts refused.
+>
+> **Deferred:** NF-1 (KI-20), outside Gate A.
+>
+> **Release split:**
+> - N: A-3, A-9r, A-10r (reading);
+> - N+1: the rest.
+
+(The line numbers are those of `docs/spec.md` at `21e54f2`; the amended text is now in place, marked "Gate A remediation".)
+
+Recorded with the approval:
+
+- **Where the text went.** `docs/spec.md` sections 1, 3, 5, 6, 7, 8 and 9, and `docs/design/reconciliation-model.md` sections 4 and 8 (A-13; the model is frozen, so this entry is its record). Each approved text is marked with its release and "not built"; the text it amends is marked "as built" until that release. A-12 (value-tie wording) and A-13's two wording corrections describe the engine as built today and apply now; they change no behaviour.
+- **Conditions carried to the dependent release** (each a test that must pass before that release merges):
+  - release N+1: the existing STRING-argument hash test passes unchanged (A-2); the soft-delete tie test (A-6); the full-sweep target-count test (A-8); the UTC start test (A-11); the TIMESTAMP rendering test (A-1r); the refutation-persistence tests (A-4r); the end-to-end N+1 to N rollback demonstration;
+  - release N: equivalence against existing stores; the migration, writer, view, reader, rollback-reading, overlapping-run and trace tests of `docs/reviews/gate-a-step0/final-approval-package/04-release-n-compatibility-matrix.md`.
+- **Release boundary.** Release N is compatibility infrastructure only (migration 2, writer tolerance of migration-added columns, `key_encoding = 1`, the final key-event views, encoding-aware readers including keys written by N+1 after a rollback, trace labels). It activates no new key encoding and changes no F-02, F-05 or F-07 semantics. Release N+1 carries every behavioural change. Rollback below N, once migration 2 is applied, is unsupported.
+- **TIMESTAMP_NTZ** key parts stay refused until a canonical form is separately specified and approved (the conditions are in the package's 02, Q-7).
+- **KI-20** (NF-1) is recorded in `docs/known-issues.md` and deferred outside Gate A remediation; it is not in the scope of release N or N+1.
+- **Deployment prerequisites, not specification blockers:** O-1 (a non-NULL disorder bound needs dataset-owner evidence and approval; the default stays NULL), O-2 (production key-column types inventoried against the supported types), O-3 (acknowledgement that every key hash changes once when N+1 activates encoding 2). None has been given.
+- **Specification approval is not implementation authorisation.** Neither release N nor release N+1 is authorised; each needs its own explicit authorisation, and deployment needs separate approval. Nothing is built.
+
 ## Final engineering acceptance: KI-18 ratified, KI-19 corrected (2026-10-21)
 
 - **KI-18, ratified by the user (2026-10-21).** In a store older than its evidence retention, where a hop's first evaluation cannot be told from coverage that retention dropped, the result is qualified `coverage_gap` until a covering full sweep establishes coverage. A store younger than the retention evaluates a hop's first window without the qualification. No change; verified by `tests/checks/test_coverage_gap.py` and `tests/notify/test_digest.py::test_a_coverage_gap_is_reported_in_the_digest_and_is_never_all_clear`.
