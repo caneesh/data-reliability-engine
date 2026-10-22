@@ -505,6 +505,30 @@ The traceability matrix comes before code (exit criterion 6).
    - **Backpressure:** at 80% of the budget the next run defers the full sweep.
    - **Load test:** on a representative cluster, which needs the platform team.
 
+## Gate A remediation: release N built (2026-10-22)
+
+Authorised by the user on 2026-10-22 ("Release N compatibility implementation is authorized, conditional on successful baseline CI verification"; CI #107 on `390b0bd` was green). Release N+1, merging, shared-database migration and deployment are not authorised. Evidence: `docs/design/evidence/release-n-implementation.md`.
+
+**Built, as the approved text says** (spec sections 5, 6, 7 and 8, marked "release N, built"):
+- migration 2 (`dq_key_event.key_encoding INT`, `predecessor_hash STRING`), real columns in `store/ddl.sql` and the spec's DDL;
+- the writer fills a missing column with NULL only when a migration added it (migration 1's column too); any other missing or extra column still raises;
+- every key event written with `key_encoding = 1`, `predecessor_hash` NULL;
+- the final `v_open_keys` (encoding, lineage-aware first flagged date, `category`) and the new `v_key_lineage`;
+- encoding-aware readers in HOP\_KEY\_CURRENCY and the CHAIN\_COMPLETENESS carry (this engine's encoding only, REKEYED as no event); identities of another encoding found open make the hop (or the chain's first edge) judged in full and are closed with REKEYED "key encoding 1 (rollback)" in their own encoding;
+- trace labels (TR-1 below).
+
+No key is computed in encoding 2; F-02, F-05 and F-07 behaviour is unchanged.
+
+**Implementation decisions, within the approved text (to ratify with the release review):**
+- **ID-1, an identity is (key encoding, hash).** Both views and both readers partition by encoding and hash, so an encoding-1 hash and an encoding-2 hash with the same text are never one identity (the instruction that readers never treat the two encodings' hashes as interchangeable). A test covers the same hash text in both encodings.
+- **ID-2, an unknown encoding is handled like another engine's** (fail conservatively): never read as this engine's; its open identities make the hop judged in full, and are closed with REKEYED in their own encoding.
+- **ID-3, only the readers of open identities react.** HOP\_KEY\_CURRENCY and the chain carry read open identities; HOP\_VALUE\_AGREEMENT does not (`use_open` is off there) and HOP\_FILE\_COMPLETENESS judges files, so neither queries for other encodings.
+- **ID-4, "judged as on the full sweep" changes the population only.** The hop's key judgement (or the chain's first edge) takes every key; the check context's `full_sweep` is unchanged, so the coverage-gap rule (CA-01: a full sweep resolves a gap) is not triggered by a rollback. The result's `observed` (hop) or scope `other_key_encoding_open` (chain) says why.
+- **INC-1, the `rollback` lineage kind is deferred** (the user's disposition): `v_key_lineage` produces `continuation` and `ambiguous` only, and no event producer was added for it.
+- **TR-1, trace labels appear only when needed (to ratify).** The approved text labels each cause line by its encoding. Labelling every line would change every trace's output, which R05 (`tests/replay/test_r04_to_r07_hops.py`) and `tests/test_trace.py` assert exactly, against release N's equivalence condition. As built: when the hop holds key events of another encoding, the cause line ends "[key encoding 1]" and one line per other encoding says those keys are present but not searchable; otherwise the output is unchanged. If labels on every line are wanted, R05 must be restated in a later change.
+
+**Not changed:** ADR-01 to ADR-08; KI-18, KI-19, CA-01 and CA-02 semantics (the open-key read keeps its bound; the encoding filter only narrows it).
+
 ## Gate A remediation: Step 0 specification approval (2026-10-22)
 
 **Approval.** The user, as spec owner, gave the architecture review disposition "APPROVED, subject to the documented implementation verification gates" on 2026-10-22 for the package `docs/reviews/gate-a-step0/final-approval-package/` (committed `21e54f2`, CI #106 green). No individual signatory or organisational authorisation beyond that disposition is implied. This Gate A remediation (the reconciliation examination's F-02, F-05 and F-07) is distinct from the earlier build gate also called Gate A (steps 4 and 5, defaults M1 to M9).
